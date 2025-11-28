@@ -98,14 +98,23 @@ struct FileBrowserView: View {
                 dropOverlay
             }
         }
-        // FIX 2: Use the standard .onDrop with async handling
+        // FIX 2: Use the standard .onDrop with proper URL extraction
         .onDrop(of: [.fileURL], isTargeted: $isDraggingOver) { providers in
             Task {
                 var urls: [URL] = []
                 for provider in providers {
-                    if let item = try? await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier),
-                       let url = item as? URL {
-                        urls.append(url)
+                    do {
+                        // Try loading as Data first (most common case)
+                        if let data = try await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) as? Data,
+                           let url = URL(dataRepresentation: data, relativeTo: nil) {
+                            urls.append(url)
+                        }
+                        // Fallback: try loading as URL directly
+                        else if let url = try await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) as? URL {
+                            urls.append(url)
+                        }
+                    } catch {
+                        print("⚠️ Failed to load dropped item: \(error)")
                     }
                 }
                 

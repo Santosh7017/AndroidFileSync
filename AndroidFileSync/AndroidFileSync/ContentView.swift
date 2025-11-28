@@ -225,7 +225,7 @@ struct ContentView: View {
                         onNavigate: navigateTo,
                         onGoBack: navigateBack,
                         onDownload: handleDownload,
-                        onUpload: { urls in /* Your upload handling logic */ }
+                        onUpload: handleUpload
                     )
                 }
             } else {
@@ -300,6 +300,33 @@ struct ContentView: View {
                     print("❌ Download failed: \(error)")
                 }
             }
+        }
+    }
+    
+    private func handleUpload(urls: [URL]) {
+        let manager = self.uploadManager
+        let path = self.currentPath
+        
+        Task {
+            var filesToUpload: [(localPath: String, fileName: String, fileSize: UInt64)] = []
+            
+            for url in urls {
+                guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                      let size = attrs[.size] as? UInt64 else { 
+                    print("⚠️ Could not get file size for: \(url.lastPathComponent)")
+                    continue 
+                }
+                filesToUpload.append((url.path, url.lastPathComponent, size))
+            }
+            
+            await manager.uploadMultipleFiles(
+                files: filesToUpload,
+                toDirectory: path
+            )
+            
+            // Refresh file list after upload
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            await loadFiles()
         }
     }
 
