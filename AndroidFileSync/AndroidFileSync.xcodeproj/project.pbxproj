@@ -1,0 +1,633 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		453BAF1E2EC66C1D008AABAB /* UniformTypeIdentifiers.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 453BAF1D2EC66C1D008AABAB /* UniformTypeIdentifiers.framework */; };
+		453BAF2A2EC66C1D008AABAB /* AndroidFileProvider.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 453BAF1B2EC66C1C008AABAB /* AndroidFileProvider.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		457617932ECF8D260068FF35 /* libmtp.9.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 457617912ECF8D260068FF35 /* libmtp.9.dylib */; };
+		457617942ECF8D260068FF35 /* libusb-1.0.0.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 457617922ECF8D260068FF35 /* libusb-1.0.0.dylib */; };
+		457617962ECF8D670068FF35 /* libmtp.9.dylib in CopyFiles */ = {isa = PBXBuildFile; fileRef = 457617912ECF8D260068FF35 /* libmtp.9.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		457617972ECF8D670068FF35 /* libusb-1.0.0.dylib in CopyFiles */ = {isa = PBXBuildFile; fileRef = 457617922ECF8D260068FF35 /* libusb-1.0.0.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		453BAF282EC66C1D008AABAB /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 453BAF012EC66BC4008AABAB /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 453BAF1A2EC66C1C008AABAB;
+			remoteInfo = AndroidFileProvider;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		453BAF2F2EC66C1D008AABAB /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				453BAF2A2EC66C1D008AABAB /* AndroidFileProvider.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		457617952ECF8D3C0068FF35 /* CopyFiles */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				457617962ECF8D670068FF35 /* libmtp.9.dylib in CopyFiles */,
+				457617972ECF8D670068FF35 /* libusb-1.0.0.dylib in CopyFiles */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		453BAF092EC66BC4008AABAB /* AndroidFileSync.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AndroidFileSync.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		453BAF1B2EC66C1C008AABAB /* AndroidFileProvider.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = AndroidFileProvider.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		453BAF1D2EC66C1D008AABAB /* UniformTypeIdentifiers.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UniformTypeIdentifiers.framework; path = System/Library/Frameworks/UniformTypeIdentifiers.framework; sourceTree = SDKROOT; };
+		457617912ECF8D260068FF35 /* libmtp.9.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libmtp.9.dylib; path = ../../../../../opt/homebrew/Cellar/libmtp/1.1.22/lib/libmtp.9.dylib; sourceTree = "<group>"; };
+		457617922ECF8D260068FF35 /* libusb-1.0.0.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = "libusb-1.0.0.dylib"; path = "../../../../../opt/homebrew/Cellar/libusb/1.0.29/lib/libusb-1.0.0.dylib"; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		453BAF2B2EC66C1D008AABAB /* Exceptions for "AndroidFileProvider" folder in "AndroidFileProvider" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 453BAF1A2EC66C1C008AABAB /* AndroidFileProvider */;
+		};
+		4581BF0A2ED0772200D2F9EC /* Exceptions for "AndroidFileSync" folder in "AndroidFileSync" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				AndroidFileSyncApp.swift,
+				Assets.xcassets,
+				ContentView.swift,
+				Managers/ADBManager.swift,
+				Managers/DeviceManager.swift,
+				Managers/DownloadManager.swift,
+				Managers/MTPDevice.swift,
+				Managers/UploadManager.swift,
+				Models/Models.swift,
+				Utilities/DropCoordinator.swift,
+				Utilities/FileDropDelegate.swift,
+				Utilities/FileNameHelper.swift,
+				Utilities/Logger.swift,
+				Utilities/QuickAccessItem.swift,
+				Utilities/Settings.swift,
+				Utilities/Shell.swift,
+				Utilities/SidebarView.swift,
+				Utilities/ThrottledPublisher.swift,
+				Views/EmptyStateView.swift,
+				Views/FileBrowserView.swift,
+				Views/FileRowView.swift,
+				Views/HeaderView.swift,
+			);
+			target = 453BAF082EC66BC4008AABAB /* AndroidFileSync */;
+		};
+		4581BF0B2ED0772200D2F9EC /* Exceptions for "AndroidFileSync" folder in "AndroidFileProvider" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				AndroidFileSyncApp.swift,
+				Assets.xcassets,
+				ContentView.swift,
+				Managers/ADBManager.swift,
+				Managers/DeviceManager.swift,
+				Managers/DownloadManager.swift,
+				Managers/MTPDevice.swift,
+				Managers/UploadManager.swift,
+				Models/Models.swift,
+				Utilities/DropCoordinator.swift,
+				Utilities/FileDropDelegate.swift,
+				Utilities/FileNameHelper.swift,
+				Utilities/Logger.swift,
+				Utilities/QuickAccessItem.swift,
+				Utilities/Settings.swift,
+				Utilities/Shell.swift,
+				Utilities/SidebarView.swift,
+				Utilities/ThrottledPublisher.swift,
+				Views/EmptyStateView.swift,
+				Views/FileBrowserView.swift,
+				Views/FileRowView.swift,
+				Views/HeaderView.swift,
+			);
+			target = 453BAF1A2EC66C1C008AABAB /* AndroidFileProvider */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		453BAF1F2EC66C1D008AABAB /* AndroidFileProvider */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				453BAF2B2EC66C1D008AABAB /* Exceptions for "AndroidFileProvider" folder in "AndroidFileProvider" target */,
+			);
+			path = AndroidFileProvider;
+			sourceTree = "<group>";
+		};
+		4581BF032ED0772200D2F9EC /* AndroidFileSync */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				4581BF0A2ED0772200D2F9EC /* Exceptions for "AndroidFileSync" folder in "AndroidFileSync" target */,
+				4581BF0B2ED0772200D2F9EC /* Exceptions for "AndroidFileSync" folder in "AndroidFileProvider" target */,
+			);
+			path = AndroidFileSync;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		453BAF062EC66BC4008AABAB /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				457617932ECF8D260068FF35 /* libmtp.9.dylib in Frameworks */,
+				457617942ECF8D260068FF35 /* libusb-1.0.0.dylib in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		453BAF182EC66C1C008AABAB /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				453BAF1E2EC66C1D008AABAB /* UniformTypeIdentifiers.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		453BAF002EC66BC4008AABAB = {
+			isa = PBXGroup;
+			children = (
+				4581BF032ED0772200D2F9EC /* AndroidFileSync */,
+				453BAF1F2EC66C1D008AABAB /* AndroidFileProvider */,
+				453BAF1C2EC66C1D008AABAB /* Frameworks */,
+				453BAF0A2EC66BC4008AABAB /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		453BAF0A2EC66BC4008AABAB /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				453BAF092EC66BC4008AABAB /* AndroidFileSync.app */,
+				453BAF1B2EC66C1C008AABAB /* AndroidFileProvider.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		453BAF1C2EC66C1D008AABAB /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				457617912ECF8D260068FF35 /* libmtp.9.dylib */,
+				457617922ECF8D260068FF35 /* libusb-1.0.0.dylib */,
+				453BAF1D2EC66C1D008AABAB /* UniformTypeIdentifiers.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		453BAF082EC66BC4008AABAB /* AndroidFileSync */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 453BAF142EC66BC5008AABAB /* Build configuration list for PBXNativeTarget "AndroidFileSync" */;
+			buildPhases = (
+				453BAF052EC66BC4008AABAB /* Sources */,
+				453BAF062EC66BC4008AABAB /* Frameworks */,
+				453BAF072EC66BC4008AABAB /* Resources */,
+				453BAF2F2EC66C1D008AABAB /* Embed Foundation Extensions */,
+				457617952ECF8D3C0068FF35 /* CopyFiles */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				453BAF292EC66C1D008AABAB /* PBXTargetDependency */,
+			);
+			name = AndroidFileSync;
+			packageProductDependencies = (
+			);
+			productName = AndroidFileSync;
+			productReference = 453BAF092EC66BC4008AABAB /* AndroidFileSync.app */;
+			productType = "com.apple.product-type.application";
+		};
+		453BAF1A2EC66C1C008AABAB /* AndroidFileProvider */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 453BAF2C2EC66C1D008AABAB /* Build configuration list for PBXNativeTarget "AndroidFileProvider" */;
+			buildPhases = (
+				453BAF172EC66C1C008AABAB /* Sources */,
+				453BAF182EC66C1C008AABAB /* Frameworks */,
+				453BAF192EC66C1C008AABAB /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				453BAF1F2EC66C1D008AABAB /* AndroidFileProvider */,
+				4581BF032ED0772200D2F9EC /* AndroidFileSync */,
+			);
+			name = AndroidFileProvider;
+			packageProductDependencies = (
+			);
+			productName = AndroidFileProvider;
+			productReference = 453BAF1B2EC66C1C008AABAB /* AndroidFileProvider.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		453BAF012EC66BC4008AABAB /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2610;
+				LastUpgradeCheck = 2610;
+				TargetAttributes = {
+					453BAF082EC66BC4008AABAB = {
+						CreatedOnToolsVersion = 26.1;
+					};
+					453BAF1A2EC66C1C008AABAB = {
+						CreatedOnToolsVersion = 26.1;
+					};
+				};
+			};
+			buildConfigurationList = 453BAF042EC66BC4008AABAB /* Build configuration list for PBXProject "AndroidFileSync" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 453BAF002EC66BC4008AABAB;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 453BAF0A2EC66BC4008AABAB /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				453BAF082EC66BC4008AABAB /* AndroidFileSync */,
+				453BAF1A2EC66C1C008AABAB /* AndroidFileProvider */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		453BAF072EC66BC4008AABAB /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		453BAF192EC66C1C008AABAB /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		453BAF052EC66BC4008AABAB /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		453BAF172EC66C1C008AABAB /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		453BAF292EC66C1D008AABAB /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 453BAF1A2EC66C1C008AABAB /* AndroidFileProvider */;
+			targetProxy = 453BAF282EC66C1D008AABAB /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		453BAF122EC66BC5008AABAB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 34TS8NHVHD;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		453BAF132EC66BC5008AABAB /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 34TS8NHVHD;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		453BAF152EC66BC5008AABAB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				AUTOMATION_APPLE_EVENTS = NO;
+				CODE_SIGN_ENTITLEMENTS = AndroidFileSync/AndroidFileSync.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 34TS8NHVHD;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = /opt/homebrew/include;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					/opt/homebrew/lib,
+					/opt/homebrew/Cellar/libmtp/1.1.22/lib,
+					/opt/homebrew/Cellar/libusb/1.0.29/lib,
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
+				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
+				RUNTIME_EXCEPTION_ALLOW_UNSIGNED_EXECUTABLE_MEMORY = NO;
+				RUNTIME_EXCEPTION_DEBUGGING_TOOL = NO;
+				RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION = NO;
+				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "AndroidFileSync/AndroidFileSync-Bridging-Header.h";
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		453BAF162EC66BC5008AABAB /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				AUTOMATION_APPLE_EVENTS = NO;
+				CODE_SIGN_ENTITLEMENTS = AndroidFileSync/AndroidFileSync.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 34TS8NHVHD;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = /opt/homebrew/include;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					/opt/homebrew/lib,
+					/opt/homebrew/Cellar/libmtp/1.1.22/lib,
+					/opt/homebrew/Cellar/libusb/1.0.29/lib,
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				REGISTER_APP_GROUPS = YES;
+				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
+				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
+				RUNTIME_EXCEPTION_ALLOW_UNSIGNED_EXECUTABLE_MEMORY = NO;
+				RUNTIME_EXCEPTION_DEBUGGING_TOOL = NO;
+				RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION = NO;
+				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "AndroidFileSync/AndroidFileSync-Bridging-Header.h";
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		453BAF2D2EC66C1D008AABAB /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = AndroidFileProvider/AndroidFileProvider.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 34TS8NHVHD;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = AndroidFileProvider/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = AndroidFileProvider;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync.AndroidFileProvider;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		453BAF2E2EC66C1D008AABAB /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = AndroidFileProvider/AndroidFileProvider.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 34TS8NHVHD;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = AndroidFileProvider/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = AndroidFileProvider;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync.AndroidFileProvider;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		453BAF042EC66BC4008AABAB /* Build configuration list for PBXProject "AndroidFileSync" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				453BAF122EC66BC5008AABAB /* Debug */,
+				453BAF132EC66BC5008AABAB /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		453BAF142EC66BC5008AABAB /* Build configuration list for PBXNativeTarget "AndroidFileSync" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				453BAF152EC66BC5008AABAB /* Debug */,
+				453BAF162EC66BC5008AABAB /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		453BAF2C2EC66C1D008AABAB /* Build configuration list for PBXNativeTarget "AndroidFileProvider" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				453BAF2D2EC66C1D008AABAB /* Debug */,
+				453BAF2E2EC66C1D008AABAB /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 453BAF012EC66BC4008AABAB /* Project object */;
+}

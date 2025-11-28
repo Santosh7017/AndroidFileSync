@@ -1,0 +1,88 @@
+//
+//  Models.swift
+//  AndroidFileSync
+//
+//  Shared models and protocols
+//
+
+import Foundation
+import AppKit 
+
+// MARK: - Transfer Progress Protocol
+
+protocol TransferProgressProtocol: Identifiable {
+    var fileName: String { get }
+    var bytesTransferred: UInt64 { get }
+    var totalBytes: UInt64 { get }
+    var progress: Double { get }
+    var progressPercentage: Int { get }
+    var speedText: String { get }
+    var isComplete: Bool { get }
+    var error: String? { get }
+}
+
+// MARK: - Unified File Model
+//
+
+struct UnifiedFile: Identifiable {
+    let id = UUID()
+    let name: String
+    let path: String
+    let isDirectory: Bool
+    let size: UInt64
+    let modificationDate: Date?
+    
+    init(from adbFile: ADBFile) {
+        self.name = adbFile.name
+        self.path = adbFile.path
+        self.isDirectory = adbFile.isDirectory
+        self.size = adbFile.size
+        self.modificationDate = nil
+    }
+    
+    init(from mtpFile: MTPFile) {
+        self.name = mtpFile.name
+        self.path = "/sdcard/\(mtpFile.name)"
+        self.isDirectory = mtpFile.isFolder
+        self.size = mtpFile.size
+        self.modificationDate = mtpFile.modificationDate
+    }
+}
+
+
+// MARK: - Helper Functions
+func formatBytes(_ bytes: UInt64) -> String {
+    let formatter = ByteCountFormatter()
+    formatter.allowedUnits = [.useAll]
+    formatter.countStyle = .file
+    return formatter.string(fromByteCount: Int64(bytes))
+}
+extension NSSavePanel {
+    // This single extension will work for both NSSavePanel and its subclass NSOpenPanel
+    func configureForPerformance() {
+        self.showsHiddenFiles = false
+        self.treatsFilePackagesAsDirectories = false
+        self.accessoryView = nil // Disabling previews is a major performance win
+        
+        if let openPanel = self as? NSOpenPanel {
+            // Settings specific to opening files
+            openPanel.canChooseDirectories = false
+            openPanel.canChooseFiles = true
+            openPanel.allowsMultipleSelection = true
+            openPanel.canCreateDirectories = false
+        } else {
+            // Settings specific to saving files
+            self.canCreateDirectories = true
+        }
+    }
+}
+
+struct ADBFile {
+    let name: String
+    let path: String
+    let isDirectory: Bool
+    let size: UInt64
+    // Note: 'ls -la' provides a date string that is complex to parse reliably.
+    // We will omit it from this model for simplicity and rely on the UnifiedFile's optional date.
+}
+
