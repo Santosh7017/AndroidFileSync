@@ -446,46 +446,153 @@ class ADBManager {
 
     static func listFiles(path: String) async throws -> [ADBFile] {
         let adbPath = getADBPath()
-        let command = "ls -la '\(path)'"
-        let (code, output, error) = Shell.run(adbPath, args: ["shell", command])
-        guard code == 0 else {
+        
+        print("📂 ADB: Listing files in \(path)")
+        let startTime = Date()
+        
+        // FAST APPROACH: Use ls -1 for names only (very fast even for 1000+ files)
+        // Then use a single stat command to get file types
+        let listCommand = "ls -1a '\(path)'"
+        
+        let (code, output, error) = await Shell.runAsyncWithTimeout(
+            adbPath,
+            args: ["shell", listCommand],
+            timeoutSeconds: 30.0
+        )
+        
+        let elapsed = Date().timeIntervalSince(startTime)
+        print("📂 ADB: ls -1 completed in \(String(format: "%.1f", elapsed))s, code=\(code), output=\(output.count) chars")
+        
+        // Handle errors
+        if code != 0 {
+            print("❌ ADB Error: \(error)")
             throw NSError(
                 domain: "ADBError",
                 code: Int(code),
                 userInfo: [NSLocalizedDescriptionKey: error.isEmpty ? "Failed to list files" : error]
             )
         }
-
-        var files: [ADBFile] = []
-        let lines = output.split(separator: "\n")
-        for line in lines {
-            let lineStr = String(line)
-            if lineStr.starts(with: "total") ||
-               lineStr.hasSuffix(" .") ||
-               lineStr.hasSuffix(" ..") {
-                continue
-            }
-            let parts = lineStr
-                .components(separatedBy: .whitespaces)
-                .filter { !$0.isEmpty }
-            guard parts.count >= 8 else { continue }
-
-            let perms = parts[0]
-            let isDir = perms.first == "d"
-            let size = UInt64(parts[4]) ?? 0
-
-            let nameStartIndex = 7
-            if parts.count > nameStartIndex {
-                let name = parts[nameStartIndex...].joined(separator: " ")
-                let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
-                files.append(ADBFile(
-                    name: name,
-                    path: fullPath,
-                    isDirectory: isDir,
-                    size: size
-                ))
-            }
+        
+        // Parse file names
+        var fileNames: [String] = []
+        output.enumerateLines { name, _ in
+            // Skip . and .. and empty lines
+            guard !name.isEmpty && name != "." && name != ".." else { return }
+            fileNames.append(name)
         }
+        
+        print("📂 ADB: Found \(fileNames.count) entries")
+        
+        if fileNames.isEmpty {
+            return []
+        }
+        
+        // For small directories, use ls -la to get full details
+        if fileNames.count <= 100 {
+            return try await listFilesWithDetails(path: path, adbPath: adbPath)
+        }
+        
+        // For large directories, get file types using stat command
+        // Build a command that checks each file's type
+        var files: [ADBFile] = []
+        files.reserveCapacity(fileNames.count)
+        
+        // Use find to get file types efficiently in a single command
+        let findCommand = "find '\(path)' -maxdepth 1 -mindepth 1 \\( -type d -printf 'd %f\\n' -o -type f -printf 'f %s %f\\n' -o -printf '? %f\\n' \\) 2>/dev/null"
+        
+        let (findCode, findOutput, _) = await Shell.runAsyncWithTimeout(
+            adbPath,
+            args: ["shell", findCommand],
+            timeoutSeconds: 60.0
+        )
+        
+        if findCode == 0 && !findOutput.isEmpty {
+            // Parse find output: "d dirname" or "f size filename"
+            findOutput.enumerateLines { line, _ in
+                guard line.count >= 3 else { return }
+                
+                let typeChar = line.first
+                let rest = String(line.dropFirst(2))
+                
+                if typeChar == "d" {
+                    // Directory: "d name"
+                    let name = rest
+                    guard !name.isEmpty && name != "." && name != ".." else { return }
+                    let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
+                    files.append(ADBFile(name: name, path: fullPath, isDirectory: true, size: 0))
+                } else if typeChar == "f" {
+                    // File: "f size name"
+                    let parts = rest.split(separator: " ", maxSplits: 1)
+                    if parts.count >= 2 {
+                        let size = UInt64(parts[0]) ?? 0
+                        let name = String(parts[1])
+                        guard !name.isEmpty else { return }
+                        let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
+                        files.append(ADBFile(name: name, path: fullPath, isDirectory: false, size: size))
+                    }
+                } else {
+                    // Unknown type, treat as file
+                    let name = rest
+                    guard !name.isEmpty && name != "." && name != ".." else { return }
+                    let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
+                    files.append(ADBFile(name: name, path: fullPath, isDirectory: false, size: 0))
+                }
+            }
+            print("📂 ADB: Parsed \(files.count) files via find")
+            return files
+        }
+        
+        // Final fallback: just use file names without sizes
+        print("📂 ADB: Using name-only fallback for \(fileNames.count) files")
+        for name in fileNames {
+            let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
+            // Guess directory by common patterns or lack of extension
+            let isDir = !name.contains(".")
+            files.append(ADBFile(name: name, path: fullPath, isDirectory: isDir, size: 0))
+        }
+        
+        print("📂 ADB: Returned \(files.count) files")
+        return files
+    }
+    
+    // Helper for small directories - uses ls -la for full details
+    private static func listFilesWithDetails(path: String, adbPath: String) async throws -> [ADBFile] {
+        let command = "ls -la '\(path)'"
+        
+        let (code, output, error) = await Shell.runAsyncWithTimeout(
+            adbPath,
+            args: ["shell", command],
+            timeoutSeconds: 60.0
+        )
+        
+        if code != 0 {
+            throw NSError(
+                domain: "ADBError",
+                code: Int(code),
+                userInfo: [NSLocalizedDescriptionKey: error.isEmpty ? "Failed to list files" : error]
+            )
+        }
+        
+        var files: [ADBFile] = []
+        let lines = output.components(separatedBy: "\n")
+        
+        for lineStr in lines {
+            if lineStr.isEmpty || lineStr.hasPrefix("total") { continue }
+            
+            let parts = lineStr.split(whereSeparator: { $0.isWhitespace })
+            guard parts.count >= 8 else { continue }
+            
+            let perms = String(parts[0])
+            let isDir = perms.hasPrefix("d")
+            let size = UInt64(parts[4]) ?? 0
+            let name = parts[7...].joined(separator: " ")
+            
+            guard !name.isEmpty && name != "." && name != ".." else { continue }
+            
+            let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
+            files.append(ADBFile(name: name, path: fullPath, isDirectory: isDir, size: size))
+        }
+        
         return files
     }
 
