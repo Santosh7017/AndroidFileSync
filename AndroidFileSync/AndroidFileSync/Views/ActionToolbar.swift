@@ -203,20 +203,10 @@ struct ActionToolbar: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
-        // Keyboard shortcut to focus search
-        .onAppear {
-            NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                if event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "f" {
-                    isSearchFocused = true
-                    return nil // Consume the event
-                }
-                // ESC to clear search
-                if event.keyCode == 53 && isSearchActive {
-                    searchQuery = ""
-                    isSearchFocused = false
-                    return nil
-                }
-                return event
+        // Handle Escape key to clear search
+        .onExitCommand {
+            if isSearchActive {
+                searchQuery = ""
             }
         }
         // New Folder dialog
@@ -226,13 +216,19 @@ struct ActionToolbar: View {
                 newFolderName = ""
             }
             Button("Create") {
-                if !newFolderName.isEmpty {
+                let folderName = newFolderName // Capture value before clearing
+                newFolderName = ""
+                if !folderName.isEmpty {
                     Task {
-                        try? await fileActionManager.createFolder(at: currentPath, name: newFolderName)
-                        onRefresh()
+                        do {
+                            try await fileActionManager.createFolder(at: currentPath, name: folderName)
+                            print("✅ Folder created: \(folderName)")
+                            onRefresh()
+                        } catch {
+                            print("❌ Failed to create folder: \(error.localizedDescription)")
+                        }
                     }
                 }
-                newFolderName = ""
             }
         } message: {
             Text("Enter a name for the new folder")
@@ -244,13 +240,19 @@ struct ActionToolbar: View {
                 newFileName = ""
             }
             Button("Create") {
-                if !newFileName.isEmpty {
+                let fileName = newFileName // Capture value before clearing
+                newFileName = ""
+                if !fileName.isEmpty {
                     Task {
-                        try? await fileActionManager.createFile(at: currentPath, name: newFileName)
-                        onRefresh()
+                        do {
+                            try await fileActionManager.createFile(at: currentPath, name: fileName)
+                            print("✅ File created: \(fileName)")
+                            onRefresh()
+                        } catch {
+                            print("❌ Failed to create file: \(error.localizedDescription)")
+                        }
                     }
                 }
-                newFileName = ""
             }
         } message: {
             Text("Enter a name for the new file")
