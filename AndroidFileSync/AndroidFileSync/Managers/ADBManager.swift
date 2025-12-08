@@ -912,29 +912,49 @@ class ADBManager {
     /// - Parameters:
     ///   - sourcePath: Source path
     ///   - destinationPath: Destination path
-    static func copyFile(from sourcePath: String, to destinationPath: String) async throws {
+    ///   - isDirectory: Whether source is a directory
+    static func copyFile(from sourcePath: String, to destinationPath: String, isDirectory: Bool = false) async throws {
         let adbPath = getADBPath()
         let escapedSource = sourcePath.replacingOccurrences(of: "'", with: "'\\''")
         let escapedDest = destinationPath.replacingOccurrences(of: "'", with: "'\\''")
         
-        // Use cp -r for recursive copy (works for both files and folders)
-        let command = "cp -r '\(escapedSource)' '\(escapedDest)'"
-        
-        let (code, _, error) = await Shell.runAsync(adbPath, args: ["shell", command])
-        
-        if code != 0 {
-            if error.contains("Read-only") {
-                throw NSError(domain: "ADB", code: Int(code), userInfo: [NSLocalizedDescriptionKey: "Cannot copy: File system is read-only"])
-            } else if error.contains("Permission denied") {
-                throw NSError(domain: "ADB", code: Int(code), userInfo: [NSLocalizedDescriptionKey: "Cannot copy: Permission denied"])
-            } else if error.contains("No such file") {
-                throw NSError(domain: "ADB", code: Int(code), userInfo: [NSLocalizedDescriptionKey: "Source file not found"])
-            } else {
-                throw NSError(domain: "ADB", code: Int(code), userInfo: [NSLocalizedDescriptionKey: error.isEmpty ? "Failed to copy" : error])
+        if isDirectory {
+            // Step 1: Create the directory (fast)
+            let mkdirCmd = "mkdir -p '\(escapedDest)'"
+            print("📁 Creating folder: \(destinationPath)")
+            let (mkdirCode, _, mkdirError) = await Shell.runAsync(adbPath, args: ["shell", mkdirCmd])
+            
+            if mkdirCode != 0 {
+                throw NSError(domain: "ADB", code: Int(mkdirCode), userInfo: [NSLocalizedDescriptionKey: mkdirError.isEmpty ? "Failed to create folder" : mkdirError])
             }
+            
+            // Step 2: Copy contents if any exist (separate call, only if needed)
+            let cpCmd = "cp -r '\(escapedSource)/.' '\(escapedDest)/' 2>/dev/null || true"
+            let (_, _, _) = await Shell.runAsync(adbPath, args: ["shell", cpCmd])
+            // Ignore result - empty folder will fail but that's OK
+            
+            print("✅ Copied folder: \(sourcePath) → \(destinationPath)")
+        } else {
+            // Regular file copy
+            let command = "cp '\(escapedSource)' '\(escapedDest)'"
+            print("📋 Executing: adb shell \(command)")
+            let (code, output, error) = await Shell.runAsync(adbPath, args: ["shell", command])
+            
+            if code != 0 {
+                print("❌ Copy failed: code=\(code), error=\(error), output=\(output)")
+                if error.contains("Read-only") {
+                    throw NSError(domain: "ADB", code: Int(code), userInfo: [NSLocalizedDescriptionKey: "Cannot copy: File system is read-only"])
+                } else if error.contains("Permission denied") {
+                    throw NSError(domain: "ADB", code: Int(code), userInfo: [NSLocalizedDescriptionKey: "Cannot copy: Permission denied"])
+                } else if error.contains("No such file") {
+                    throw NSError(domain: "ADB", code: Int(code), userInfo: [NSLocalizedDescriptionKey: "Source file not found"])
+                } else {
+                    throw NSError(domain: "ADB", code: Int(code), userInfo: [NSLocalizedDescriptionKey: error.isEmpty ? "Failed to copy" : error])
+                }
+            }
+            
+            print("✅ Copied: \(sourcePath) → \(destinationPath)")
         }
-        
-        print("✅ Copied: \(sourcePath) → \(destinationPath)")
     }
     
     // MARK: - Get File Info

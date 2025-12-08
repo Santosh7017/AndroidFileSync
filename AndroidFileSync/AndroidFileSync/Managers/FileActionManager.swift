@@ -345,6 +345,7 @@ class FileActionManager: ObservableObject {
         
         let itemCount = clipboard.count
         let operation = clipboardOperation
+        let itemsToPaste = clipboard // Capture before any modifications
         
         await MainActor.run {
             isPerformingAction = true
@@ -353,24 +354,39 @@ class FileActionManager: ObservableObject {
         }
         
         var successCount = 0
-        var failedItems: [String] = []
+        var failedItems: [(name: String, error: String)] = []
         
-        for file in clipboard {
+        for file in itemsToPaste {
             let destinationFile = destinationPath.hasSuffix("/") 
                 ? "\(destinationPath)\(file.name)" 
                 : "\(destinationPath)/\(file.name)"
             
+            // Check if trying to paste into itself (for directories)
+            if file.isDirectory && destinationFile.hasPrefix(file.path) {
+                failedItems.append((file.name, "Cannot copy folder into itself"))
+                continue
+            }
+            
+            // Check if source and destination are the same
+            if file.path == destinationFile {
+                failedItems.append((file.name, "Source and destination are the same"))
+                continue
+            }
+            
             do {
                 if operation == .cut {
                     // Move operation
+                    print("📦 Moving: \(file.path) → \(destinationFile)")
                     try await ADBManager.renameFile(oldPath: file.path, newPath: destinationFile)
                 } else {
-                    // Copy operation
-                    try await ADBManager.copyFile(from: file.path, to: destinationFile)
+                    // Copy operation - pass isDirectory flag
+                    print("📋 Copying: \(file.path) → \(destinationFile) (isDir: \(file.isDirectory))")
+                    try await ADBManager.copyFile(from: file.path, to: destinationFile, isDirectory: file.isDirectory)
                 }
                 successCount += 1
             } catch {
-                failedItems.append(file.name)
+                print("❌ Failed to paste \(file.name): \(error.localizedDescription)")
+                failedItems.append((file.name, error.localizedDescription))
             }
         }
         
@@ -379,13 +395,14 @@ class FileActionManager: ObservableObject {
             currentAction = ""
             
             // Clear clipboard if it was a cut operation
-            if operation == .cut {
+            if operation == .cut && successCount > 0 {
                 clipboard.removeAll()
                 clipboardOperation = .none
             }
             
             if !failedItems.isEmpty {
-                lastError = "Failed to paste: \(failedItems.joined(separator: ", "))"
+                let failureMessages = failedItems.map { "\($0.name): \($0.error)" }
+                lastError = "Failed to paste:\n" + failureMessages.joined(separator: "\n")
             }
         }
         

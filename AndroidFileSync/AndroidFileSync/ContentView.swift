@@ -275,7 +275,7 @@ struct ContentView: View {
                         ActionToolbar(
                             currentPath: currentPath,
                             fileActionManager: fileActionManager,
-                            onRefresh: { Task { await loadFiles() } },
+                            onRefresh: { await loadFiles() },
                             searchQuery: $searchQuery,
                             totalFileCount: files.count,
                             filteredFileCount: filteredFiles.count,

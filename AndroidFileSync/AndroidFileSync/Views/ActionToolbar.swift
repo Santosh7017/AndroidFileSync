@@ -10,7 +10,7 @@ import SwiftUI
 struct ActionToolbar: View {
     let currentPath: String
     @ObservedObject var fileActionManager: FileActionManager
-    let onRefresh: () -> Void
+    let onRefresh: () async -> Void
     
     // Dialog states
     @State private var showNewFolderDialog = false
@@ -68,8 +68,25 @@ struct ActionToolbar: View {
             Divider()
                 .frame(height: 16)
             
-            // Clipboard indicator
-            if !fileActionManager.clipboard.isEmpty {
+            // Clipboard indicator or Loading indicator
+            if fileActionManager.isPerformingAction {
+                // Show loading indicator during paste
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                        .frame(width: 14, height: 14)
+                    Text(fileActionManager.currentAction)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color.orange.opacity(0.15))
+                .cornerRadius(6)
+                
+                Divider()
+                    .frame(height: 16)
+            } else if !fileActionManager.clipboard.isEmpty {
                 HStack(spacing: 4) {
                     Image(systemName: fileActionManager.clipboardOperation == .cut ? "scissors" : "doc.on.clipboard")
                         .font(.caption)
@@ -81,8 +98,24 @@ struct ActionToolbar: View {
                     // Paste button
                     Button {
                         Task {
-                            try? await fileActionManager.paste(to: currentPath)
-                            onRefresh()
+                            // Start paste in background
+                            let pasteTask = Task {
+                                try await fileActionManager.paste(to: currentPath)
+                            }
+                            
+                            // Quick delay to let mkdir complete, then refresh early
+                            try? await Task.sleep(nanoseconds: 800_000_000) // 0.8 second
+                            await onRefresh() // Early refresh to show folders appearing
+                            
+                            // Wait for paste to complete
+                            do {
+                                try await pasteTask.value
+                            } catch {
+                                print("❌ Paste failed: \(error.localizedDescription)")
+                            }
+                            
+                            // Final refresh to ensure everything is up to date
+                            await onRefresh()
                         }
                     } label: {
                         Label("Paste", systemImage: "doc.on.doc")
@@ -192,7 +225,7 @@ struct ActionToolbar: View {
             
             // Refresh button
             Button {
-                onRefresh()
+                Task { await onRefresh() }
             } label: {
                 Image(systemName: "arrow.clockwise")
             }
@@ -223,7 +256,7 @@ struct ActionToolbar: View {
                         do {
                             try await fileActionManager.createFolder(at: currentPath, name: folderName)
                             print("✅ Folder created: \(folderName)")
-                            onRefresh()
+                            await onRefresh()
                         } catch {
                             print("❌ Failed to create folder: \(error.localizedDescription)")
                         }
@@ -247,7 +280,7 @@ struct ActionToolbar: View {
                         do {
                             try await fileActionManager.createFile(at: currentPath, name: fileName)
                             print("✅ File created: \(fileName)")
-                            onRefresh()
+                            await onRefresh()
                         } catch {
                             print("❌ Failed to create file: \(error.localizedDescription)")
                         }
