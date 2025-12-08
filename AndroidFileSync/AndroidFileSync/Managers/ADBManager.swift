@@ -409,7 +409,7 @@ class ADBManager {
     // Cache the path so we don't search every time
     private static var adbPath: String?
 
-    private static func getADBPath() -> String {
+    static func getADBPath() -> String {
         if let cached = adbPath { return cached }
         let fileManager = FileManager.default
         let possiblePaths = [

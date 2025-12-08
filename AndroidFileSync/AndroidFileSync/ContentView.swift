@@ -214,6 +214,9 @@ struct ContentView: View {
     
     // Multi-selection state
     @State private var selectedFiles: Set<UUID> = []
+    
+    // Trash view state
+    @State private var showTrashView = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -224,7 +227,13 @@ struct ContentView: View {
             // Main Content
             if deviceManager.isConnected {
                 HSplitView {
-                    SidebarView(quickAccessItems: QuickAccessItem.commonFolders, currentPath: currentPath, onNavigate: navigateTo)
+                    SidebarView(
+                        quickAccessItems: QuickAccessItem.commonFolders,
+                        currentPath: currentPath,
+                        onNavigate: navigateTo,
+                        trashCount: fileActionManager.trashedItems.count,
+                        onOpenTrash: { showTrashView = true }
+                    )
                     
                     // CORRECTED INITIALIZER
                     FileBrowserView(
@@ -240,7 +249,8 @@ struct ContentView: View {
                         onDelete: handleDelete,
                         onRename: handleRename,
                         onBatchDelete: handleBatchDelete,
-                        onBatchDownload: handleBatchDownload
+                        onBatchDownload: handleBatchDownload,
+                        onBatchChangeExtension: { ext in handleBatchChangeExtension(ext) }
                     )
                     .equatable()  // Prevent unnecessary redraws
                 }
@@ -264,6 +274,16 @@ struct ContentView: View {
             }
         } message: {
             Text(errorMessage)
+        }
+        // Trash view sheet
+        .sheet(isPresented: $showTrashView, onDismiss: {
+            // Refresh file list after closing trash (in case files were restored)
+            Task {
+                await loadFiles()
+            }
+        }) {
+            TrashView(fileActionManager: fileActionManager)
+                .frame(width: 450, height: 400)
         }
     }
     
@@ -500,6 +520,52 @@ struct ContentView: View {
                 // Clear selection after download
                 await MainActor.run {
                     selectedFiles.removeAll()
+                }
+            }
+        }
+    }
+    
+    private func handleBatchChangeExtension(_ newExtension: String) {
+        let filesToChange = files.filter { selectedFiles.contains($0.id) && !$0.isDirectory }
+        
+        guard !filesToChange.isEmpty else {
+            errorMessage = "No files selected for extension change"
+            showErrorAlert = true
+            return
+        }
+        
+        Task {
+            var successCount = 0
+            var failCount = 0
+            
+            for file in filesToChange {
+                // Get filename without extension
+                let nameWithoutExt: String
+                if let dotIndex = file.name.lastIndex(of: ".") {
+                    nameWithoutExt = String(file.name[..<dotIndex])
+                } else {
+                    nameWithoutExt = file.name
+                }
+                
+                let newName = "\(nameWithoutExt).\(newExtension)"
+                
+                do {
+                    try await fileActionManager.renameFile(file, to: newName)
+                    successCount += 1
+                } catch {
+                    print("❌ Failed to rename \(file.name): \(error)")
+                    failCount += 1
+                }
+            }
+            
+            // Refresh and clear selection
+            await loadFiles()
+            await MainActor.run {
+                selectedFiles.removeAll()
+                
+                if failCount > 0 {
+                    errorMessage = "Changed \(successCount) files, \(failCount) failed"
+                    showErrorAlert = true
                 }
             }
         }

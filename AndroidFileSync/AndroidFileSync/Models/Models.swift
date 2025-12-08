@@ -32,6 +32,15 @@ struct UnifiedFile: Identifiable {
     let size: UInt64
     let modificationDate: Date?
     
+    // Direct initializer
+    init(name: String, path: String, isDirectory: Bool, size: UInt64, modificationDate: Date? = nil) {
+        self.name = name
+        self.path = path
+        self.isDirectory = isDirectory
+        self.size = size
+        self.modificationDate = modificationDate
+    }
+    
     init(from adbFile: ADBFile) {
         self.name = adbFile.name
         self.path = adbFile.path

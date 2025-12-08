@@ -95,6 +95,7 @@
 				Views/SelectionToolbar.swift,
 				Views/TransferProgressContainer.swift,
 				Views/TransferProgressView.swift,
+				Views/TrashView.swift,
 			);
 			target = 453BAF082EC66BC4008AABAB /* AndroidFileSync */;
 		};
@@ -127,6 +128,7 @@
 				Views/SelectionToolbar.swift,
 				Views/TransferProgressContainer.swift,
 				Views/TransferProgressView.swift,
+				Views/TrashView.swift,
 			);
 			target = 453BAF1A2EC66C1C008AABAB /* AndroidFileProvider */;
 		};

@@ -4,6 +4,8 @@ struct SidebarView: View {
     let quickAccessItems: [QuickAccessItem]
     let currentPath: String
     let onNavigate: (String) -> Void
+    var trashCount: Int = 0
+    var onOpenTrash: (() -> Void)? = nil
     
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -35,6 +37,37 @@ struct SidebarView: View {
             }
             
             Spacer()
+            
+            // Trash section
+            if let openTrash = onOpenTrash {
+                Divider()
+                Button(action: openTrash) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "trash")
+                            .foregroundColor(.secondary)
+                            .frame(width: 20)
+                        
+                        Text("Trash")
+                            .font(.system(size: 13))
+                            .foregroundColor(.primary)
+                        
+                        Spacer()
+                        
+                        if trashCount > 0 {
+                            Text("\(trashCount)")
+                                .font(.caption2)
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.secondary)
+                                .cornerRadius(8)
+                        }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                }
+                .buttonStyle(.plain)
+            }
             
             // Footer info
             VStack(spacing: 4) {

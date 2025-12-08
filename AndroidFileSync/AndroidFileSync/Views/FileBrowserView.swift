@@ -20,6 +20,7 @@ struct FileBrowserView: View, Equatable {
     let onRename: ((UnifiedFile, String) -> Void)?
     let onBatchDelete: (() -> Void)?
     let onBatchDownload: (() -> Void)?
+    let onBatchChangeExtension: ((String) -> Void)?
     
     // Equatable implementation - only compare data that affects rendering
     static func == (lhs: FileBrowserView, rhs: FileBrowserView) -> Bool {
@@ -36,6 +37,17 @@ struct FileBrowserView: View, Equatable {
     // Delete confirmation state
     @State private var showDeleteConfirmation = false
     @State private var fileToDelete: UnifiedFile? = nil
+    @State private var showBatchDeleteConfirmation = false
+    @State private var batchDeleteCount = 0
+    
+    // Rename state (for context menu)
+    @State private var showRenameDialog = false
+    @State private var fileToRename: UnifiedFile? = nil
+    @State private var newFileName = ""
+    
+    // Change extension state (for context menu)
+    @State private var showExtensionDialog = false
+    @State private var newExtension = ""
     
     var body: some View {
         VStack(spacing: 0) {
@@ -45,26 +57,74 @@ struct FileBrowserView: View, Equatable {
             
             // Selection toolbar
             if !selectedFiles.isEmpty {
+                let selectedFilesList = files.filter { selectedFiles.contains($0.id) }
                 SelectionToolbar(
-                    selectedCount: selectedFiles.count,
+                    selectedFiles: selectedFilesList,
                     onClearSelection: { selectedFiles.removeAll() },
-                    onDeleteAll: { onBatchDelete?() },
-                    onDownloadAll: { onBatchDownload?() }
+                    onDelete: { onBatchDelete?() },
+                    onDownload: { onBatchDownload?() },
+                    onRename: onRename,
+                    onChangeExtension: onBatchChangeExtension
                 )
             }
         }
-        .alert("Delete \(fileToDelete?.name ?? "item")?", isPresented: $showDeleteConfirmation) {
+        .alert("Move \(fileToDelete?.name ?? "item") to Trash?", isPresented: $showDeleteConfirmation) {
             Button("Cancel", role: .cancel) {
                 fileToDelete = nil
             }
-            Button("Delete", role: .destructive) {
+            Button("Move to Trash", role: .destructive) {
                 if let file = fileToDelete {
                     onDelete?(file)
                 }
                 fileToDelete = nil
             }
         } message: {
-            Text("This action cannot be undone.")
+            Text("You can restore this item from the Trash.")
+        }
+        // Rename alert
+        .alert("Rename \(fileToRename?.isDirectory == true ? "folder" : "file")", isPresented: $showRenameDialog) {
+            TextField("New name", text: $newFileName)
+            Button("Cancel", role: .cancel) {
+                fileToRename = nil
+                newFileName = ""
+            }
+            Button("Rename") {
+                if let file = fileToRename, !newFileName.isEmpty && newFileName != file.name {
+                    onRename?(file, newFileName)
+                }
+                fileToRename = nil
+                newFileName = ""
+            }
+        } message: {
+            Text("Enter a new name for \(fileToRename?.name ?? "this item")")
+        }
+        // Change extension alert
+        .alert("Change Extension", isPresented: $showExtensionDialog) {
+            TextField("New extension (e.g., jpg, png)", text: $newExtension)
+            Button("Cancel", role: .cancel) {
+                newExtension = ""
+            }
+            Button("Apply") {
+                if !newExtension.isEmpty {
+                    let ext = newExtension.hasPrefix(".") ? String(newExtension.dropFirst()) : newExtension
+                    onBatchChangeExtension?(ext)
+                }
+                newExtension = ""
+            }
+        } message: {
+            Text("Change extension for all selected files")
+        }
+        // Batch delete confirmation alert
+        .alert("Move \(batchDeleteCount) items to Trash?", isPresented: $showBatchDeleteConfirmation) {
+            Button("Cancel", role: .cancel) {
+                batchDeleteCount = 0
+            }
+            Button("Move to Trash", role: .destructive) {
+                onBatchDelete?()
+                batchDeleteCount = 0
+            }
+        } message: {
+            Text("You can restore these items from the Trash.")
         }
     }
     
@@ -219,26 +279,59 @@ struct FileBrowserView: View, Equatable {
             .width(min: 80, ideal: 120)
         }
         .contextMenu(forSelectionType: UUID.self) { selectedIds in
+            let selectedCount = selectedIds.count
+            let isSingleSelection = selectedCount == 1
+            let selectedItems = files.filter { selectedIds.contains($0.id) }
+            let hasOnlyFiles = !selectedItems.isEmpty && selectedItems.allSatisfy { !$0.isDirectory }
+            
+            // Download - show for files
             if let firstId = selectedIds.first,
-               let file = files.first(where: { $0.id == firstId }) {
-                if !file.isDirectory {
-                    Button("Download") {
+               let file = files.first(where: { $0.id == firstId }),
+               !file.isDirectory {
+                Button(isSingleSelection ? "Download" : "Download Selected") {
+                    if isSingleSelection {
                         onDownload(file)
+                    } else {
+                        onBatchDownload?()
                     }
-                    Divider()
                 }
-                
+                Divider()
+            }
+            
+            // Rename - only for single selection
+            if isSingleSelection,
+               let firstId = selectedIds.first,
+               let file = files.first(where: { $0.id == firstId }) {
                 Button("Rename") {
-                    // Will be handled by alert
+                    fileToRename = file
+                    newFileName = file.name
+                    showRenameDialog = true
                 }
                 .disabled(onRename == nil)
-                
-                Button("Delete", role: .destructive) {
+            }
+            
+            // Change Extension - only for multiple files (no folders)
+            if selectedCount > 1 && hasOnlyFiles {
+                Button("Change Extension...") {
+                    showExtensionDialog = true
+                }
+                .disabled(onBatchChangeExtension == nil)
+            }
+            
+            // Move to Trash - always available
+            Button(isSingleSelection ? "Move to Trash" : "Move \(selectedCount) items to Trash", role: .destructive) {
+                if isSingleSelection,
+                   let firstId = selectedIds.first,
+                   let file = files.first(where: { $0.id == firstId }) {
                     fileToDelete = file
                     showDeleteConfirmation = true
+                } else {
+                    // Show confirmation for batch delete
+                    batchDeleteCount = selectedCount
+                    showBatchDeleteConfirmation = true
                 }
-                .disabled(onDelete == nil)
             }
+            .disabled(onDelete == nil)
         } primaryAction: { selectedIds in
             // Double-click or Enter key action
             if let firstId = selectedIds.first,
