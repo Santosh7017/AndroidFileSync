@@ -48,14 +48,6 @@ struct UnifiedFile: Identifiable {
         self.size = adbFile.size
         self.modificationDate = nil
     }
-    
-    init(from mtpFile: MTPFile) {
-        self.name = mtpFile.name
-        self.path = "/sdcard/\(mtpFile.name)"
-        self.isDirectory = mtpFile.isFolder
-        self.size = mtpFile.size
-        self.modificationDate = mtpFile.modificationDate
-    }
 }
 
 

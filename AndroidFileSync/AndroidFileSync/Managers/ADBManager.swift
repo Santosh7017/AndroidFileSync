@@ -412,6 +412,17 @@ class ADBManager {
     static func getADBPath() -> String {
         if let cached = adbPath { return cached }
         let fileManager = FileManager.default
+        
+        // First, try bundled ADB in app Resources
+        if let bundledPath = Bundle.main.path(forResource: "adb", ofType: nil) {
+            if fileManager.fileExists(atPath: bundledPath) {
+                print("✅ ADB Manager: Using bundled ADB at \(bundledPath)")
+                adbPath = bundledPath
+                return bundledPath
+            }
+        }
+        
+        // Fallback to system-installed ADB
         let possiblePaths = [
             "/opt/homebrew/bin/adb",
             "/usr/local/bin/adb",
@@ -420,7 +431,7 @@ class ADBManager {
         ]
         for path in possiblePaths {
             if fileManager.fileExists(atPath: path) {
-                print("✅ ADB Manager: Found binary at \(path)")
+                print("✅ ADB Manager: Found system ADB at \(path)")
                 adbPath = path
                 return path
             }
