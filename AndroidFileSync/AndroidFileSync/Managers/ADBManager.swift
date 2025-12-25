@@ -15,7 +15,6 @@ class ADBManager {
         // First, try bundled ADB in app Resources
         if let bundledPath = Bundle.main.path(forResource: "adb", ofType: nil) {
             if fileManager.fileExists(atPath: bundledPath) {
-                print("✅ ADB Manager: Using bundled ADB at \(bundledPath)")
                 adbPath = bundledPath
                 return bundledPath
             }
@@ -30,7 +29,6 @@ class ADBManager {
         ]
         for path in possiblePaths {
             if fileManager.fileExists(atPath: path) {
-                print("✅ ADB Manager: Found system ADB at \(path)")
                 adbPath = path
                 return path
             }
@@ -57,7 +55,6 @@ class ADBManager {
     static func listFiles(path: String) async throws -> [ADBFile] {
         let adbPath = getADBPath()
         
-        print("📂 ADB: Listing files in \(path)")
         let startTime = Date()
         
         // FAST APPROACH: Use ls -1 for names only (very fast even for 1000+ files)
@@ -71,7 +68,6 @@ class ADBManager {
         )
         
         let elapsed = Date().timeIntervalSince(startTime)
-        print("📂 ADB: ls -1 completed in \(String(format: "%.1f", elapsed))s, code=\(code), output=\(output.count) chars")
         
         // Handle errors
         if code != 0 {
@@ -91,7 +87,6 @@ class ADBManager {
             fileNames.append(name)
         }
         
-        print("📂 ADB: Found \(fileNames.count) entries")
         
         if fileNames.isEmpty {
             return []
@@ -148,12 +143,10 @@ class ADBManager {
                     files.append(ADBFile(name: name, path: fullPath, isDirectory: false, size: 0))
                 }
             }
-            print("📂 ADB: Parsed \(files.count) files via find")
             return files
         }
         
         // Final fallback: just use file names without sizes
-        print("📂 ADB: Using name-only fallback for \(fileNames.count) files")
         for name in fileNames {
             let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
             // Guess directory by common patterns or lack of extension
@@ -161,7 +154,6 @@ class ADBManager {
             files.append(ADBFile(name: name, path: fullPath, isDirectory: isDir, size: 0))
         }
         
-        print("📂 ADB: Returned \(files.count) files")
         return files
     }
     
@@ -221,7 +213,6 @@ class ADBManager {
                         if code != 0 {
                             print("❌ ADB Pull Error: \(error)")
                         } else {
-                            print("✅ ADB Pull completed successfully")
                         }
                     }
                     
@@ -242,7 +233,6 @@ class ADBManager {
                                         let bytesDiff = currentSize - lastSize
                                         let speed = Double(bytesDiff) / timeDiff / (1024 * 1024) // MB/s
                                         
-                                        print("📊 Progress: \(currentSize) bytes, \(String(format: "%.1f", speed)) MB/s")
                                         continuation.yield((currentSize, speed))
                                         
                                         lastSize = currentSize
@@ -293,7 +283,6 @@ class ADBManager {
                 do {
                     try process.run()
                     let pid = process.processIdentifier
-                    print("🔍 Upload process started with PID \(pid)")
                     
                     // Start cancellation monitor AFTER process is running
                     DispatchQueue.global(qos: .userInitiated).async {
@@ -305,7 +294,6 @@ class ADBManager {
                             }
                             Thread.sleep(forTimeInterval: 0.1) // 100ms
                         }
-                        print("🔍 Cancellation monitor exited")
                     }
                     
                     // Start progress polling AFTER process is running
@@ -331,7 +319,6 @@ class ADBManager {
                                     let bytesDiff = currentSize - lastSize
                                     let speed = Double(bytesDiff) / timeDiff / (1024 * 1024) // MB/s
                                     
-                                    print("📊 Upload Progress: \(currentSize)/\(totalBytes) bytes, \(String(format: "%.1f", speed)) MB/s")
                                     continuation.yield((currentSize, speed))
                                     
                                     lastSize = currentSize
@@ -342,14 +329,12 @@ class ADBManager {
                             // Poll every 1 second
                             Thread.sleep(forTimeInterval: 1.0)
                         }
-                        print("🔍 Progress polling exited")
                     }
                     
                     // Wait for process to complete
                     process.waitUntilExit()
                     
                     if process.terminationStatus == 0 {
-                        print("✅ ADB Push completed successfully")
                     } else {
                         print("❌ ADB Push exited with code \(process.terminationStatus)")
                     }
@@ -513,7 +498,6 @@ class ADBManager {
             }
         }
         
-        print("✅ Deleted: \(devicePath)")
     }
     
     /// Renames or moves a file/folder on the Android device
@@ -567,7 +551,6 @@ class ADBManager {
             }
         }
         
-        print("✅ Renamed: \(oldPath) → \(newPath)")
     }
     
     // MARK: - Create Folder
@@ -591,7 +574,6 @@ class ADBManager {
             }
         }
         
-        print("✅ Created folder: \(path)")
     }
     
     // MARK: - Create File
@@ -623,7 +605,6 @@ class ADBManager {
             }
         }
         
-        print("✅ Created file: \(path)")
     }
     
     // MARK: - Copy File
@@ -641,7 +622,6 @@ class ADBManager {
         if isDirectory {
             // Step 1: Create the directory (fast)
             let mkdirCmd = "mkdir -p '\(escapedDest)'"
-            print("📁 Creating folder: \(destinationPath)")
             let (mkdirCode, _, mkdirError) = await Shell.runAsync(adbPath, args: ["shell", mkdirCmd])
             
             if mkdirCode != 0 {
@@ -653,11 +633,9 @@ class ADBManager {
             let (_, _, _) = await Shell.runAsync(adbPath, args: ["shell", cpCmd])
             // Ignore result - empty folder will fail but that's OK
             
-            print("✅ Copied folder: \(sourcePath) → \(destinationPath)")
         } else {
             // Regular file copy
             let command = "cp '\(escapedSource)' '\(escapedDest)'"
-            print("📋 Executing: adb shell \(command)")
             let (code, output, error) = await Shell.runAsync(adbPath, args: ["shell", command])
             
             if code != 0 {
@@ -673,7 +651,6 @@ class ADBManager {
                 }
             }
             
-            print("✅ Copied: \(sourcePath) → \(destinationPath)")
         }
     }
     

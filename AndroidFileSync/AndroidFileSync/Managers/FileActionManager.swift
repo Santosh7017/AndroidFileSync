@@ -87,7 +87,6 @@ class FileActionManager: ObservableObject {
             if permanent {
                 // Permanent deletion
                 try await ADBManager.deleteFile(devicePath: file.path)
-                print("✅ File permanently deleted: \(file.name)")
             } else {
                 // Move to trash
                 try await ensureTrashFolder()
@@ -113,7 +112,6 @@ class FileActionManager: ObservableObject {
                     saveTrashedItems()
                 }
                 
-                print("✅ File moved to trash: \(file.name)")
             }
             
             await MainActor.run {
@@ -153,7 +151,6 @@ class FileActionManager: ObservableObject {
                 currentAction = ""
             }
             
-            print("✅ File restored: \(item.name)")
         } catch {
             await MainActor.run {
                 isPerformingAction = false
@@ -181,7 +178,6 @@ class FileActionManager: ObservableObject {
                 currentAction = ""
             }
             
-            print("✅ Permanently deleted from trash: \(item.name)")
         } catch {
             await MainActor.run {
                 isPerformingAction = false
@@ -241,7 +237,6 @@ class FileActionManager: ObservableObject {
                 currentAction = ""
             }
             
-            print("✅ File renamed successfully: \(file.name) → \(newName)")
         } catch {
             await MainActor.run {
                 isPerformingAction = false
@@ -272,7 +267,6 @@ class FileActionManager: ObservableObject {
                 currentAction = ""
             }
             
-            print("✅ Folder created: \(name)")
         } catch {
             await MainActor.run {
                 isPerformingAction = false
@@ -303,7 +297,6 @@ class FileActionManager: ObservableObject {
                 currentAction = ""
             }
             
-            print("✅ File created: \(name)")
         } catch {
             await MainActor.run {
                 isPerformingAction = false
@@ -329,14 +322,12 @@ class FileActionManager: ObservableObject {
     func copyToClipboard(_ files: [UnifiedFile]) {
         clipboard = files
         clipboardOperation = .copy
-        print("📋 Copied \(files.count) items to clipboard")
     }
     
     /// Cuts files to clipboard
     func cutToClipboard(_ files: [UnifiedFile]) {
         clipboard = files
         clipboardOperation = .cut
-        print("✂️ Cut \(files.count) items to clipboard")
     }
     
     /// Pastes files from clipboard to destination
@@ -376,11 +367,9 @@ class FileActionManager: ObservableObject {
             do {
                 if operation == .cut {
                     // Move operation
-                    print("📦 Moving: \(file.path) → \(destinationFile)")
                     try await ADBManager.renameFile(oldPath: file.path, newPath: destinationFile)
                 } else {
                     // Copy operation - pass isDirectory flag
-                    print("📋 Copying: \(file.path) → \(destinationFile) (isDir: \(file.isDirectory))")
                     try await ADBManager.copyFile(from: file.path, to: destinationFile, isDirectory: file.isDirectory)
                 }
                 successCount += 1
@@ -406,7 +395,6 @@ class FileActionManager: ObservableObject {
             }
         }
         
-        print("✅ Pasted \(successCount)/\(itemCount) items")
     }
     
     /// Clears the clipboard

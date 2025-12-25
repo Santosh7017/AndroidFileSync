@@ -1,98 +1,83 @@
 # AndroidFileSync
 
-A native macOS application for managing files on Android devices via USB using ADB (Android Debug Bridge).
+A native macOS app for managing files on your Android device via USB.
 
 ![macOS](https://img.shields.io/badge/macOS-13.0+-blue.svg)
-![Swift](https://img.shields.io/badge/Swift-5.9+-orange.svg)
 ![License](https://img.shields.io/badge/License-MIT-green.svg)
 
-## Features
+## Quick Start
 
-- 📁 **File Browser** - Navigate and browse files on your Android device
-- 📤 **Upload & Download** - Transfer files between Mac and Android
-- ✂️ **Copy, Cut & Paste** - Move files within the Android device
-- 📝 **Create Files & Folders** - Create new files and directories
-- 🔄 **Rename & Change Extension** - Rename files and batch change extensions
-- 🗑️ **Trash System** - Soft delete with restore capability (30-day retention)
-- 🔍 **Search & Filter** - Find files quickly with live search
-- 📊 **Sort Options** - Sort by name, size, or type
-- 🎨 **Native macOS UI** - Built with SwiftUI for a seamless Mac experience
+### Step 1: Download & Install
 
-## Installation
+1. Download `AndroidFileSync.dmg` from [**Releases**](../../releases)
+2. Open the DMG → Drag **AndroidFileSync** to **Applications**
+3. First launch: Right-click → **Open** → Click **"Open"**
 
-### Option A: Download Pre-built App (Easiest)
-
-1. Go to [**Releases**](../../releases) and download `AndroidFileSync.dmg`
-2. Open the DMG and drag **AndroidFileSync** to **Applications**
-3. **First launch**: Right-click the app → **Open** → Click **"Open"**
-
-**That's it!** ADB is bundled inside the app - no additional installation needed.
+> **Note**: ADB is bundled - no additional installation needed!
 
 ---
 
-### Option B: Build from Source
-
-#### Prerequisites
-
-1. **macOS 13.0 or later**
-2. **Xcode 15+** (free from Mac App Store)
-
-### Step 1: Install ADB
-
-Using Homebrew (recommended):
-```bash
-brew install android-platform-tools
-```
-
-Or download manually from [Android SDK Platform Tools](https://developer.android.com/studio/releases/platform-tools)
-
 ### Step 2: Enable USB Debugging on Android
 
-1. Go to **Settings → About Phone**
-2. Tap **Build Number** 7 times to enable Developer Options
-3. Go to **Settings → Developer Options**
+1. Open **Settings** → **About Phone**
+2. Tap **Build Number** 7 times (enables Developer Options)
+3. Go back to **Settings** → **Developer Options**
 4. Enable **USB Debugging**
 
-### Step 3: Clone and Build the App
+---
 
-```bash
-# Clone the repository
-git clone https://github.com/YOUR_USERNAME/AndroidFileSync.git
+### Step 3: Connect & Use
 
-# Open in Xcode
-cd AndroidFileSync
-open AndroidFileSync.xcodeproj
-```
+1. Connect your Android device via USB cable
+2. Launch **AndroidFileSync**
+3. On your Android, tap **"Allow"** when USB debugging prompt appears
+4. Start managing your files!
 
-In Xcode:
-1. Select **"My Mac"** as the build target (top toolbar)
-2. Press **⌘R** (or Product → Run) to build and run
-3. The app will launch automatically
+---
 
-### Step 4: First Run (One-time Security Setup)
+## How to Use
 
-If you see a security warning:
-1. Go to **System Settings → Privacy & Security**
-2. Scroll down and click **"Open Anyway"** next to AndroidFileSync
-3. Or: Right-click the app → **Open** → Click **"Open"**
+### Browse Files
+- Click folders to navigate into them
+- Click **← Back** button or breadcrumb to go up
+- Use the **sidebar** for quick access to common locations
 
-### Optional: Install to Applications
+### Upload Files (Mac → Android)
+- Click **Upload** button → Select files
+- **OR** Drag & drop files from Finder directly into the app
+- Progress bar shows transfer status
+- Click **✕** to cancel upload
 
-After building, you can find the app at:
-```
-~/Library/Developer/Xcode/DerivedData/AndroidFileSync-xxx/Build/Products/Release/AndroidFileSync.app
-```
+### Download Files (Android → Mac)  
+- Select file(s) → Click **Download**
+- Choose save location on your Mac
+- Click **✕** to cancel download
 
-Drag it to your **Applications** folder for easy access.
+### Copy / Move Files
+- Select file(s) → Click **Copy** or **Cut**
+- Navigate to destination folder
+- Click **Paste**
 
-## Usage
+### Create New Items
+- **New Folder**: Click folder icon or ⌘N
+- **New File**: Click file icon → Enter name
 
-1. Connect your Android device via USB
-2. Launch AndroidFileSync
-3. Accept the USB debugging prompt on your Android device
-4. Browse, upload, download, and manage your files!
+### Delete Files
+- Select file(s) → Click **Delete**
+- Files go to **Trash** (30-day retention)
+- Go to Trash → **Restore** or **Delete Permanently**
 
-### Keyboard Shortcuts
+### Rename Files
+- Select a file → Click **Rename**
+- Enter new name → Press Enter
+
+### Search & Sort
+- Type in search bar to filter files
+- Click column headers to sort by Name, Size, or Type
+
+---
+
+## Keyboard Shortcuts
 
 | Shortcut | Action |
 |----------|--------|
@@ -101,32 +86,37 @@ Drag it to your **Applications** folder for easy access.
 | ⌘R | Refresh |
 | ⌘F | Focus Search |
 | Esc | Clear Search |
+| ⌘A | Select All |
 
-## Screenshots
+---
 
-*Coming soon*
+## Troubleshooting
 
-## Architecture
+### Device Not Detected
+1. Check USB cable is connected properly
+2. Try a different USB port
+3. Ensure USB Debugging is enabled
+4. Unlock your phone and check for permission prompts
 
-- **SwiftUI** - Modern declarative UI framework
-- **ADB** - Android Debug Bridge for device communication
-- **File Provider** - macOS File Provider extension for Finder integration
+### "Allow USB Debugging" Not Appearing
+1. Disconnect and reconnect the cable
+2. On Android: Revoke USB debugging authorizations and reconnect
 
-## Contributing
+### Transfer Stuck
+- Click **✕** to cancel and retry
+- Check available storage on device
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+---
 
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+## Build from Source
+
+```bash
+git clone https://github.com/Santosh7017/AndroidFileSync.git
+cd AndroidFileSync
+open AndroidFileSync.xcodeproj
+# Press ⌘R to build and run
+```
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- Built with ❤️ using SwiftUI
-- Uses Android Debug Bridge (ADB) for device communication
+MIT License - see [LICENSE](LICENSE)

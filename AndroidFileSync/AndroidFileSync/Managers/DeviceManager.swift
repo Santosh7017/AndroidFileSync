@@ -26,7 +26,6 @@ class DeviceManager: ObservableObject {
     // MARK: - Core Logic
     
     func detectDevice() async {
-        print("🕵️‍♂️ Starting device detection...")
         
         // Ensure UI shows "detecting" state
         if !isDetecting {
@@ -35,7 +34,6 @@ class DeviceManager: ObservableObject {
         
         // Check for ADB devices
         adbAvailable = await ADBManager.isDeviceConnected()
-        print("🕵️‍♂️ ADB check complete. Device found: \(adbAvailable)")
         
         // Update the state on the main thread
         await MainActor.run {
@@ -53,7 +51,6 @@ class DeviceManager: ObservableObject {
             
             // Detection is complete, hide the initial loading screen
             self.isDetecting = false
-            print("🕵️‍♂️ Detection finished. Final state: isConnected = \(self.isConnected)")
         }
     }
     

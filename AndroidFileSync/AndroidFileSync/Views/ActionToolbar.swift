@@ -255,7 +255,6 @@ struct ActionToolbar: View {
                     Task {
                         do {
                             try await fileActionManager.createFolder(at: currentPath, name: folderName)
-                            print("✅ Folder created: \(folderName)")
                             await onRefresh()
                         } catch {
                             print("❌ Failed to create folder: \(error.localizedDescription)")
@@ -279,7 +278,6 @@ struct ActionToolbar: View {
                     Task {
                         do {
                             try await fileActionManager.createFile(at: currentPath, name: fileName)
-                            print("✅ File created: \(fileName)")
                             await onRefresh()
                         } catch {
                             print("❌ Failed to create file: \(error.localizedDescription)")

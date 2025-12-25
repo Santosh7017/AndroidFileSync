@@ -157,7 +157,6 @@ class UploadManager: ObservableObject {
         // Reset cancellation flag
         setCancelled(localPath: localPath, value: false)
         
-        print("📤 Uploading: \(safeFileName) (\(formatBytes(fileSize)))")
         
         // Use the new AsyncStream-based API (like downloads)
         let progressStream = ADBManager.pushFileWithProgress(
@@ -203,7 +202,6 @@ class UploadManager: ObservableObject {
             }
         }
         
-        print("✅ Upload complete: \(safeFileName)")
         
         // Show 100% briefly
         try? await Task.sleep(nanoseconds: 2_000_000_000)

@@ -111,7 +111,6 @@ class DownloadManager: ObservableObject {
             DispatchQueue.global(qos: .utility).async {
                 if FileManager.default.fileExists(atPath: localPath) {
                     try? FileManager.default.removeItem(atPath: localPath)
-                    print("🗑️ Cleaned up partial file: \(localPath)")
                 }
             }
         }
@@ -149,7 +148,6 @@ class DownloadManager: ObservableObject {
             startTimerIfNeeded()
         }
         
-        print("📥 Downloading: \(fileName) (\(formatBytes(fileSize)))")
         
         // Create and store the task for cancellation
         let downloadTask = Task.detached { [weak self] in
@@ -190,7 +188,6 @@ class DownloadManager: ObservableObject {
                 self.activeDownloads[devicePath]?.transferSpeed = 0
             }
             
-            print("✅ Download complete: \(fileName)")
             
             // Show 100% briefly
             try? await Task.sleep(nanoseconds: 2_000_000_000)

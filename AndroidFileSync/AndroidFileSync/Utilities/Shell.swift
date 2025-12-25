@@ -228,7 +228,6 @@ struct Shell {
                     
                     // Start cancellation monitor AFTER process starts running
                     DispatchQueue.global(qos: .userInitiated).async {
-                        print("🔍 Shell: Cancellation monitor started for PID \(process.processIdentifier)")
                         
                         while process.isRunning {
                             if cancellationCheck() {
@@ -244,7 +243,6 @@ struct Shell {
                             // Check every 100ms for quick response
                             Thread.sleep(forTimeInterval: 0.1)
                         }
-                        print("🔍 Shell: Cancellation monitor exited")
                     }
                     
                     process.waitUntilExit()
