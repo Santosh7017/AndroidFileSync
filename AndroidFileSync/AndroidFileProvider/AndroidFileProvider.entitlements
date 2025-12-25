@@ -6,7 +6,7 @@
 	<string>$(AppIdentifierPrefix)$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.santosh.AndroidBridge</string>
+		<string>group.santosh.AndroidBridge1</string>
 	</array>
 </dict>
 </plist>

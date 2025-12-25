@@ -15,8 +15,23 @@ struct TransferProgressContainer: View {
         if !downloadManager.activeDownloads.isEmpty || !uploadManager.activeUploads.isEmpty {
             TransferProgressView(
                 title: "Active Transfers",
-                items: getTransferItems()
+                items: getTransferItems(),
+                onCancel: { item in
+                    handleCancel(item)
+                }
             )
+        }
+    }
+    
+    private func handleCancel(_ item: TransferItemData) {
+        if item.isUpload {
+            // Extract localPath from the ID (format: "upload_localPath")
+            let localPath = String(item.id.dropFirst("upload_".count))
+            uploadManager.cancelUpload(localPath: localPath)
+        } else {
+            // Extract devicePath from the ID (format: "download_devicePath")
+            let devicePath = String(item.id.dropFirst("download_".count))
+            downloadManager.cancelDownload(devicePath: devicePath)
         }
     }
     
@@ -34,6 +49,7 @@ struct TransferProgressContainer: View {
                 bytesTransferred: download.bytesTransferred,
                 totalBytes: download.totalBytes,
                 isComplete: download.isComplete,
+                isCancelled: download.isCancelled,
                 error: download.error,
                 isUpload: false
             ))
@@ -50,6 +66,7 @@ struct TransferProgressContainer: View {
                 bytesTransferred: upload.bytesTransferred,
                 totalBytes: upload.totalBytes,
                 isComplete: upload.isComplete,
+                isCancelled: upload.isCancelled,
                 error: upload.error,
                 isUpload: true
             ))

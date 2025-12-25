@@ -9,10 +9,6 @@
 /* Begin PBXBuildFile section */
 		453BAF1E2EC66C1D008AABAB /* UniformTypeIdentifiers.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 453BAF1D2EC66C1D008AABAB /* UniformTypeIdentifiers.framework */; };
 		453BAF2A2EC66C1D008AABAB /* AndroidFileProvider.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 453BAF1B2EC66C1C008AABAB /* AndroidFileProvider.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		457617932ECF8D260068FF35 /* libmtp.9.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 457617912ECF8D260068FF35 /* libmtp.9.dylib */; };
-		457617942ECF8D260068FF35 /* libusb-1.0.0.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 457617922ECF8D260068FF35 /* libusb-1.0.0.dylib */; };
-		457617962ECF8D670068FF35 /* libmtp.9.dylib in CopyFiles */ = {isa = PBXBuildFile; fileRef = 457617912ECF8D260068FF35 /* libmtp.9.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
-		457617972ECF8D670068FF35 /* libusb-1.0.0.dylib in CopyFiles */ = {isa = PBXBuildFile; fileRef = 457617922ECF8D260068FF35 /* libusb-1.0.0.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -37,25 +33,12 @@
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		457617952ECF8D3C0068FF35 /* CopyFiles */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 10;
-			files = (
-				457617962ECF8D670068FF35 /* libmtp.9.dylib in CopyFiles */,
-				457617972ECF8D670068FF35 /* libusb-1.0.0.dylib in CopyFiles */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		453BAF092EC66BC4008AABAB /* AndroidFileSync.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AndroidFileSync.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		453BAF1B2EC66C1C008AABAB /* AndroidFileProvider.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = AndroidFileProvider.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		453BAF1D2EC66C1D008AABAB /* UniformTypeIdentifiers.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UniformTypeIdentifiers.framework; path = System/Library/Frameworks/UniformTypeIdentifiers.framework; sourceTree = SDKROOT; };
-		457617912ECF8D260068FF35 /* libmtp.9.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libmtp.9.dylib; path = ../../../../../opt/homebrew/Cellar/libmtp/1.1.22/lib/libmtp.9.dylib; sourceTree = "<group>"; };
-		457617922ECF8D260068FF35 /* libusb-1.0.0.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = "libusb-1.0.0.dylib"; path = "../../../../../opt/homebrew/Cellar/libusb/1.0.29/lib/libusb-1.0.0.dylib"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -159,8 +142,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				457617932ECF8D260068FF35 /* libmtp.9.dylib in Frameworks */,
-				457617942ECF8D260068FF35 /* libusb-1.0.0.dylib in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -197,8 +178,6 @@
 		453BAF1C2EC66C1D008AABAB /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
-				457617912ECF8D260068FF35 /* libmtp.9.dylib */,
-				457617922ECF8D260068FF35 /* libusb-1.0.0.dylib */,
 				453BAF1D2EC66C1D008AABAB /* UniformTypeIdentifiers.framework */,
 			);
 			name = Frameworks;
@@ -215,7 +194,6 @@
 				453BAF062EC66BC4008AABAB /* Frameworks */,
 				453BAF072EC66BC4008AABAB /* Resources */,
 				453BAF2F2EC66C1D008AABAB /* Embed Foundation Extensions */,
-				457617952ECF8D3C0068FF35 /* CopyFiles */,
 			);
 			buildRules = (
 			);
@@ -460,6 +438,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				AUTOMATION_APPLE_EVENTS = NO;
 				CODE_SIGN_ENTITLEMENTS = AndroidFileSync/AndroidFileSync.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -481,8 +460,9 @@
 					/opt/homebrew/Cellar/libusb/1.0.29/lib,
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync;
+				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync1;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				REGISTER_APP_GROUPS = YES;
 				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
 				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
@@ -507,6 +487,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				AUTOMATION_APPLE_EVENTS = NO;
 				CODE_SIGN_ENTITLEMENTS = AndroidFileSync/AndroidFileSync.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -528,8 +509,9 @@
 					/opt/homebrew/Cellar/libusb/1.0.29/lib,
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync;
+				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync1;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				REGISTER_APP_GROUPS = YES;
 				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
 				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
@@ -566,7 +548,7 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync.AndroidFileProvider;
+				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync1.AndroidFileProvider;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;
@@ -596,7 +578,7 @@
 					"@executable_path/../../../../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync.AndroidFileProvider;
+				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync1.AndroidFileProvider;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
 				STRING_CATALOG_GENERATE_SYMBOLS = YES;

@@ -9,6 +9,10 @@ class DownloadManager: ObservableObject {
     // Store progress for each file being downloaded (Key: devicePath)
     @Published var activeDownloads: [String: DownloadProgress] = [:]
     
+    // Store active tasks for cancellation (Key: devicePath)
+    private var activeTasks: [String: Task<Void, Never>] = [:]
+    private let taskLock = NSLock()
+    
     // Thread-safe storage for progress updates from background
     private let progressLock = NSLock()
     private var backgroundProgress: [String: (bytes: UInt64, speed: Double)] = [:]
@@ -25,6 +29,7 @@ class DownloadManager: ObservableObject {
         var totalBytes: UInt64
         var transferSpeed: Double = 0
         var isComplete: Bool = false
+        var isCancelled: Bool = false
         var error: String?
         
         var progress: Double {
@@ -83,6 +88,46 @@ class DownloadManager: ObservableObject {
         }
     }
     
+    // MARK: - Cancellation
+    
+    func cancelDownload(devicePath: String) {
+        print("🛑 Cancelling download: \(devicePath)")
+        
+        // Cancel the task
+        taskLock.lock()
+        if let task = activeTasks[devicePath] {
+            task.cancel()
+            activeTasks.removeValue(forKey: devicePath)
+        }
+        taskLock.unlock()
+        
+        // Update UI state
+        if var download = activeDownloads[devicePath] {
+            download.isCancelled = true
+            activeDownloads[devicePath] = download
+            
+            // Clean up partial file
+            let localPath = download.localPath
+            DispatchQueue.global(qos: .utility).async {
+                if FileManager.default.fileExists(atPath: localPath) {
+                    try? FileManager.default.removeItem(atPath: localPath)
+                    print("🗑️ Cleaned up partial file: \(localPath)")
+                }
+            }
+        }
+        
+        // Remove from UI after brief delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.activeDownloads.removeValue(forKey: devicePath)
+            self?.stopTimerIfNeeded()
+            
+            // Clear background progress
+            self?.progressLock.lock()
+            self?.backgroundProgress.removeValue(forKey: devicePath)
+            self?.progressLock.unlock()
+        }
+    }
+    
     func downloadFile(
         devicePath: String,
         fileName: String,
@@ -106,8 +151,8 @@ class DownloadManager: ObservableObject {
         
         print("📥 Downloading: \(fileName) (\(formatBytes(fileSize)))")
         
-        // Run download in background
-        try await Task.detached { [weak self] in
+        // Create and store the task for cancellation
+        let downloadTask = Task.detached { [weak self] in
             guard let self = self else { return }
             
             let progressStream = ADBManager.pullFileWithProgress(
@@ -117,9 +162,20 @@ class DownloadManager: ObservableObject {
             
             // Consume stream and update background storage
             for await (bytesTransferred, speed) in progressStream {
+                // Check for cancellation
+                if Task.isCancelled {
+                    print("🛑 Download cancelled: \(fileName)")
+                    return
+                }
+                
                 self.progressLock.lock()
                 self.backgroundProgress[devicePath] = (bytesTransferred, speed)
                 self.progressLock.unlock()
+            }
+            
+            // Check for cancellation before marking complete
+            if Task.isCancelled {
+                return
             }
             
             // Clear background progress
@@ -143,6 +199,19 @@ class DownloadManager: ObservableObject {
                 self.activeDownloads.removeValue(forKey: devicePath)
                 self.stopTimerIfNeeded()
             }
-        }.value
+        }
+        
+        // Store the task for cancellation
+        taskLock.lock()
+        activeTasks[devicePath] = downloadTask
+        taskLock.unlock()
+        
+        // Wait for completion
+        await downloadTask.value
+        
+        // Clean up task reference
+        taskLock.lock()
+        activeTasks.removeValue(forKey: devicePath)
+        taskLock.unlock()
     }
 }

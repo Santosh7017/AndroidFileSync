@@ -1,5 +1,3 @@
-
-
 import Foundation
 
 struct Shell {
@@ -181,5 +179,103 @@ struct Shell {
             }
         }
     }
+    
+    // New: Run with progress tracking and cancellation support
+    static func runWithProgressCancellable(
+        _ command: String,
+        args: [String],
+        progressCallback: @escaping (String) -> Void,
+        cancellationCheck: @escaping () -> Bool = { false }
+    ) async -> (Int32, String, String, Process) {
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                let stdout = Pipe()
+                let stderr = Pipe()
+                
+                process.executableURL = URL(fileURLWithPath: command)
+                process.arguments = args
+                process.standardOutput = stdout
+                process.standardError = stderr
+                
+                var outputData = Data()
+                var errorData = Data()
+                var hasResumed = false
+                let resumeLock = NSLock()
+                
+                // ADB outputs progress to STDERR, not STDOUT!
+                let stderrHandle = stderr.fileHandleForReading
+                
+                // Read stderr in background thread
+                DispatchQueue.global(qos: .userInitiated).async {
+                    while true {
+                        let data = stderrHandle.availableData
+                        if data.isEmpty { break }
+                        
+                        errorData.append(data)
+                        
+                        // Send progress updates
+                        if let text = String(data: data, encoding: .utf8), !text.isEmpty {
+                            DispatchQueue.main.async {
+                                progressCallback(text)
+                            }
+                        }
+                    }
+                }
+                
+                do {
+                    try process.run()
+                    
+                    // Start cancellation monitor AFTER process starts running
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        print("🔍 Shell: Cancellation monitor started for PID \(process.processIdentifier)")
+                        
+                        while process.isRunning {
+                            if cancellationCheck() {
+                                let pid = process.processIdentifier
+                                print("🛑 Shell: Cancellation detected! Killing PID \(pid) with SIGKILL...")
+                                
+                                // Use SIGKILL for immediate termination (ADB may ignore SIGTERM)
+                                kill(pid, SIGKILL)
+                                
+                                print("🛑 Shell: SIGKILL sent to PID \(pid)")
+                                break
+                            }
+                            // Check every 100ms for quick response
+                            Thread.sleep(forTimeInterval: 0.1)
+                        }
+                        print("🔍 Shell: Cancellation monitor exited")
+                    }
+                    
+                    process.waitUntilExit()
+                    
+                    resumeLock.lock()
+                    if !hasResumed {
+                        hasResumed = true
+                        // Get final output
+                        outputData = stdout.fileHandleForReading.readDataToEndOfFile()
+                        
+                        let output = String(data: outputData, encoding: .utf8) ?? ""
+                        let error = String(data: errorData, encoding: .utf8) ?? ""
+                        
+                        resumeLock.unlock()
+                        continuation.resume(returning: (process.terminationStatus, output, error, process))
+                    } else {
+                        resumeLock.unlock()
+                    }
+                } catch {
+                    resumeLock.lock()
+                    if !hasResumed {
+                        hasResumed = true
+                        resumeLock.unlock()
+                        continuation.resume(returning: (-1, "", error.localizedDescription, process))
+                    } else {
+                        resumeLock.unlock()
+                    }
+                }
+            }
+        }
+    }
 
 }
+

@@ -17,6 +17,7 @@ struct TransferItemData: Identifiable {
     let bytesTransferred: UInt64
     let totalBytes: UInt64
     let isComplete: Bool
+    let isCancelled: Bool
     let error: String?
     let isUpload: Bool
 }
@@ -24,6 +25,7 @@ struct TransferItemData: Identifiable {
 struct TransferProgressView: View {
     let title: String
     let items: [TransferItemData]
+    var onCancel: ((TransferItemData) -> Void)? = nil
     
     var body: some View {
         VStack(spacing: 0) {
@@ -62,7 +64,7 @@ struct TransferProgressView: View {
                 
                 // Transfer items
                 ForEach(items) { item in
-                    TransferItemView(item: item)
+                    TransferItemView(item: item, onCancel: onCancel)
                 }
             }
             .padding(16)
@@ -90,6 +92,7 @@ struct TransferProgressView: View {
 
 struct TransferItemView: View {
     let item: TransferItemData
+    var onCancel: ((TransferItemData) -> Void)? = nil
     
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -111,10 +114,25 @@ struct TransferItemView: View {
                         .foregroundColor(.red)
                         .font(.caption)
                         .help(error)
+                } else if item.isCancelled {
+                    Text("Cancelled")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 } else if item.isComplete {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundColor(.green)
                         .font(.body)
+                } else {
+                    // Cancel button - only show for in-progress transfers
+                    Button(action: {
+                        onCancel?(item)
+                    }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.body)
+                            .foregroundColor(.secondary.opacity(0.7))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Cancel transfer")
                 }
             }
             
@@ -194,6 +212,8 @@ struct TransferItemView: View {
     private var statusColor: Color {
         if item.error != nil {
             return .red
+        } else if item.isCancelled {
+            return .secondary
         } else if item.isComplete {
             return .green
         } else {
