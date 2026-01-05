@@ -46,7 +46,7 @@ struct UnifiedFile: Identifiable {
         self.path = adbFile.path
         self.isDirectory = adbFile.isDirectory
         self.size = adbFile.size
-        self.modificationDate = nil
+        self.modificationDate = adbFile.modificationDate
     }
 }
 
@@ -83,7 +83,6 @@ struct ADBFile {
     let path: String
     let isDirectory: Bool
     let size: UInt64
-    // Note: 'ls -la' provides a date string that is complex to parse reliably.
-    // We will omit it from this model for simplicity and rely on the UnifiedFile's optional date.
+    let modificationDate: Date?
 }
 

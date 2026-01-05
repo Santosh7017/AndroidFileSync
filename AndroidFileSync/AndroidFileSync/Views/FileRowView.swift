@@ -203,7 +203,8 @@ struct FileRowView: View {
                     name: "Sample Video.mp4",
                     path: "/sdcard/Sample Video.mp4",
                     isDirectory: false,
-                    size: 1024 * 1024 * 150
+                    size: 1024 * 1024 * 150,
+                    modificationDate: Date()
                 )
             ),
             isSelected: false,
@@ -218,7 +219,8 @@ struct FileRowView: View {
                     name: "DCIM",
                     path: "/sdcard/DCIM",
                     isDirectory: true,
-                    size: 0
+                    size: 0,
+                    modificationDate: nil
                 )
             ),
             isSelected: true,

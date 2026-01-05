@@ -59,6 +59,13 @@ struct ContentView: View {
                 }
                 return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
             }
+        case .date:
+            result.sort { 
+                // Newest first; nil dates go to the end
+                let date0 = $0.modificationDate ?? Date.distantPast
+                let date1 = $1.modificationDate ?? Date.distantPast
+                return date0 > date1
+            }
         }
         
         return result
@@ -94,6 +101,7 @@ struct ContentView: View {
                             searchQuery: $searchQuery,
                             totalFileCount: files.count,
                             filteredFileCount: filteredFiles.count,
+                            selectedSort: sortOption,
                             onSortChanged: { option in
                                 sortFiles(by: option)
                             }
@@ -117,7 +125,9 @@ struct ContentView: View {
                             onBatchDownload: handleBatchDownload,
                             onBatchChangeExtension: { ext in handleBatchChangeExtension(ext) },
                             onCopy: { files in fileActionManager.copyToClipboard(files) },
-                            onCut: { files in fileActionManager.cutToClipboard(files) }
+                            onCut: { files in fileActionManager.cutToClipboard(files) },
+                            sortOption: sortOption,
+                            onSortChange: { option in sortFiles(by: option) }
                         )
                     }
                 }

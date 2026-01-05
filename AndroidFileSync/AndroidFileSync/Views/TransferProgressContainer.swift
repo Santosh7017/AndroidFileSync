@@ -16,6 +16,7 @@ struct TransferProgressContainer: View {
             TransferProgressView(
                 title: "Active Transfers",
                 items: getTransferItems(),
+                batchInfo: getBatchInfo(),
                 onCancel: { item in
                     handleCancel(item)
                 }
@@ -33,6 +34,19 @@ struct TransferProgressContainer: View {
             let devicePath = String(item.id.dropFirst("download_".count))
             downloadManager.cancelDownload(devicePath: devicePath)
         }
+    }
+    
+    /// Returns batch info for showing overall progress
+    private func getBatchInfo() -> BatchTransferInfo? {
+        // Only show batch info if there's an active batch download
+        if downloadManager.isBatchDownloading && downloadManager.batchTotal > 1 {
+            return BatchTransferInfo(
+                completed: downloadManager.batchCompleted,
+                total: downloadManager.batchTotal,
+                isDownload: true
+            )
+        }
+        return nil
     }
     
     private func getTransferItems() -> [TransferItemData] {
@@ -75,4 +89,3 @@ struct TransferProgressContainer: View {
         return items
     }
 }
-

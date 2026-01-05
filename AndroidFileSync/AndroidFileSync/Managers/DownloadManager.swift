@@ -315,6 +315,13 @@ class DownloadManager: ObservableObject {
     ) async {
         guard !files.isEmpty else { return }
         
+        // Initialize batch tracking
+        await MainActor.run {
+            batchTotal = files.count
+            batchCompleted = 0
+            isBatchDownloading = true
+        }
+        
         print("📥 Starting parallel download of \(files.count) files (max concurrent: \(maxConcurrent))")
         
         await withTaskGroup(of: Void.self) { group in
@@ -338,8 +345,16 @@ class DownloadManager: ObservableObject {
                                 fileSize: file.fileSize,
                                 to: file.localPath
                             )
+                            // Increment completed count on success
+                            await MainActor.run {
+                                self.batchCompleted += 1
+                            }
                         } catch {
                             print("❌ Failed to download \(file.fileName): \(error)")
+                            // Still increment completed (even if failed) to track progress
+                            await MainActor.run {
+                                self.batchCompleted += 1
+                            }
                         }
                     }
                 }
@@ -354,6 +369,11 @@ class DownloadManager: ObservableObject {
             
             // Wait for remaining downloads to complete
             await group.waitForAll()
+        }
+        
+        // Reset batch tracking
+        await MainActor.run {
+            isBatchDownloading = false
         }
         
         print("✅ All \(files.count) downloads completed")

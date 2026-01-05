@@ -24,16 +24,16 @@ struct ActionToolbar: View {
     var totalFileCount: Int = 0
     var filteredFileCount: Int = 0
     
-    // Callbacks
+    // Sorting - passed in from parent for sync with column headers
+    var selectedSort: SortOption = .name
     var onSortChanged: ((SortOption) -> Void)?
-    
-    @State private var selectedSort: SortOption = .name
     @FocusState private var isSearchFocused: Bool
     
     enum SortOption: String, CaseIterable {
         case name = "Name"
         case size = "Size"
         case type = "Type"
+        case date = "Date"
     }
     
     var isSearchActive: Bool {
@@ -201,7 +201,6 @@ struct ActionToolbar: View {
             Menu {
                 ForEach(SortOption.allCases, id: \.self) { option in
                     Button {
-                        selectedSort = option
                         onSortChanged?(option)
                     } label: {
                         HStack {

@@ -24,6 +24,10 @@ struct FileBrowserView: View, Equatable {
     var onCopy: (([UnifiedFile]) -> Void)? = nil
     var onCut: (([UnifiedFile]) -> Void)? = nil
     
+    // Sorting support
+    var sortOption: ActionToolbar.SortOption = .name
+    var onSortChange: ((ActionToolbar.SortOption) -> Void)? = nil
+    
     // Equatable implementation - only compare data that affects rendering
     static func == (lhs: FileBrowserView, rhs: FileBrowserView) -> Bool {
         lhs.files.map(\.id) == rhs.files.map(\.id) &&
@@ -250,113 +254,99 @@ struct FileBrowserView: View, Equatable {
     }
     
     private var fileList: some View {
-        Table(files, selection: $selectedFiles) {
-            TableColumn("Name") { file in
-                HStack(spacing: 8) {
-                    Image(systemName: getFileIcon(for: file))
-                        .foregroundColor(getFileColor(for: file))
-                        .frame(width: 20)
-                    
-                    Text(file.name)
-                        .lineLimit(1)
+        VStack(spacing: 0) {
+            // Custom sortable column headers
+            SortableFileHeader(
+                currentSort: sortOption,
+                onSortChange: { newSort in
+                    onSortChange?(newSort)
                 }
-            }
-            .width(min: 200, ideal: 300)
-            
-            TableColumn("Size") { file in
-                if file.isDirectory {
-                    Text("--")
-                        .foregroundColor(.secondary)
-                } else {
-                    Text(formatBytes(file.size))
-                        .foregroundColor(.secondary)
-                }
-            }
-            .width(min: 80, ideal: 100)
-            
-            TableColumn("Type") { file in
-                Text(file.isDirectory ? "Folder" : getFileType(for: file))
-                    .foregroundColor(.secondary)
-            }
-            .width(min: 80, ideal: 120)
-        }
-        .contextMenu(forSelectionType: UUID.self) { selectedIds in
-            let selectedCount = selectedIds.count
-            let isSingleSelection = selectedCount == 1
-            let selectedItems = files.filter { selectedIds.contains($0.id) }
-            let hasOnlyFiles = !selectedItems.isEmpty && selectedItems.allSatisfy { !$0.isDirectory }
-            
-            // Download - show for files
-            if let firstId = selectedIds.first,
-               let file = files.first(where: { $0.id == firstId }),
-               !file.isDirectory {
-                Button(isSingleSelection ? "Download" : "Download Selected") {
-                    if isSingleSelection {
-                        onDownload(file)
-                    } else {
-                        onBatchDownload?()
-                    }
-                }
-                Divider()
-            }
-            
-            // Copy
-            Button(isSingleSelection ? "Copy" : "Copy \(selectedCount) items") {
-                onCopy?(selectedItems)
-            }
-            
-            // Cut
-            Button(isSingleSelection ? "Cut" : "Cut \(selectedCount) items") {
-                onCut?(selectedItems)
-            }
+            )
             
             Divider()
             
-            // Rename - only for single selection
-            if isSingleSelection,
-               let firstId = selectedIds.first,
-               let file = files.first(where: { $0.id == firstId }) {
-                Button("Rename") {
-                    fileToRename = file
-                    newFileName = file.name
-                    showRenameDialog = true
+            // File list with selection
+            ScrollViewReader { proxy in
+                List(files, selection: $selectedFiles) { file in
+                    SortableFileRow(file: file)
+                        .tag(file.id)
+                        .contextMenu {
+                            fileContextMenu(for: file)
+                        }
+                        .onTapGesture(count: 2) {
+                            if file.isDirectory {
+                                onNavigate(file.path)
+                            } else {
+                                onDownload(file)
+                            }
+                        }
                 }
-                .disabled(onRename == nil)
-            }
-            
-            // Change Extension - only for multiple files (no folders)
-            if selectedCount > 1 && hasOnlyFiles {
-                Button("Change Extension...") {
-                    showExtensionDialog = true
-                }
-                .disabled(onBatchChangeExtension == nil)
-            }
-            
-            // Move to Trash - always available
-            Button(isSingleSelection ? "Move to Trash" : "Move \(selectedCount) items to Trash", role: .destructive) {
-                if isSingleSelection,
-                   let firstId = selectedIds.first,
-                   let file = files.first(where: { $0.id == firstId }) {
-                    fileToDelete = file
-                    showDeleteConfirmation = true
-                } else {
-                    // Show confirmation for batch delete
-                    batchDeleteCount = selectedCount
-                    showBatchDeleteConfirmation = true
-                }
-            }
-            .disabled(onDelete == nil)
-        } primaryAction: { selectedIds in
-            // Double-click or Enter key action
-            if let firstId = selectedIds.first,
-               let file = files.first(where: { $0.id == firstId }) {
-                if file.isDirectory {
-                    onNavigate(file.path)
-                } else {
-                    onDownload(file)
-                }
+                .listStyle(.inset)
             }
         }
+    }
+    
+    @ViewBuilder
+    private func fileContextMenu(for file: UnifiedFile) -> some View {
+        let selectedItems = files.filter { selectedFiles.contains($0.id) }
+        let isSingleSelection = selectedFiles.count <= 1
+        let hasOnlyFiles = !selectedItems.isEmpty && selectedItems.allSatisfy { !$0.isDirectory }
+        
+        // Download - show for files
+        if !file.isDirectory {
+            Button(isSingleSelection ? "Download" : "Download Selected") {
+                if isSingleSelection {
+                    onDownload(file)
+                } else {
+                    onBatchDownload?()
+                }
+            }
+            Divider()
+        }
+        
+        // Copy
+        Button(isSingleSelection ? "Copy" : "Copy \(selectedFiles.count) items") {
+            let items = isSingleSelection ? [file] : selectedItems
+            onCopy?(items)
+        }
+        
+        // Cut
+        Button(isSingleSelection ? "Cut" : "Cut \(selectedFiles.count) items") {
+            let items = isSingleSelection ? [file] : selectedItems
+            onCut?(items)
+        }
+        
+        Divider()
+        
+        // Rename - only for single selection
+        if isSingleSelection {
+            Button("Rename") {
+                fileToRename = file
+                newFileName = file.name
+                showRenameDialog = true
+            }
+            .disabled(onRename == nil)
+        }
+        
+        // Change Extension - only for multiple files (no folders)
+        if selectedFiles.count > 1 && hasOnlyFiles {
+            Button("Change Extension...") {
+                showExtensionDialog = true
+            }
+            .disabled(onBatchChangeExtension == nil)
+        }
+        
+        // Move to Trash - always available
+        Button(isSingleSelection ? "Move to Trash" : "Move \(selectedFiles.count) items to Trash", role: .destructive) {
+            if isSingleSelection {
+                fileToDelete = file
+                showDeleteConfirmation = true
+            } else {
+                batchDeleteCount = selectedFiles.count
+                showBatchDeleteConfirmation = true
+            }
+        }
+        .disabled(onDelete == nil)
     }
     
     // MARK: - Helper Functions
@@ -427,5 +417,178 @@ struct FileBrowserView: View, Equatable {
                 onUpload(openPanel.urls)
             }
         }
+    }
+}
+
+// MARK: - Sortable File Header
+
+struct SortableFileHeader: View {
+    let currentSort: ActionToolbar.SortOption
+    let onSortChange: (ActionToolbar.SortOption) -> Void
+    
+    var body: some View {
+        HStack(spacing: 0) {
+            SortableColumnHeader(
+                title: "Name",
+                option: .name,
+                currentSort: currentSort,
+                onTap: onSortChange
+            )
+            .frame(minWidth: 200, maxWidth: .infinity, alignment: .leading)
+            
+            SortableColumnHeader(
+                title: "Size",
+                option: .size,
+                currentSort: currentSort,
+                onTap: onSortChange
+            )
+            .frame(width: 90, alignment: .trailing)
+            
+            SortableColumnHeader(
+                title: "Date",
+                option: .date,
+                currentSort: currentSort,
+                onTap: onSortChange
+            )
+            .frame(width: 100, alignment: .trailing)
+            
+            SortableColumnHeader(
+                title: "Type",
+                option: .type,
+                currentSort: currentSort,
+                onTap: onSortChange
+            )
+            .frame(width: 80, alignment: .center)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.95))
+    }
+}
+
+struct SortableColumnHeader: View {
+    let title: String
+    let option: ActionToolbar.SortOption
+    let currentSort: ActionToolbar.SortOption
+    let onTap: (ActionToolbar.SortOption) -> Void
+    
+    var isSelected: Bool { option == currentSort }
+    
+    var body: some View {
+        Button(action: { onTap(option) }) {
+            HStack(spacing: 4) {
+                Text(title)
+                    .font(.system(.caption, weight: isSelected ? .semibold : .medium))
+                    .foregroundColor(isSelected ? .accentColor : .secondary)
+                
+                if isSelected {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(.accentColor)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+    }
+}
+
+// MARK: - Sortable File Row View
+
+struct SortableFileRow: View {
+    let file: UnifiedFile
+    
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter
+    }()
+    
+    var body: some View {
+        HStack(spacing: 0) {
+            // Name column
+            HStack(spacing: 8) {
+                Image(systemName: fileIcon)
+                    .foregroundColor(fileColor)
+                    .frame(width: 18)
+                
+                Text(file.name)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .frame(minWidth: 200, maxWidth: .infinity, alignment: .leading)
+            
+            // Size column
+            Text(file.isDirectory ? "--" : formatBytes(file.size))
+                .font(.system(.callout, design: .monospaced))
+                .foregroundColor(.secondary)
+                .frame(width: 90, alignment: .trailing)
+            
+            // Date column
+            Text(dateText)
+                .font(.system(.caption, design: .default))
+                .foregroundColor(.secondary)
+                .frame(width: 100, alignment: .trailing)
+            
+            // Type column
+            Text(file.isDirectory ? "Folder" : fileType)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .frame(width: 80, alignment: .center)
+        }
+        .padding(.vertical, 4)
+    }
+    
+    private var dateText: String {
+        if let date = file.modificationDate {
+            return Self.dateFormatter.string(from: date)
+        }
+        return "--"
+    }
+    
+    private var fileIcon: String {
+        if file.isDirectory {
+            switch file.name.lowercased() {
+            case "dcim", "camera": return "camera.fill"
+            case "download", "downloads": return "arrow.down.circle.fill"
+            case "pictures", "photos": return "photo.fill"
+            case "music": return "music.note"
+            case "movies", "videos": return "film.fill"
+            case "documents": return "doc.fill"
+            default: return "folder.fill"
+            }
+        }
+        
+        let ext = (file.name as NSString).pathExtension.lowercased()
+        switch ext {
+        case "jpg", "jpeg", "png", "gif", "heic", "webp": return "photo"
+        case "mp4", "mov", "avi", "mkv": return "film"
+        case "mp3", "m4a", "wav", "flac": return "music.note"
+        case "pdf": return "doc.text"
+        case "zip", "rar", "7z": return "doc.zipper"
+        case "apk": return "app.badge"
+        default: return "doc"
+        }
+    }
+    
+    private var fileColor: Color {
+        if file.isDirectory { return .blue }
+        
+        let ext = (file.name as NSString).pathExtension.lowercased()
+        switch ext {
+        case "jpg", "jpeg", "png", "gif", "heic", "webp": return .purple
+        case "mp4", "mov", "avi", "mkv": return .red
+        case "mp3", "m4a", "wav", "flac": return .pink
+        case "pdf": return .orange
+        case "apk": return .green
+        default: return .secondary
+        }
+    }
+    
+    private var fileType: String {
+        let ext = (file.name as NSString).pathExtension.lowercased()
+        if ext.isEmpty { return "File" }
+        return ext.uppercased()
     }
 }

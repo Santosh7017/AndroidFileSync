@@ -124,7 +124,7 @@ class ADBManager {
                     let name = rest
                     guard !name.isEmpty && name != "." && name != ".." else { return }
                     let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
-                    files.append(ADBFile(name: name, path: fullPath, isDirectory: true, size: 0))
+                    files.append(ADBFile(name: name, path: fullPath, isDirectory: true, size: 0, modificationDate: nil))
                 } else if typeChar == "f" {
                     // File: "f size name"
                     let parts = rest.split(separator: " ", maxSplits: 1)
@@ -133,14 +133,14 @@ class ADBManager {
                         let name = String(parts[1])
                         guard !name.isEmpty else { return }
                         let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
-                        files.append(ADBFile(name: name, path: fullPath, isDirectory: false, size: size))
+                        files.append(ADBFile(name: name, path: fullPath, isDirectory: false, size: size, modificationDate: nil))
                     }
                 } else {
                     // Unknown type, treat as file
                     let name = rest
                     guard !name.isEmpty && name != "." && name != ".." else { return }
                     let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
-                    files.append(ADBFile(name: name, path: fullPath, isDirectory: false, size: 0))
+                    files.append(ADBFile(name: name, path: fullPath, isDirectory: false, size: 0, modificationDate: nil))
                 }
             }
             return files
@@ -151,7 +151,7 @@ class ADBManager {
             let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
             // Guess directory by common patterns or lack of extension
             let isDir = !name.contains(".")
-            files.append(ADBFile(name: name, path: fullPath, isDirectory: isDir, size: 0))
+            files.append(ADBFile(name: name, path: fullPath, isDirectory: isDir, size: 0, modificationDate: nil))
         }
         
         return files
@@ -178,6 +178,11 @@ class ADBManager {
         var files: [ADBFile] = []
         let lines = output.components(separatedBy: "\n")
         
+        // Date formatter for Android ls -la output (format: YYYY-MM-DD HH:MM)
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd HH:mm"
+        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+        
         for lineStr in lines {
             if lineStr.isEmpty || lineStr.hasPrefix("total") { continue }
             
@@ -187,12 +192,22 @@ class ADBManager {
             let perms = String(parts[0])
             let isDir = perms.hasPrefix("d")
             let size = UInt64(parts[4]) ?? 0
+            
+            // Parse date - Android ls -la typically shows: YYYY-MM-DD HH:MM
+            // parts[5] = date (2025-01-05), parts[6] = time (14:30)
+            var modDate: Date? = nil
+            if parts.count >= 8 {
+                let dateStr = "\(parts[5]) \(parts[6])"
+                modDate = dateFormatter.date(from: dateStr)
+            }
+            
+            // Name starts at parts[7]
             let name = parts[7...].joined(separator: " ")
             
             guard !name.isEmpty && name != "." && name != ".." else { continue }
             
             let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
-            files.append(ADBFile(name: name, path: fullPath, isDirectory: isDir, size: size))
+            files.append(ADBFile(name: name, path: fullPath, isDirectory: isDir, size: size, modificationDate: modDate))
         }
         
         return files
