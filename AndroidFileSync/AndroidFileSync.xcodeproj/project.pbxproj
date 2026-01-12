@@ -6,25 +6,6 @@
 	objectVersion = 77;
 	objects = {
 
-/* Begin PBXBuildFile section */
-		453BAF1E2EC66C1D008AABAB /* UniformTypeIdentifiers.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 453BAF1D2EC66C1D008AABAB /* UniformTypeIdentifiers.framework */; };
-		453BAF2A2EC66C1D008AABAB /* AndroidFileProvider.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 453BAF1B2EC66C1C008AABAB /* AndroidFileProvider.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
-		457617932ECF8D260068FF35 /* libmtp.9.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 457617912ECF8D260068FF35 /* libmtp.9.dylib */; };
-		457617942ECF8D260068FF35 /* libusb-1.0.0.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 457617922ECF8D260068FF35 /* libusb-1.0.0.dylib */; };
-		457617962ECF8D670068FF35 /* libmtp.9.dylib in CopyFiles */ = {isa = PBXBuildFile; fileRef = 457617912ECF8D260068FF35 /* libmtp.9.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
-		457617972ECF8D670068FF35 /* libusb-1.0.0.dylib in CopyFiles */ = {isa = PBXBuildFile; fileRef = 457617922ECF8D260068FF35 /* libusb-1.0.0.dylib */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
-/* End PBXBuildFile section */
-
-/* Begin PBXContainerItemProxy section */
-		453BAF282EC66C1D008AABAB /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = 453BAF012EC66BC4008AABAB /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 453BAF1A2EC66C1C008AABAB;
-			remoteInfo = AndroidFileProvider;
-		};
-/* End PBXContainerItemProxy section */
-
 /* Begin PBXCopyFilesBuildPhase section */
 		453BAF2F2EC66C1D008AABAB /* Embed Foundation Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
@@ -32,40 +13,18 @@
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (
-				453BAF2A2EC66C1D008AABAB /* AndroidFileProvider.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		457617952ECF8D3C0068FF35 /* CopyFiles */ = {
-			isa = PBXCopyFilesBuildPhase;
-			buildActionMask = 2147483647;
-			dstPath = "";
-			dstSubfolderSpec = 10;
-			files = (
-				457617962ECF8D670068FF35 /* libmtp.9.dylib in CopyFiles */,
-				457617972ECF8D670068FF35 /* libusb-1.0.0.dylib in CopyFiles */,
-			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		453BAF092EC66BC4008AABAB /* AndroidFileSync.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AndroidFileSync.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		453BAF1B2EC66C1C008AABAB /* AndroidFileProvider.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = AndroidFileProvider.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		453BAF1D2EC66C1D008AABAB /* UniformTypeIdentifiers.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UniformTypeIdentifiers.framework; path = System/Library/Frameworks/UniformTypeIdentifiers.framework; sourceTree = SDKROOT; };
-		457617912ECF8D260068FF35 /* libmtp.9.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libmtp.9.dylib; path = ../../../../../opt/homebrew/Cellar/libmtp/1.1.22/lib/libmtp.9.dylib; sourceTree = "<group>"; };
-		457617922ECF8D260068FF35 /* libusb-1.0.0.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = "libusb-1.0.0.dylib"; path = "../../../../../opt/homebrew/Cellar/libusb/1.0.29/lib/libusb-1.0.0.dylib"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		453BAF2B2EC66C1D008AABAB /* Exceptions for "AndroidFileProvider" folder in "AndroidFileProvider" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Info.plist,
-			);
-			target = 453BAF1A2EC66C1C008AABAB /* AndroidFileProvider */;
-		};
 		4581BF0A2ED0772200D2F9EC /* Exceptions for "AndroidFileSync" folder in "AndroidFileSync" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
@@ -75,7 +34,7 @@
 				Managers/ADBManager.swift,
 				Managers/DeviceManager.swift,
 				Managers/DownloadManager.swift,
-				Managers/MTPDevice.swift,
+				Managers/FileActionManager.swift,
 				Managers/UploadManager.swift,
 				Models/Models.swift,
 				Utilities/DropCoordinator.swift,
@@ -87,59 +46,25 @@
 				Utilities/Shell.swift,
 				Utilities/SidebarView.swift,
 				Utilities/ThrottledPublisher.swift,
+				Views/ActionToolbar.swift,
 				Views/EmptyStateView.swift,
 				Views/FileBrowserView.swift,
 				Views/FileRowView.swift,
 				Views/HeaderView.swift,
+				Views/SelectionToolbar.swift,
+				Views/TransferProgressContainer.swift,
 				Views/TransferProgressView.swift,
+				Views/TrashView.swift,
 			);
 			target = 453BAF082EC66BC4008AABAB /* AndroidFileSync */;
-		};
-		4581BF0B2ED0772200D2F9EC /* Exceptions for "AndroidFileSync" folder in "AndroidFileProvider" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				AndroidFileSyncApp.swift,
-				Assets.xcassets,
-				ContentView.swift,
-				Managers/ADBManager.swift,
-				Managers/DeviceManager.swift,
-				Managers/DownloadManager.swift,
-				Managers/MTPDevice.swift,
-				Managers/UploadManager.swift,
-				Models/Models.swift,
-				Utilities/DropCoordinator.swift,
-				Utilities/FileDropDelegate.swift,
-				Utilities/FileNameHelper.swift,
-				Utilities/Logger.swift,
-				Utilities/QuickAccessItem.swift,
-				Utilities/Settings.swift,
-				Utilities/Shell.swift,
-				Utilities/SidebarView.swift,
-				Utilities/ThrottledPublisher.swift,
-				Views/EmptyStateView.swift,
-				Views/FileBrowserView.swift,
-				Views/FileRowView.swift,
-				Views/HeaderView.swift,
-				Views/TransferProgressView.swift,
-			);
-			target = 453BAF1A2EC66C1C008AABAB /* AndroidFileProvider */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		453BAF1F2EC66C1D008AABAB /* AndroidFileProvider */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				453BAF2B2EC66C1D008AABAB /* Exceptions for "AndroidFileProvider" folder in "AndroidFileProvider" target */,
-			);
-			path = AndroidFileProvider;
-			sourceTree = "<group>";
-		};
 		4581BF032ED0772200D2F9EC /* AndroidFileSync */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
 				4581BF0A2ED0772200D2F9EC /* Exceptions for "AndroidFileSync" folder in "AndroidFileSync" target */,
-				4581BF0B2ED0772200D2F9EC /* Exceptions for "AndroidFileSync" folder in "AndroidFileProvider" target */,
 			);
 			path = AndroidFileSync;
 			sourceTree = "<group>";
@@ -151,16 +76,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				457617932ECF8D260068FF35 /* libmtp.9.dylib in Frameworks */,
-				457617942ECF8D260068FF35 /* libusb-1.0.0.dylib in Frameworks */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		453BAF182EC66C1C008AABAB /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				453BAF1E2EC66C1D008AABAB /* UniformTypeIdentifiers.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -171,7 +86,6 @@
 			isa = PBXGroup;
 			children = (
 				4581BF032ED0772200D2F9EC /* AndroidFileSync */,
-				453BAF1F2EC66C1D008AABAB /* AndroidFileProvider */,
 				453BAF1C2EC66C1D008AABAB /* Frameworks */,
 				453BAF0A2EC66BC4008AABAB /* Products */,
 			);
@@ -181,7 +95,6 @@
 			isa = PBXGroup;
 			children = (
 				453BAF092EC66BC4008AABAB /* AndroidFileSync.app */,
-				453BAF1B2EC66C1C008AABAB /* AndroidFileProvider.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -189,8 +102,6 @@
 		453BAF1C2EC66C1D008AABAB /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
-				457617912ECF8D260068FF35 /* libmtp.9.dylib */,
-				457617922ECF8D260068FF35 /* libusb-1.0.0.dylib */,
 				453BAF1D2EC66C1D008AABAB /* UniformTypeIdentifiers.framework */,
 			);
 			name = Frameworks;
@@ -207,12 +118,10 @@
 				453BAF062EC66BC4008AABAB /* Frameworks */,
 				453BAF072EC66BC4008AABAB /* Resources */,
 				453BAF2F2EC66C1D008AABAB /* Embed Foundation Extensions */,
-				457617952ECF8D3C0068FF35 /* CopyFiles */,
 			);
 			buildRules = (
 			);
 			dependencies = (
-				453BAF292EC66C1D008AABAB /* PBXTargetDependency */,
 			);
 			name = AndroidFileSync;
 			packageProductDependencies = (
@@ -220,29 +129,6 @@
 			productName = AndroidFileSync;
 			productReference = 453BAF092EC66BC4008AABAB /* AndroidFileSync.app */;
 			productType = "com.apple.product-type.application";
-		};
-		453BAF1A2EC66C1C008AABAB /* AndroidFileProvider */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = 453BAF2C2EC66C1D008AABAB /* Build configuration list for PBXNativeTarget "AndroidFileProvider" */;
-			buildPhases = (
-				453BAF172EC66C1C008AABAB /* Sources */,
-				453BAF182EC66C1C008AABAB /* Frameworks */,
-				453BAF192EC66C1C008AABAB /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			fileSystemSynchronizedGroups = (
-				453BAF1F2EC66C1D008AABAB /* AndroidFileProvider */,
-				4581BF032ED0772200D2F9EC /* AndroidFileSync */,
-			);
-			name = AndroidFileProvider;
-			packageProductDependencies = (
-			);
-			productName = AndroidFileProvider;
-			productReference = 453BAF1B2EC66C1C008AABAB /* AndroidFileProvider.appex */;
-			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -255,9 +141,6 @@
 				LastUpgradeCheck = 2610;
 				TargetAttributes = {
 					453BAF082EC66BC4008AABAB = {
-						CreatedOnToolsVersion = 26.1;
-					};
-					453BAF1A2EC66C1C008AABAB = {
 						CreatedOnToolsVersion = 26.1;
 					};
 				};
@@ -277,20 +160,12 @@
 			projectRoot = "";
 			targets = (
 				453BAF082EC66BC4008AABAB /* AndroidFileSync */,
-				453BAF1A2EC66C1C008AABAB /* AndroidFileProvider */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		453BAF072EC66BC4008AABAB /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		453BAF192EC66C1C008AABAB /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -307,22 +182,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		453BAF172EC66C1C008AABAB /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 /* End PBXSourcesBuildPhase section */
-
-/* Begin PBXTargetDependency section */
-		453BAF292EC66C1D008AABAB /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 453BAF1A2EC66C1C008AABAB /* AndroidFileProvider */;
-			targetProxy = 453BAF282EC66C1D008AABAB /* PBXContainerItemProxy */;
-		};
-/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		453BAF122EC66BC5008AABAB /* Debug */ = {
@@ -379,7 +239,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -437,7 +297,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
-				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = macosx;
@@ -452,6 +312,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				AUTOMATION_APPLE_EVENTS = NO;
 				CODE_SIGN_ENTITLEMENTS = AndroidFileSync/AndroidFileSync.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -473,8 +334,9 @@
 					/opt/homebrew/Cellar/libusb/1.0.29/lib,
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync;
+				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync1;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				REGISTER_APP_GROUPS = YES;
 				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
 				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
@@ -499,6 +361,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				AUTOMATION_APPLE_EVENTS = NO;
 				CODE_SIGN_ENTITLEMENTS = AndroidFileSync/AndroidFileSync.entitlements;
+				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
@@ -520,8 +383,9 @@
 					/opt/homebrew/Cellar/libusb/1.0.29/lib,
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync;
+				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync1;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
 				REGISTER_APP_GROUPS = YES;
 				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
 				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
@@ -534,66 +398,6 @@
 				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OBJC_BRIDGING_HEADER = "AndroidFileSync/AndroidFileSync-Bridging-Header.h";
-				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
-			};
-			name = Release;
-		};
-		453BAF2D2EC66C1D008AABAB /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = AndroidFileProvider/AndroidFileProvider.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 34TS8NHVHD;
-				ENABLE_APP_SANDBOX = NO;
-				ENABLE_HARDENED_RUNTIME = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = AndroidFileProvider/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = AndroidFileProvider;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/../Frameworks",
-					"@executable_path/../../../../Frameworks",
-				);
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync.AndroidFileProvider;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SKIP_INSTALL = YES;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
-				SWIFT_VERSION = 5.0;
-			};
-			name = Debug;
-		};
-		453BAF2E2EC66C1D008AABAB /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = AndroidFileProvider/AndroidFileProvider.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 34TS8NHVHD;
-				ENABLE_APP_SANDBOX = NO;
-				ENABLE_HARDENED_RUNTIME = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = AndroidFileProvider/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = AndroidFileProvider;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "";
-				LD_RUNPATH_SEARCH_PATHS = (
-					"$(inherited)",
-					"@executable_path/../Frameworks",
-					"@executable_path/../../../../Frameworks",
-				);
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync.AndroidFileProvider;
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SKIP_INSTALL = YES;
-				STRING_CATALOG_GENERATE_SYMBOLS = YES;
-				SWIFT_APPROACHABLE_CONCURRENCY = YES;
-				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 			};
@@ -616,15 +420,6 @@
 			buildConfigurations = (
 				453BAF152EC66BC5008AABAB /* Debug */,
 				453BAF162EC66BC5008AABAB /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		453BAF2C2EC66C1D008AABAB /* Build configuration list for PBXNativeTarget "AndroidFileProvider" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				453BAF2D2EC66C1D008AABAB /* Debug */,
-				453BAF2E2EC66C1D008AABAB /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

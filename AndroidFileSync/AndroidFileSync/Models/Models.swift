@@ -32,20 +32,21 @@ struct UnifiedFile: Identifiable {
     let size: UInt64
     let modificationDate: Date?
     
+    // Direct initializer
+    init(name: String, path: String, isDirectory: Bool, size: UInt64, modificationDate: Date? = nil) {
+        self.name = name
+        self.path = path
+        self.isDirectory = isDirectory
+        self.size = size
+        self.modificationDate = modificationDate
+    }
+    
     init(from adbFile: ADBFile) {
         self.name = adbFile.name
         self.path = adbFile.path
         self.isDirectory = adbFile.isDirectory
         self.size = adbFile.size
-        self.modificationDate = nil
-    }
-    
-    init(from mtpFile: MTPFile) {
-        self.name = mtpFile.name
-        self.path = "/sdcard/\(mtpFile.name)"
-        self.isDirectory = mtpFile.isFolder
-        self.size = mtpFile.size
-        self.modificationDate = mtpFile.modificationDate
+        self.modificationDate = adbFile.modificationDate
     }
 }
 
@@ -82,7 +83,6 @@ struct ADBFile {
     let path: String
     let isDirectory: Bool
     let size: UInt64
-    // Note: 'ls -la' provides a date string that is complex to parse reliably.
-    // We will omit it from this model for simplicity and rely on the UnifiedFile's optional date.
+    let modificationDate: Date?
 }
 

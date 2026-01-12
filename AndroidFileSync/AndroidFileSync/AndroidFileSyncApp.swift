@@ -1,5 +1,4 @@
 
-
 import SwiftUI
 
 @main
@@ -7,9 +6,18 @@ struct AndroidFileSyncApp: App {
     
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     
+    // Create managers at App level to prevent ContentView re-evaluation
+    @StateObject private var deviceManager = DeviceManager()
+    @StateObject private var downloadManager = DownloadManager()
+    @StateObject private var uploadManager = UploadManager()
+    
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(
+                deviceManager: deviceManager,
+                downloadManager: downloadManager,
+                uploadManager: uploadManager
+            )
         }
     }
 }
@@ -37,24 +45,19 @@ struct ConnectionBadge: View {
     
     var body: some View {
         HStack(spacing: 4) {
-            if type == .both {
-                Image(systemName: "bolt.fill")
-                    .foregroundColor(.yellow)
-                Text("Turbo")
-                    .font(.caption.bold())
-            } else if type == .adb {
+            if type == .adb {
                 Image(systemName: "bolt.fill")
                 Text("ADB")
                     .font(.caption)
             } else {
-                Image(systemName: "folder.fill")
-                Text("MTP")
+                Image(systemName: "xmark.circle")
+                Text("Disconnected")
                     .font(.caption)
             }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(type == .both ? Color.yellow.opacity(0.2) : Color.blue.opacity(0.2))
+        .background(type == .adb ? Color.blue.opacity(0.2) : Color.gray.opacity(0.2))
         .cornerRadius(4)
     }
 }

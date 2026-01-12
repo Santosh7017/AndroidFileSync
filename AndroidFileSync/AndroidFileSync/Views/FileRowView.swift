@@ -11,10 +11,23 @@ import SwiftUI
 
 struct FileRowView: View {
     let file: UnifiedFile
+    var isSelected: Bool = false
     let onDownload: (UnifiedFile) -> Void
+    let onDelete: ((UnifiedFile) -> Void)?
+    let onRename: ((UnifiedFile, String) -> Void)?
+    
+    @State private var showingDeleteConfirmation = false
+    @State private var showingRenameDialog = false
+    @State private var newFileName = ""
+    
     
     var body: some View {
         HStack(spacing: 12) {
+            // Selection Checkbox (Visual Only)
+            Image(systemName: isSelected ? "checkmark.square.fill" : "square")
+                .foregroundColor(isSelected ? .blue : .secondary)
+                .font(.title3)
+            
             fileIcon
             fileInfo
             Spacer()
@@ -22,6 +35,34 @@ struct FileRowView: View {
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
+        .contextMenu {
+            contextMenuItems
+        }
+        .alert("Delete \(file.name)?", isPresented: $showingDeleteConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Delete", role: .destructive) {
+                onDelete?(file)
+            }
+        } message: {
+            Text("This action cannot be undone.")
+        }
+        .alert("Rename \(file.name)", isPresented: $showingRenameDialog) {
+            TextField("New name", text: $newFileName)
+                .onAppear {
+                    newFileName = file.name
+                }
+            Button("Cancel", role: .cancel) {
+                newFileName = ""
+            }
+            Button("Rename") {
+                if !newFileName.isEmpty && newFileName != file.name {
+                    onRename?(file, newFileName)
+                }
+                newFileName = ""
+            }
+        } message: {
+            Text("Enter a new name for this \(file.isDirectory ? "folder" : "file")")
+        }
     }
     
     // MARK: - View Components
@@ -61,6 +102,33 @@ struct FileRowView: View {
             .buttonStyle(.plain)
             .help("Download to Mac")
         }
+    }
+    
+    @ViewBuilder
+    private var contextMenuItems: some View {
+        if !file.isDirectory {
+            Button {
+                onDownload(file)
+            } label: {
+                Label("Download", systemImage: "arrow.down.circle")
+            }
+            
+            Divider()
+        }
+        
+        Button {
+            showingRenameDialog = true
+        } label: {
+            Label("Rename", systemImage: "pencil")
+        }
+        .disabled(onRename == nil)
+        
+        Button(role: .destructive) {
+            showingDeleteConfirmation = true
+        } label: {
+            Label("Delete", systemImage: "trash")
+        }
+        .disabled(onDelete == nil)
     }
     
     // MARK: - Icon Selection
@@ -135,10 +203,14 @@ struct FileRowView: View {
                     name: "Sample Video.mp4",
                     path: "/sdcard/Sample Video.mp4",
                     isDirectory: false,
-                    size: 1024 * 1024 * 150
+                    size: 1024 * 1024 * 150,
+                    modificationDate: Date()
                 )
             ),
-            onDownload: { _ in }
+            isSelected: false,
+            onDownload: { _ in },
+            onDelete: { _ in },
+            onRename: { _, _ in }
         )
         
         FileRowView(
@@ -147,10 +219,14 @@ struct FileRowView: View {
                     name: "DCIM",
                     path: "/sdcard/DCIM",
                     isDirectory: true,
-                    size: 0
+                    size: 0,
+                    modificationDate: nil
                 )
             ),
-            onDownload: { _ in }
+            isSelected: true,
+            onDownload: { _ in },
+            onDelete: { _ in },
+            onRename: { _, _ in }
         )
     }
 }
