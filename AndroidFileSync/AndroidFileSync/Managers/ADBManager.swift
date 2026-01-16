@@ -9,46 +9,87 @@ class ADBManager {
     private static var adbPath: String?
 
     static func getADBPath() -> String {
-        if let cached = adbPath { return cached }
+        if let cached = adbPath { 
+            print("📱 ADB: Using cached path: \(cached)")
+            return cached 
+        }
         let fileManager = FileManager.default
+        let homeDir = fileManager.homeDirectoryForCurrentUser.path
         
         // First, try bundled ADB in app Resources
         if let bundledPath = Bundle.main.path(forResource: "adb", ofType: nil) {
             if fileManager.fileExists(atPath: bundledPath) {
+                print("📱 ADB: Found bundled ADB at: \(bundledPath)")
                 adbPath = bundledPath
                 return bundledPath
             }
         }
         
-        // Fallback to system-installed ADB
+        // Fallback to system-installed ADB - check many possible locations
         let possiblePaths = [
+            // Homebrew (Apple Silicon and Intel)
             "/opt/homebrew/bin/adb",
             "/usr/local/bin/adb",
-            "\(fileManager.homeDirectoryForCurrentUser.path)/Library/Android/sdk/platform-tools/adb",
-            "/usr/bin/adb"
+            // Android Studio default SDK locations
+            "\(homeDir)/Library/Android/sdk/platform-tools/adb",
+            "\(homeDir)/Android/Sdk/platform-tools/adb",
+            // Common alternative locations
+            "/Applications/Android Studio.app/Contents/plugins/android-sdk/platform-tools/adb",
+            "/usr/bin/adb",
+            // MacPorts
+            "/opt/local/bin/adb"
         ]
+        
         for path in possiblePaths {
             if fileManager.fileExists(atPath: path) {
+                print("📱 ADB: Found system ADB at: \(path)")
                 adbPath = path
                 return path
             }
         }
-        print("⚠️ ADB Manager: Defaulting to 'adb'")
-        return "adb"
+        
+        print("❌ ADB: Not found in any known location. Checked: \(possiblePaths)")
+        // Return empty string since "adb" without a full path will fail
+        return ""
     }
 
     static func isDeviceConnected() async -> Bool {
         let path = getADBPath()
-        let (code, output, _) = Shell.run(path, args: ["devices"])
-        if code != 0 { return false }
+        
+        // Check if ADB path is empty (not found on system)
+        if path.isEmpty {
+            print("❌ ADB: No ADB executable found on this system")
+            return false
+        }
+        
+        // Verify ADB executable actually exists at the path
+        if !FileManager.default.fileExists(atPath: path) {
+            print("❌ ADB: File does not exist at path: \(path)")
+            return false
+        }
+        
+        print("📱 ADB: Checking for devices using: \(path)")
+        
+        // Use async with timeout to prevent hanging if ADB is slow to respond
+        let (code, output, error) = await Shell.runAsyncWithTimeout(path, args: ["devices"], timeoutSeconds: 5.0)
+        
+        if code != 0 {
+            print("⚠️ ADB devices command failed with code: \(code), error: \(error)")
+            return false
+        }
+        
+        print("📱 ADB devices output: \(output)")
+        
         let lines = output.split(separator: "\n")
         for line in lines {
             let s = String(line)
             if !s.starts(with: "List") &&
                (s.contains("\tdevice") || s.hasSuffix(" device")) {
+                print("📱 Found connected device!")
                 return true
             }
         }
+        print("📱 No device found in ADB output")
         return false
     }
 

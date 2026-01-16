@@ -26,14 +26,19 @@ class DeviceManager: ObservableObject {
     // MARK: - Core Logic
     
     func detectDevice() async {
+        print("📱 DeviceManager: Starting device detection...")
         
         // Ensure UI shows "detecting" state
         if !isDetecting {
-            await MainActor.run { self.isDetecting = true }
+            await MainActor.run { 
+                self.isDetecting = true 
+                self.statusMessage = "Scanning for devices..."
+            }
         }
         
-        // Check for ADB devices
+        // Check for ADB devices (with timeout to prevent hanging)
         adbAvailable = await ADBManager.isDeviceConnected()
+        print("📱 DeviceManager: ADB available = \(adbAvailable)")
         
         // Update the state on the main thread
         await MainActor.run {
@@ -42,11 +47,13 @@ class DeviceManager: ObservableObject {
                 self.deviceName = "Android Device"
                 self.statusMessage = "Connected via ADB"
                 self.isConnected = true
+                print("📱 DeviceManager: Device connected!")
             } else {
                 self.connectionType = .none
                 self.deviceName = "No Device"
                 self.statusMessage = "No device detected. Please connect your device."
                 self.isConnected = false
+                print("📱 DeviceManager: No device found")
             }
             
             // Detection is complete, hide the initial loading screen

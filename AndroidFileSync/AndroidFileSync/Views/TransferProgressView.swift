@@ -261,7 +261,7 @@ struct TransferFileCard: View {
             } else {
                 // In progress - show percentage
                 Text("\(item.percentage)")
-                    .font(.system(size: 11, design: .rounded, weight: .bold))
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
                     .foregroundColor(.white)
             }
         }

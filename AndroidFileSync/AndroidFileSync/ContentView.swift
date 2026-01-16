@@ -9,12 +9,13 @@
 //
 
 import SwiftUI
+internal import Combine
 
 struct ContentView: View {
-    // Receive managers from App - don't observe them here
-    let deviceManager: DeviceManager
-    let downloadManager: DownloadManager
-    let uploadManager: UploadManager
+    // Observe managers from App to react to state changes
+    @ObservedObject var deviceManager: DeviceManager
+    @ObservedObject var downloadManager: DownloadManager
+    @ObservedObject var uploadManager: UploadManager
 
     @State private var files: [UnifiedFile] = []
     @State private var currentPath = "/sdcard"
@@ -132,8 +133,15 @@ struct ContentView: View {
                     }
                 }
             } else {
-                // Your EmptyStateView or a loading view
-                EmptyStateView()
+                // Empty state with retry button
+                EmptyStateView(
+                    isDetecting: deviceManager.isDetecting,
+                    onRetry: {
+                        Task {
+                            await initializeDevice()
+                        }
+                    }
+                )
             }
             
             // Enhanced Progress Views with Speed and Details (Isolated)
@@ -144,6 +152,18 @@ struct ContentView: View {
         }
         .frame(minWidth: 800, minHeight: 600)
         .task { await initializeDevice() }
+        // Auto-retry timer when not connected
+        .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
+            if !deviceManager.isConnected && !deviceManager.isDetecting {
+                Task {
+                    await deviceManager.detectDevice()
+                    if deviceManager.isConnected {
+                        currentPath = await deviceManager.getRealStoragePath()
+                        await loadFiles()
+                    }
+                }
+            }
+        }
         .alert("Error", isPresented: $showErrorAlert) {
             Button("OK", role: .cancel) {
                 fileActionManager.clearError()
