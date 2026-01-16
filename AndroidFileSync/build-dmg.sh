@@ -41,6 +41,18 @@ fi
 
 echo "✅ Build successful: $APP_PATH"
 
+# Copy bundled ADB to app Resources
+ADB_SOURCE="$APP_NAME/Resources/adb"
+if [ -f "$ADB_SOURCE" ]; then
+    echo "📦 Bundling ADB executable..."
+    mkdir -p "$APP_PATH/Contents/Resources"
+    cp "$ADB_SOURCE" "$APP_PATH/Contents/Resources/"
+    chmod +x "$APP_PATH/Contents/Resources/adb"
+    echo "✅ ADB bundled in app"
+else
+    echo "⚠️ Warning: ADB not found at $ADB_SOURCE - users will need ADB installed"
+fi
+
 # Copy app to DMG staging folder
 cp -R "$APP_PATH" "$DMG_DIR/"
 
