@@ -17,6 +17,32 @@ A native macOS app for managing files on your Android device via USB.
 
 ---
 
+## ⚠️ macOS Installation Issues
+
+Since this app is not from the App Store, macOS may block it. Here's how to fix:
+
+### "App is damaged and can't be opened"
+
+Run this command in Terminal:
+```bash
+xattr -cr /Applications/AndroidFileSync.app
+```
+Then try opening the app again.
+
+### "Cannot be opened because developer cannot be verified"
+
+**Method 1: Right-click to Open**
+1. Right-click (or Control-click) the app
+2. Select **Open** from the menu
+3. Click **Open** in the dialog
+
+**Method 2: System Settings**
+1. Go to **System Settings** → **Privacy & Security**
+2. Scroll down to find the blocked app message
+3. Click **"Open Anyway"**
+
+---
+
 ### Step 2: Enable USB Debugging on Android
 
 1. Open **Settings** → **About Phone**
@@ -90,31 +116,7 @@ A native macOS app for managing files on your Android device via USB.
 
 ---
 
-## ⚠️ macOS Installation Issues
 
-Since this app is not from the App Store, macOS may block it. Here's how to fix:
-
-### "App is damaged and can't be opened"
-
-Run this command in Terminal:
-```bash
-xattr -cr /Applications/AndroidFileSync.app
-```
-Then try opening the app again.
-
-### "Cannot be opened because developer cannot be verified"
-
-**Method 1: Right-click to Open**
-1. Right-click (or Control-click) the app
-2. Select **Open** from the menu
-3. Click **Open** in the dialog
-
-**Method 2: System Settings**
-1. Go to **System Settings** → **Privacy & Security**
-2. Scroll down to find the blocked app message
-3. Click **"Open Anyway"**
-
----
 
 ## Troubleshooting
 
@@ -143,6 +145,4 @@ open AndroidFileSync.xcodeproj
 # Press ⌘R to build and run
 ```
 
-## License
 
-MIT License - see [LICENSE](LICENSE)
