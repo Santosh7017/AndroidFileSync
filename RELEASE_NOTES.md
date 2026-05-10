@@ -14,13 +14,6 @@ A native macOS application for managing files and apps on Android devices via US
 - 🛡️ **Confirmation Dialogs** — Destructive actions (uninstall, disable, clear data, clear cache) now ask before proceeding
 - 🎯 **Context-Aware Batch Actions** — System tab shows Disable; Disabled tab shows Enable; User/All tab shows Uninstall
 
-### Bug Fixes
-- Fixed loading spinner growing oversized next to the Upload button when navigating folders
-- Fixed device IP showing as "Unknown" for connected devices
-- Removed stray checkmark from the Internal Storage sidebar item
-- Fixed "Uninstall All" showing for single-app selection — now correctly shows "Uninstall" for 1 app
-- Fixed System apps section showing "Uninstall" — now correctly shows "Disable"
-- Fixed Disabled apps section showing "Uninstall" — now correctly shows "Enable"
 
 ---
 
