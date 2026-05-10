@@ -71,16 +71,16 @@ struct AppBrowserView: View {
             Text(alertMessage)
         }
         .confirmationDialog(
-            "Uninstall \(selectedPackages.count) apps?",
+            batchConfirmTitle,
             isPresented: $showBatchConfirm,
             titleVisibility: .visible
         ) {
-            Button("Uninstall All", role: .destructive) {
-                Task { await performBatchUninstall() }
+            Button(batchConfirmActionLabel, role: .destructive) {
+                Task { await performBatchAction() }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This will permanently remove the selected apps from your device.")
+            Text(batchConfirmMessage)
         }
         // Single-app destructive action confirmation
         .confirmationDialog(
@@ -127,16 +127,16 @@ struct AppBrowserView: View {
             .buttonStyle(.bordered)
             .help("Install an APK file from your Mac")
 
-            // Batch uninstall
+            // Batch action button — label and action depend on current filter
             if !selectedPackages.isEmpty {
                 Button {
                     showBatchConfirm = true
                 } label: {
-                    Label("Uninstall (\(selectedPackages.count))", systemImage: "trash")
+                    Label(batchButtonLabel, systemImage: batchButtonIcon)
                         .font(.system(size: 12))
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.red)
+                .tint(batchButtonTint)
             }
 
             // Sort
@@ -365,15 +365,94 @@ struct AppBrowserView: View {
         }
     }
 
-    private func performBatchUninstall() async {
-        let results = await appManager.batchUninstall(packages: Array(selectedPackages))
-        let failed = results.filter { !$0.value }.keys
-        selectedPackages = []
-        await appManager.fetchApps(filter: selectedFilter)
-        if failed.isEmpty {
-            showResult("All selected apps uninstalled successfully.")
-        } else {
-            showResult("Some apps could not be uninstalled: \(failed.joined(separator: ", "))")
+    // MARK: - Batch confirmation helpers (context-aware by filter & count)
+
+    private var batchButtonLabel: String {
+        let n = selectedPackages.count
+        switch selectedFilter {
+        case .system:   return n == 1 ? "Disable (1)" : "Disable (\(n))"
+        case .disabled: return n == 1 ? "Enable (1)"  : "Enable (\(n))"
+        default:        return n == 1 ? "Uninstall (1)" : "Uninstall (\(n))"
+        }
+    }
+
+    private var batchButtonIcon: String {
+        switch selectedFilter {
+        case .system:   return "nosign"
+        case .disabled: return "checkmark.circle"
+        default:        return "trash"
+        }
+    }
+
+    private var batchButtonTint: Color {
+        switch selectedFilter {
+        case .system:   return .orange
+        case .disabled: return .green
+        default:        return .red
+        }
+    }
+
+    private var batchConfirmTitle: String {
+        let n = selectedPackages.count
+        let item = n == 1 ? "1 app" : "\(n) apps"
+        switch selectedFilter {
+        case .system:   return "Disable \(item)?"
+        case .disabled: return "Enable \(item)?"
+        default:        return "Uninstall \(item)?"
+        }
+    }
+
+    private var batchConfirmActionLabel: String {
+        let n = selectedPackages.count
+        switch selectedFilter {
+        case .system:   return n == 1 ? "Disable"   : "Disable All"
+        case .disabled: return n == 1 ? "Enable"    : "Enable All"
+        default:        return n == 1 ? "Uninstall" : "Uninstall All"
+        }
+    }
+
+    private var batchConfirmMessage: String {
+        switch selectedFilter {
+        case .system:   return "The selected system apps will be disabled for the current user. They can be re-enabled later."
+        case .disabled: return "The selected apps will be re-enabled and restored for the current user."
+        default:        return "This will permanently remove the selected apps from your device."
+        }
+    }
+
+    private func performBatchAction() async {
+        switch selectedFilter {
+        case .system:
+            var failed: [String] = []
+            for pkg in selectedPackages {
+                let (ok, _) = await appManager.disableSystemApp(package: pkg)
+                if !ok { failed.append(pkg) }
+            }
+            selectedPackages = []
+            await appManager.fetchApps(filter: selectedFilter)
+            showResult(failed.isEmpty
+                ? "All selected system apps disabled."
+                : "Some apps could not be disabled: \(failed.joined(separator: ", "))")
+
+        case .disabled:
+            var failed: [String] = []
+            for pkg in selectedPackages {
+                let (ok, _) = await appManager.enableApp(package: pkg)
+                if !ok { failed.append(pkg) }
+            }
+            selectedPackages = []
+            await appManager.fetchApps(filter: selectedFilter)
+            showResult(failed.isEmpty
+                ? "All selected apps re-enabled."
+                : "Some apps could not be enabled: \(failed.joined(separator: ", "))")
+
+        default:
+            let results = await appManager.batchUninstall(packages: Array(selectedPackages))
+            let failed = results.filter { !$0.value }.keys
+            selectedPackages = []
+            await appManager.fetchApps(filter: selectedFilter)
+            showResult(failed.isEmpty
+                ? "All selected apps uninstalled successfully."
+                : "Some apps could not be uninstalled: \(failed.joined(separator: ", "))")
         }
     }
 

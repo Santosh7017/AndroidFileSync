@@ -5,6 +5,7 @@ A free, native macOS app to transfer files between your Mac and Android phone �
 No cloud. No Google account needed. Plug in via USB or connect wirelessly over WiFi.
 
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-macOS%2013%2B-blue)
+![Version](https://img.shields.io/badge/version-2.0.0-green)
 
 ---
 
@@ -19,6 +20,8 @@ No cloud. No Google account needed. Plug in via USB or connect wirelessly over W
 - 🗑️ **Trash & Restore** — Deleted something by accident? Restore it, just like on macOS
 - ✂️ **Copy, Cut, Paste** — Move files between folders on your phone with clipboard shortcuts
 - 📝 **Rename & Batch operations** — Rename files, change extensions, delete in bulk
+- 💾 **SD Card support** — Browse and manage files on your external SD card
+- 📱 **App Manager** — Install, uninstall, disable and manage apps (System/User) on your Android device
 
 ---
 
@@ -71,14 +74,14 @@ Before the app can talk to your phone, you need to enable a hidden developer set
 1. Open **Settings** on your Android phone
 2. Scroll down and tap **About Phone**
 3. Find **Build Number** and tap it **7 times** quickly
-4. You'll see a message: *"You are now a developer!"*
+4. You'll see a message: _"You are now a developer!"_
 
 > **Samsung phones:** Go to **Settings → About Phone → Software Information → Build Number**
 
 ### Step 2: Turn On USB Debugging
 
 1. Go back to **Settings**
-2. Search and Tap **Developer Options** 
+2. Search and Tap **Developer Options**
 3. Find **USB Debugging** and turn it **ON**
 4. Tap **OK** when it asks you to confirm
 
@@ -144,21 +147,22 @@ If Auto-Discovery doesn't find your phone (for example, on a corporate network o
 
 ## Troubleshooting
 
-| Problem | What to Do |
-|---------|------------|
-| "Scanning for Device..." won't stop | Make sure USB Debugging is enabled and you tapped "Allow" on your phone |
-| Phone not showing up | Try a different USB cable — some cables only charge and can't transfer data |
-| WiFi pairing fails | Make sure both your Mac and phone are on the same WiFi network |
-| Pairing code not working | Go back to Wireless Debugging on your phone and tap "Pair device" again to get a fresh code |
-| Transfers are slow | Use a USB 3.0 cable and plug into a USB 3.0 port on your Mac |
-| Trash won't empty | Disconnect and reconnect your device, then try again |
-| App won't launch | Make sure you're on macOS 13.0 or newer, and that you ran the `xattr` command from step 3 |
+| Problem                             | What to Do                                                                                  |
+| ----------------------------------- | ------------------------------------------------------------------------------------------- |
+| "Scanning for Device..." won't stop | Make sure USB Debugging is enabled and you tapped "Allow" on your phone                     |
+| Phone not showing up                | Try a different USB cable — some cables only charge and can't transfer data                 |
+| WiFi pairing fails                  | Make sure both your Mac and phone are on the same WiFi network                              |
+| Pairing code not working            | Go back to Wireless Debugging on your phone and tap "Pair device" again to get a fresh code |
+| Transfers are slow                  | Use a USB 3.0 cable and plug into a USB 3.0 port on your Mac                                |
+| Trash won't empty                   | Disconnect and reconnect your device, then try again                                        |
+| App won't launch                    | Make sure you're on macOS 13.0 or newer, and that you ran the `xattr` command from step 3   |
 
 ---
 
 ## All Features
 
 ### Connectivity
+
 - **USB Connection** — Plug in and go, zero setup
 - **Wireless ADB (Android 11+)** — Connect over WiFi without a cable
 - **Auto-Discovery** — Automatically finds your phone on the network
@@ -167,19 +171,39 @@ If Auto-Discovery doesn't find your phone (for example, on a corporate network o
 - **Context-Aware Disconnect** — Cleanly disconnect wireless devices when you're done
 
 ### File Management
+
 - **File Browser** — Browse your phone's storage like a native Finder window
+- **SD Card Support** — Browse and manage files on your external SD card
 - **Drag & Drop** — Drag files from Finder straight to your phone
 - **Parallel Transfers** — Upload and download multiple files at the same time
 - **Conflict Resolution** — Detects duplicate files during uploads, lets you Skip or Replace
 - **Collision Prevention** — Automatically generates unique names when renaming or pasting to avoid overwrites
-- **Smart Sidebar** — Quick access to Camera, Downloads, Pictures, Music — hides folders that don't exist on your device
+- **Smart Sidebar** — Quick access to Camera, Downloads, Pictures, Music, SD Card — hides folders that don't exist on your device
 - **Native macOS Dialogs** — Polished rename and new folder prompts that feel right at home on Mac
 - **Search & Sort** — Search files instantly, sort by name, size, date, or type
 - **Batch Operations** — Change extensions or delete multiple files at once
 - **Copy, Cut & Paste** — Clipboard operations across folders on the device
 - **Trash & Restore** — Move files to trash and restore them later, just like macOS
+- **Delete Permanently** — Bypass Trash and permanently erase files/folders instantly
 - **File Preview** — Double-click to preview images, videos, PDFs, and documents
 - **Resizable Transfer Panel** — Collapsible, draggable progress view
+
+### App Management
+
+- **App Browser** — View all installed apps (User, System, Disabled) with icons and labels
+- **Install APK** — Sideload APK files directly from your Mac
+- **Uninstall Apps** — Remove user-installed apps with confirmation
+- **Disable System Apps** — Disable built-in system apps without rooting
+- **Re-enable Apps** — Restore previously disabled apps with one click
+- **Batch Actions** — Select multiple apps and uninstall/disable/enable them at once
+- **App Icons** — Real app icons extracted from APKs, with letter-avatar fallbacks
+- **Force Stop & Clear Data** — Stop misbehaving apps or wipe their data and cache
+- **Backup APK** — Save an app's APK file to your Mac before uninstalling
+
+### Safety
+
+- **Confirmation Dialogs** — All destructive actions (uninstall, disable, clear data) ask before proceeding
+- **Context-aware actions** — System tab shows Disable; Disabled tab shows Enable; User tab shows Uninstall
 
 ---
 
