@@ -16,9 +16,9 @@ echo "🔨 Building $APP_NAME..."
 rm -rf "$BUILD_DIR"
 mkdir -p "$DMG_DIR"
 
-# Clear extended attributes from source files
+# Clear extended attributes from source files (skip .git)
 echo "🧹 Clearing extended attributes..."
-xattr -cr .
+find . -not -path './.git/*' -not -path './.git' -print0 | xargs -0 xattr -c 2>/dev/null || true
 
 # Build the app in Release mode (skip code signing for distribution)
 xcodebuild -project "$APP_NAME.xcodeproj" \
