@@ -7,7 +7,7 @@ No cloud. No Google account needed. Plug in via USB or connect wirelessly over W
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-macOS%2013%2B-blue)
 ![Version](https://img.shields.io/badge/version-2.0.0-green)
 
-**[📥 Download Latest Version](#installation) • [🖼️ View Preview](#screenshots)**
+**[📥 Download Latest Version](#installation) • [🖼️ View Preview](#preview)**
 
 ---
 
@@ -62,7 +62,6 @@ open AndroidFileSync.xcodeproj
 ```
 
 Press ⌘R in Xcode to build and run. To create a DMG: `./build-dmg.sh`
-
 
 ## Setting Up Your Android Phone (One-Time)
 
