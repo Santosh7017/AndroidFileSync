@@ -7,6 +7,8 @@ No cloud. No Google account needed. Plug in via USB or connect wirelessly over W
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-macOS%2013%2B-blue)
 ![Version](https://img.shields.io/badge/version-2.0.0-green)
 
+**[📥 Download Latest Version](#installation) • [🖼️ View Preview](#screenshots)**
+
 ---
 
 ## What Can It Do?
@@ -61,7 +63,6 @@ open AndroidFileSync.xcodeproj
 
 Press ⌘R in Xcode to build and run. To create a DMG: `./build-dmg.sh`
 
----
 
 ## Setting Up Your Android Phone (One-Time)
 
@@ -142,6 +143,18 @@ If Auto-Discovery doesn't find your phone (for example, on a corporate network o
 6. **Right-click** any file for more options (Download, Rename, Delete, Copy, Cut)
 
 > A connection badge appears at the top: **blue** for USB, **green** for WiFi.
+
+---
+
+## Preview
+
+<p align="center">
+  <img src="docs/2026-05-15_18-47-43.png" width="800" alt="AndroidFileSync File Browser Screenshot">
+  <br><br>
+  <img src="docs/2026-05-15_18-50-22.png" width="800" alt="AndroidFileSync App Manager Screenshot">
+  <br><br>
+  <img src="docs/2026-05-15_18-52-42.png" width="800" alt="AndroidFileSync Wireless Connection Screenshot">
+</p>
 
 ---
 
