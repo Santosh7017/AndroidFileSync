@@ -68,6 +68,8 @@ struct EmptyStateView: View {
                             .cornerRadius(10)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Try Again")
                     }
                     
                     if let onWiFi = onConnectWiFi {
@@ -90,6 +92,8 @@ struct EmptyStateView: View {
                             .cornerRadius(10)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Connect via WiFi")
                     }
                 }
                 .padding(.top, 8)
@@ -103,6 +107,7 @@ struct EmptyStateView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(NSColor.windowBackgroundColor))
+        .id("empty_state_view_\(isDetecting)")
     }
     
     private var instructionsList: some View {
