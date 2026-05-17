@@ -39,7 +39,18 @@ That's it. The app comes with everything else built in.
 
 ## Installation
 
-### Download (Recommended)
+### Install via Homebrew (Recommended)
+
+The easiest way to install AndroidFileSync is using [Homebrew](https://brew.sh/):
+
+```bash
+brew tap santosh7017/androidfilesync
+brew install --cask androidfilesync
+```
+
+> **Note:** You don't need to run any `xattr` commands when installing with Homebrew. Just install and open!
+
+### Install Manually (DMG)
 
 1. Go to [**Releases**](https://github.com/Santosh7017/AndroidFileSync/releases) and download the latest `.dmg` file
 2. Open the DMG and drag **AndroidFileSync** into your **Applications** folder
