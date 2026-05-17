@@ -342,7 +342,7 @@
 					/opt/homebrew/Cellar/libmtp/1.1.22/lib,
 					/opt/homebrew/Cellar/libusb/1.0.29/lib,
 				);
-				MARKETING_VERSION = 2.0.0;
+				MARKETING_VERSION = 2.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync1;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -391,7 +391,7 @@
 					/opt/homebrew/Cellar/libmtp/1.1.22/lib,
 					/opt/homebrew/Cellar/libusb/1.0.29/lib,
 				);
-				MARKETING_VERSION = 2.0.0;
+				MARKETING_VERSION = 2.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync1;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
