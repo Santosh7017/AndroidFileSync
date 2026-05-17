@@ -252,6 +252,8 @@ class UploadManager: ObservableObject {
             }
         }
         
+        // Trigger media scan so uploaded files appear in Gallery immediately
+        await ADBManager.triggerMediaScan(path: safeDevicePath)
         
         // Show 100% briefly
         try? await Task.sleep(nanoseconds: 2_000_000_000)
@@ -344,6 +346,9 @@ class UploadManager: ObservableObject {
                 self.activeUploads[localPath]?.bytesTransferred = fileSize
                 self.activeUploads[localPath]?.transferSpeed = 0
             }
+            
+            // Trigger media scan so uploaded files appear in Gallery immediately
+            await ADBManager.triggerMediaScan(path: safeDevicePath)
             
             // Show 100% briefly
             try? await Task.sleep(nanoseconds: 2_000_000_000)

@@ -493,6 +493,7 @@ class FileActionManager: ObservableObject {
 
         var successCount = 0
         var failedItems: [(name: String, error: String)] = []
+        var successPaths: [String] = []
 
         for (file, destFile) in items {
             print("\u{1F4CB} Paste: \(operation == .cut ? "move" : "copy") '\(file.path)' \u{2192} '\(destFile)'")
@@ -502,11 +503,17 @@ class FileActionManager: ObservableObject {
                 } else {
                     try await ADBManager.copyFile(from: file.path, to: destFile, isDirectory: file.isDirectory)
                 }
+                successPaths.append(destFile)
                 successCount += 1
             } catch {
                 print("\u{274C} Failed to paste \(file.name): \(error.localizedDescription)")
                 failedItems.append((file.name, error.localizedDescription))
             }
+        }
+
+        // Trigger media scan for all pasted files (runs after paste is done, doesn't block UI)
+        for path in successPaths {
+            await ADBManager.triggerMediaScan(path: path)
         }
 
         await MainActor.run {

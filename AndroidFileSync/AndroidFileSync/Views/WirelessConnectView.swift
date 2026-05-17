@@ -27,6 +27,7 @@ struct DiscoveredDevice: Identifiable, Equatable {
     let ip: String
     var pairingPort: UInt16?
     var connectPort: UInt16?
+    var verifiedPaired: Bool?
 }
 
 /// Browses the local network for ADB pairing services via mDNS.
@@ -43,6 +44,7 @@ class ADBPairingBrowser: ObservableObject {
     // as NWEndpoint is an enum and hashes correctly by its host/port values or service.
     private var endpointToIPAndType: [NWEndpoint: (ip: String, isPairing: Bool)] = [:]
     private var activeConnections: [NWEndpoint: NWConnection] = [:]
+    private var mdnsPollTimer: Timer?
     
     private let queue = DispatchQueue(label: "com.androidfilesync.adb.mdns")
     
@@ -99,6 +101,9 @@ class ADBPairingBrowser: ObservableObject {
         
         pairingBrowser?.start(queue: queue)
         connectBrowser?.start(queue: queue)
+        
+        // Fallback: poll ADB's own mDNS (bypasses macOS cache)
+        startMdnsPolling()
     }
     
     func stopBrowsing() {
@@ -106,6 +111,8 @@ class ADBPairingBrowser: ObservableObject {
         pairingBrowser = nil
         connectBrowser?.cancel()
         connectBrowser = nil
+        mdnsPollTimer?.invalidate()
+        mdnsPollTimer = nil
         
         for (_, connection) in activeConnections {
             connection.cancel()
@@ -118,6 +125,50 @@ class ADBPairingBrowser: ObservableObject {
             }
             self.discoveredDevices.removeAll()
             self.endpointToIPAndType.removeAll()
+        }
+    }
+    
+    private func startMdnsPolling() {
+        mdnsPollTimer?.invalidate()
+        mdnsPollTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            self?.pollADBMdnsServices()
+        }
+    }
+    
+    /// Uses `adb mdns services` to discover pairing ports directly, bypassing macOS mDNS cache.
+    private func pollADBMdnsServices() {
+        Task {
+            let adbPath = ADBManager.getADBPath()
+            guard !adbPath.isEmpty else { return }
+            
+            let (code, output, _) = await Shell.runAsyncWithTimeout(
+                adbPath, args: ["mdns", "services"], timeoutSeconds: 3.0
+            )
+            guard code == 0 else { return }
+            
+            // Parse lines like: adb-XXXX  _adb-tls-pairing._tcp  192.168.1.69:41583
+            for line in output.split(separator: "\n") {
+                let str = String(line)
+                guard str.contains("_adb-tls-pairing._tcp") else { continue }
+                
+                // Extract IP:port from the end of the line
+                let parts = str.split(whereSeparator: { $0 == "\t" || $0 == " " }).map(String.init)
+                guard let last = parts.last, last.contains(":") else { continue }
+                
+                let ipPort = last.split(separator: ":")
+                guard ipPort.count == 2,
+                      let port = UInt16(ipPort[1]) else { continue }
+                let ip = String(ipPort[0])
+                
+                await MainActor.run {
+                    var device = self.discoveredDevices[ip] ?? DiscoveredDevice(ip: ip)
+                    if device.pairingPort != port {
+                        device.pairingPort = port
+                        self.discoveredDevices[ip] = device
+                        self.evaluateStatus()
+                    }
+                }
+            }
         }
     }
     
@@ -155,6 +206,11 @@ class ADBPairingBrowser: ObservableObject {
                         
                         self?.discoveredDevices[cleanIp] = device
                         self?.evaluateStatus()
+                        
+                        // Verify actual pairing status via adb connect
+                        if !isPairing, device.verifiedPaired == nil {
+                            self?.verifyPairing(ip: cleanIp, port: portNumber)
+                        }
                     }
                     
                     // Critical: Close connection so Android doesn't get flooded
@@ -186,6 +242,8 @@ class ADBPairingBrowser: ObservableObject {
             guard let self = self else { return }
             
             if let info = self.endpointToIPAndType[endpoint] {
+                let wasPairing = info.isPairing
+                
                 if var device = self.discoveredDevices[info.ip] {
                     if info.isPairing {
                         device.pairingPort = nil
@@ -200,6 +258,11 @@ class ADBPairingBrowser: ObservableObject {
                     }
                 }
                 self.endpointToIPAndType.removeValue(forKey: endpoint)
+                
+                // Restart pairing browser to clear mDNS cache for faster rediscovery
+                if wasPairing {
+                    self.restartPairingBrowser()
+                }
             }
             self.evaluateStatus()
         }
@@ -213,6 +276,76 @@ class ADBPairingBrowser: ObservableObject {
         } else {
             if self.status == .searching {
                 self.status = .deviceFound
+            }
+        }
+    }
+    
+    /// Restarts just the pairing browser to clear mDNS cache.
+    /// Called when a pairing service disappears (user closed the dialog on phone).
+    private func restartPairingBrowser() {
+        pairingBrowser?.cancel()
+        
+        // Short delay so macOS flushes the old mDNS entry
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self else { return }
+            
+            let pairParams = NWParameters.tcp
+            if let ipOpts = pairParams.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
+                ipOpts.version = .v4
+            }
+            pairParams.includePeerToPeer = true
+            self.pairingBrowser = NWBrowser(for: .bonjour(type: "_adb-tls-pairing._tcp", domain: "local."), using: pairParams)
+            
+            self.pairingBrowser?.browseResultsChangedHandler = { [weak self] results, changes in
+                for change in changes {
+                    switch change {
+                    case .added(let result), .changed(_, let result, _):
+                        self?.resolveEndpoint(result.endpoint, isPairing: true)
+                    case .removed(let result):
+                        self?.handleRemoval(for: result.endpoint)
+                    default:
+                        break
+                    }
+                }
+            }
+            
+            self.pairingBrowser?.start(queue: self.queue)
+            print("📶 Pairing browser restarted for fresh discovery")
+        }
+    }
+    
+    /// Attempts a quick `adb connect` to check if the device is actually paired.
+    private func verifyPairing(ip: String, port: UInt16) {
+        Task.detached(priority: .userInitiated) {
+            let adbPath = ADBManager.getADBPath()
+            guard !adbPath.isEmpty else { return }
+            
+            let target = "\(ip):\(port)"
+            print("📶 Verifying pairing for \(target)...")
+            
+            let (_, output, error) = await Shell.runAsyncWithTimeout(
+                adbPath,
+                args: ["connect", target],
+                timeoutSeconds: 4.0
+            )
+            
+            let combined = (output + error).lowercased()
+            let isActuallyPaired = combined.contains("connected to") || combined.contains("already connected")
+            
+            // Always disconnect — this was just a test, not an actual user-initiated connect
+            _ = await Shell.runAsyncWithTimeout(
+                adbPath,
+                args: ["disconnect", target],
+                timeoutSeconds: 3.0
+            )
+            
+            print("📶 Pairing verification for \(target): \(isActuallyPaired ? "✅ PAIRED" : "❌ NOT PAIRED")")
+            
+            await MainActor.run { [weak self] in
+                if var device = self?.discoveredDevices[ip] {
+                    device.verifiedPaired = isActuallyPaired
+                    self?.discoveredDevices[ip] = device
+                }
             }
         }
     }
@@ -271,6 +404,9 @@ struct WirelessConnectView: View {
     @State private var autoPairingCode = ""
     @State private var visiblePairingPort = ""
     @State private var selectedDeviceIP = ""
+    @AppStorage("hidePairingSteps") private var hidePairingSteps = false
+    @AppStorage("hasSeenWifiSetup") private var hasSeenWifiSetup = false
+    @State private var showSetupPopup = false
     
     // Manual pairing fields
     @State private var ipAddress = ""
@@ -329,8 +465,21 @@ struct WirelessConnectView: View {
             }
         }
         .frame(width: 500, height: 620)
+        .onAppear {
+
+            if !hasSeenWifiSetup {
+                showSetupPopup = true
+            }
+        }
         .onDisappear {
             pairingBrowser.stopBrowsing()
+        }
+        .sheet(isPresented: $showSetupPopup, onDismiss: {
+            if selectedTab == .autoDiscovery && pairingBrowser.status == .idle {
+                startAutoDiscovery()
+            }
+        }) {
+            wifiSetupPopup
         }
     }
     
@@ -476,7 +625,7 @@ struct WirelessConnectView: View {
                                     .padding(.top, 8)
                                 Text("Scanning for devices on your network…")
                                     .font(.headline)
-                                Text("Make sure your Android phone is on the\n'Pair device with pairing code' screen.")
+                                Text("Make sure Wireless Debugging is turned on\nand 'Pair device with pairing code' is open on your phone.")
                                     .font(.subheadline)
                                     .foregroundColor(.secondary)
                                     .multilineTextAlignment(.center)
@@ -498,6 +647,7 @@ struct WirelessConnectView: View {
 
                         } else if deviceFound {
                             // ── Device(s) found ──
+                            pairingStepsHint
                             autoDiscoveryStatusView
                             discoveredDevicesPanel
                         }
@@ -541,35 +691,46 @@ struct WirelessConnectView: View {
     /// All discovered devices as selectable rows + action panel for the selected one.
     @ViewBuilder
     private var discoveredDevicesPanel: some View {
-        let sortedIPs = pairingBrowser.discoveredDevices.keys.sorted()
-        let activeIP = selectedDeviceIP.isEmpty ? (sortedIPs.first ?? "") : selectedDeviceIP
+        let connectedIP = (deviceManager.isConnected && deviceManager.connectionType == .wireless)
+            ? deviceManager.lastWirelessIP : ""
+        let sortedIPs = pairingBrowser.discoveredDevices.keys
+            .filter { $0 != connectedIP }
+            .sorted()
+        let activeIP: String = {
+            if !selectedDeviceIP.isEmpty && sortedIPs.contains(selectedDeviceIP) {
+                return selectedDeviceIP
+            }
+            return sortedIPs.first ?? ""
+        }()
 
-        VStack(spacing: 12) {
-            // ── Device list ──────────────────────────────────────────────────
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text(sortedIPs.count > 1 ? "\(sortedIPs.count) Devices Found" : "Device Found")
-                        .font(.subheadline.weight(.semibold))
-                    Spacer()
-                    if sortedIPs.count > 1 {
-                        Text("Tap to select")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+        Group {
+            if !sortedIPs.isEmpty {
+                VStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text(sortedIPs.count > 1 ? "\(sortedIPs.count) Devices Found" : "Device Found")
+                                .font(.subheadline.weight(.semibold))
+                            Spacer()
+                            if sortedIPs.count > 1 {
+                                Text("Tap to select")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+
+                        ForEach(sortedIPs, id: \.self) { ip in
+                            discoveredDeviceRow(ip: ip, isSelected: ip == activeIP)
+                        }
                     }
-                }
+                    .padding(14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10)
+                            .fill(Color(NSColor.controlBackgroundColor).opacity(0.5))
+                    )
 
-                ForEach(sortedIPs, id: \.self) { ip in
-                    discoveredDeviceRow(ip: ip, isSelected: ip == activeIP)
+                    discoveredDeviceActionPanel(for: activeIP)
                 }
             }
-            .padding(14)
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color(NSColor.controlBackgroundColor).opacity(0.5))
-            )
-
-            // ── Action panel ─────────────────────────────────────────────────
-            discoveredDeviceActionPanel(for: activeIP)
         }
         .onAppear {
             if selectedDeviceIP.isEmpty, let first = pairingBrowser.discoveredDevices.keys.first {
@@ -587,8 +748,10 @@ struct WirelessConnectView: View {
                       let first = devices.keys.first {
                 selectedDeviceIP = first
             }
-            if let dev = devices[selectedDeviceIP], let port = dev.pairingPort, visiblePairingPort.isEmpty {
+            if let dev = devices[selectedDeviceIP], let port = dev.pairingPort {
                 visiblePairingPort = String(port)
+            } else if devices[selectedDeviceIP]?.pairingPort == nil {
+                visiblePairingPort = ""
             }
         }
     }
@@ -596,7 +759,7 @@ struct WirelessConnectView: View {
     /// A single selectable device row for the discovered list.
     private func discoveredDeviceRow(ip: String, isSelected: Bool) -> some View {
         let dev = pairingBrowser.discoveredDevices[ip]
-        let isAlreadyPaired = dev?.pairingPort == nil && dev?.connectPort != nil
+        let isAlreadyPaired = dev?.verifiedPaired == true
 
         return Button(action: {
             selectedDeviceIP = ip
@@ -616,9 +779,19 @@ struct WirelessConnectView: View {
                     Text(ip)
                         .font(.system(.subheadline, design: .monospaced).weight(.medium))
                         .foregroundColor(.primary)
-                    Text(isAlreadyPaired ? "Already paired · tap to connect" : "Needs pairing")
-                        .font(.caption)
-                        .foregroundColor(isAlreadyPaired ? .green : .orange)
+                    Group {
+                        if isAlreadyPaired {
+                            Text("Already paired · tap to connect")
+                                .foregroundColor(.green)
+                        } else if dev?.verifiedPaired == nil && dev?.connectPort != nil {
+                            Text("Verifying pairing…")
+                                .foregroundColor(.secondary)
+                        } else {
+                            Text("Needs pairing")
+                                .foregroundColor(.orange)
+                        }
+                    }
+                    .font(.caption)
                 }
                 Spacer()
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
@@ -651,7 +824,7 @@ struct WirelessConnectView: View {
             && deviceManager.lastWirelessIP == activeIP
             && !activeIP.isEmpty
         let deviceObj = pairingBrowser.discoveredDevices[activeIP]
-        let isAlreadyPaired = deviceObj?.pairingPort == nil && deviceObj?.connectPort != nil
+        let isAlreadyPaired = deviceObj?.verifiedPaired == true
 
         if isCurrentlyConnected {
             // Already connected to this specific device
@@ -674,6 +847,19 @@ struct WirelessConnectView: View {
             }
             .padding(14)
             .background(RoundedRectangle(cornerRadius: 10).fill(Color.green.opacity(0.06)))
+
+        } else if deviceObj?.verifiedPaired == nil && deviceObj?.connectPort != nil {
+            // Still verifying — show a brief spinner
+            VStack(spacing: 10) {
+                HStack(spacing: 6) {
+                    ProgressView().scaleEffect(0.7)
+                    Text("Verifying pairing…")
+                        .font(.subheadline.weight(.medium)).foregroundColor(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(14)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color(NSColor.controlBackgroundColor)))
 
         } else if isAlreadyPaired, let cPort = deviceObj?.connectPort {
             // Paired but not connected — just needs adb connect
@@ -712,7 +898,6 @@ struct WirelessConnectView: View {
             .background(RoundedRectangle(cornerRadius: 10).fill(Color.blue.opacity(0.06)))
 
         } else {
-            // Needs fresh pairing — show port + code fields
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
@@ -739,9 +924,30 @@ struct WirelessConnectView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(autoPairingCode.count != 6 || visiblePairingPort.isEmpty)
+                
+                if visiblePairingPort.isEmpty {
+                    Text("Enter the pairing port and code shown on your phone's 'Pair device' screen")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: .infinity)
+                }
             }
             .padding(14)
             .background(RoundedRectangle(cornerRadius: 10).fill(Color(NSColor.controlBackgroundColor)))
+            .onAppear {
+                if visiblePairingPort.isEmpty,
+                   let port = pairingBrowser.discoveredDevices[activeIP]?.pairingPort {
+                    visiblePairingPort = String(port)
+                }
+            }
+            .onChange(of: pairingBrowser.discoveredDevices[activeIP]?.pairingPort) { newPort in
+                if let port = newPort {
+                    visiblePairingPort = String(port)
+                } else {
+                    visiblePairingPort = ""
+                }
+            }
         }
     }
 
@@ -953,6 +1159,114 @@ struct WirelessConnectView: View {
         }
     }
     
+    private var wifiSetupPopup: some View {
+        VStack(spacing: 20) {
+            Image(systemName: "wifi")
+                .font(.system(size: 36))
+                .foregroundColor(.blue)
+                .padding(.top, 8)
+            
+            Text("Before You Start")
+                .font(.title3.weight(.bold))
+            
+            Text("Make sure you've done these on your Android phone:")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+            
+            VStack(alignment: .leading, spacing: 10) {
+                setupStepRow(number: 1, text: "Go to Settings → Developer Options")
+                setupStepRow(number: 2, text: "Enable Wireless Debugging")
+                setupStepRow(number: 3, text: "Tap 'Pair device with pairing code'")
+                setupStepRow(number: 4, text: "Keep the pairing dialog open on your phone")
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color(NSColor.controlBackgroundColor))
+            )
+            
+            Text("Both devices must be on the same WiFi network")
+                .font(.caption)
+                .foregroundColor(.orange)
+            
+            Button(action: {
+                hasSeenWifiSetup = true
+                showSetupPopup = false
+            }) {
+                Text("Got it, let's connect")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Color.blue)
+                    .cornerRadius(10)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(24)
+        .frame(width: 380)
+    }
+    
+    private func setupStepRow(number: Int, text: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text("\(number)")
+                .font(.caption.weight(.bold))
+                .foregroundColor(.white)
+                .frame(width: 22, height: 22)
+                .background(Circle().fill(Color.blue))
+            Text(text)
+                .font(.subheadline)
+                .foregroundColor(.primary)
+        }
+    }
+
+    @ViewBuilder
+    private var pairingStepsHint: some View {
+        if hidePairingSteps {
+            Button(action: { hidePairingSteps = false }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "questionmark.circle")
+                    Text("Show setup steps")
+                }
+                .font(.caption)
+                .foregroundColor(.blue)
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("On your phone:")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    stepRow("Settings → Developer Options")
+                    stepRow("Turn on Wireless Debugging")
+                    stepRow("Tap 'Pair device with pairing code'")
+                }
+                Button(action: { hidePairingSteps = true }) {
+                    Text("Got it, don't show again")
+                        .font(.caption)
+                        .foregroundColor(.blue)
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.top, 2)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.blue.opacity(0.05))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.blue.opacity(0.12), lineWidth: 1)
+                    )
+            )
+        }
+    }
+    
     private func qrStepRow(number: Int, text: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Text("\(number)")
@@ -961,6 +1275,17 @@ struct WirelessConnectView: View {
                 .frame(width: 18, height: 18)
                 .background(Circle().fill(Color.blue))
             
+            Text(text)
+                .font(.subheadline)
+                .foregroundColor(.primary)
+        }
+    }
+    
+    private func stepRow(_ text: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.bold))
+                .foregroundColor(.blue.opacity(0.6))
             Text(text)
                 .font(.subheadline)
                 .foregroundColor(.primary)

@@ -112,10 +112,9 @@ struct EmptyStateView: View {
     
     private var instructionsList: some View {
         VStack(alignment: .leading, spacing: 12) {
-            instructionRow(number: 1, text: "Enable 'File Transfer' mode on your phone", icon: "folder.fill")
-            instructionRow(number: 2, text: "Or enable 'USB Debugging' for better performance", icon: "ant.fill")
+            instructionRow(number: 1, text: "Enable 'USB Debugging' in Developer Options", icon: "ant.fill")
+            instructionRow(number: 2, text: "Connect via USB cable and allow debugging on your phone", icon: "cable.connector")
             instructionRow(number: 3, text: "Or use WiFi — enable Wireless Debugging (Android 11+)", icon: "wifi")
-            instructionRow(number: 4, text: "Make sure ADB is installed on your Mac", icon: "terminal.fill")
         }
         .padding(20)
         .background(

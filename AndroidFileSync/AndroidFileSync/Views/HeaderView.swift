@@ -23,25 +23,34 @@ struct HeaderView: View {
             deviceInfo
             Spacer()
             
-            // Wireless connect button
-            Button(action: { showWirelessConnect = true }) {
-                HStack(spacing: 4) {
-                    Image(systemName: "wifi")
-                    Text("WiFi")
-                        .font(.caption)
+            if !(deviceManager.isConnected && deviceManager.connectionType == .wireless) {
+                Button(action: { showWirelessConnect = true }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "wifi")
+                        Text("WiFi")
+                            .font(.caption)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.blue.opacity(0.1))
+                    )
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(Color.blue.opacity(0.1))
-                )
+                .buttonStyle(.plain)
+                .help("Connect via WiFi (Android 11+)")
             }
-            .buttonStyle(.plain)
-            .help("Connect via WiFi (Android 11+)")
             
             if deviceManager.isConnected {
-                ConnectionBadge(type: deviceManager.connectionType)
+                if deviceManager.connectionType == .wireless {
+                    Button(action: { showWirelessConnect = true }) {
+                        ConnectionBadge(type: deviceManager.connectionType)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Manage WiFi connection")
+                } else {
+                    ConnectionBadge(type: deviceManager.connectionType)
+                }
             }
         }
         .padding()

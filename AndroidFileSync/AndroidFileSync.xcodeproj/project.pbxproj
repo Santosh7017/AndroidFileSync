@@ -38,6 +38,7 @@
 				Managers/FileActionManager.swift,
 				Managers/FilePreviewManager.swift,
 				Managers/SidebarManager.swift,
+				Managers/UpdateChecker.swift,
 				Managers/UploadManager.swift,
 				Models/AppInfo.swift,
 				Models/Models.swift,

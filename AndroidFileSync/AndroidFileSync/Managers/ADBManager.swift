@@ -1061,6 +1061,21 @@ class ADBManager {
         return nil
     }
 
+    // MARK: - Media Scanner
+    
+    /// Triggers the Android media scanner for a specific file path so it appears in the Gallery immediately.
+    /// Uses a lightweight broadcast intent that only indexes the single file, not the entire storage.
+    static func triggerMediaScan(path: String) async {
+        let adbPath = getADBPath()
+        guard !adbPath.isEmpty else { return }
+        
+        let escapedPath = path.replacingOccurrences(of: "'", with: "'\\''")
+        // Use am broadcast to scan just this one file — returns almost instantly
+        let command = "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d 'file://\(escapedPath)' >/dev/null 2>&1"
+        
+        _ = await Shell.runAsync(adbPath, args: deviceArgs(["shell", command]))
+    }
+
     // MARK: - Get File Info
     
     /// Gets detailed information about a file

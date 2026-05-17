@@ -339,7 +339,7 @@ struct OverlayProgressRow: View {
     private var statusText: String {
         if item.isComplete { return "Done" }
         if item.error != nil { return "Error" }
-        if item.percentage == 0 { return "Queued" }
+        if item.percentage == 0 { return "Starting…" }
         if !item.speed.isEmpty { return item.speed }
         return "\(item.percentage)%"
     }

@@ -108,9 +108,7 @@ The simplest way to connect. Just plug in a cable.
 2. On your phone, you'll see a prompt: **"Allow USB debugging?"**
 3. Check **"Always allow from this computer"**
 4. Tap **Allow**
-5. Pull down the notification shade and tap the USB notification
-6. Select **File Transfer / MTP**
-7. Launch AndroidFileSync on your Mac — your phone will appear automatically
+5. Launch AndroidFileSync on your Mac — your phone will appear automatically
 
 > **Tip:** If you don't see the "Allow USB debugging?" prompt, try unplugging and replugging the cable, or use a different USB port on your Mac.
 

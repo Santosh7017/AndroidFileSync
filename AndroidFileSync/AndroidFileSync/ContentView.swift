@@ -41,6 +41,7 @@ struct ContentView: View {
     // Trash view state
     @State private var showTrashView = false
     @State private var showWirelessConnect = false
+    @ObservedObject private var updateChecker = UpdateChecker.shared
 
     // App browser state
     @StateObject private var appManager = AppManager()
@@ -178,6 +179,35 @@ struct ContentView: View {
             )
             Divider()
 
+            if updateChecker.shouldShowBanner {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .foregroundColor(.blue)
+                    Text("Version \(updateChecker.latestVersion) available")
+                        .font(.caption.weight(.medium))
+                    Spacer()
+                    Button(action: { updateChecker.openReleasePage() }) {
+                        Text("Download")
+                            .font(.caption.weight(.semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 3)
+                            .background(Color.blue)
+                            .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                    Button(action: { updateChecker.dismissForToday() }) {
+                        Image(systemName: "xmark")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.blue.opacity(0.08))
+            }
+
             if deviceManager.isConnected {
                 connectedContent
             } else {
@@ -195,6 +225,9 @@ struct ContentView: View {
             )
         }
         .frame(minWidth: 800, minHeight: 600)
+        .onAppear {
+            updateChecker.checkForUpdates()
+        }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             var fileURLs: [URL] = []
             let group = DispatchGroup()
