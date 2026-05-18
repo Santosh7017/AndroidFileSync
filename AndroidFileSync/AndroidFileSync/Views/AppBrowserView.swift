@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 struct AppBrowserView: View {
     @ObservedObject var appManager: AppManager
     let initialFilter: AppFilter
+    let deviceName: String
 
     @State private var selectedFilter: AppFilter
     @State private var searchQuery = ""
@@ -17,12 +18,10 @@ struct AppBrowserView: View {
     @State private var showAlert = false
     @State private var showBatchConfirm = false
 
-    // Confirmation state for single-app destructive actions
     @State private var pendingAction: AppAction? = nil
     @State private var pendingApp: AppInfo? = nil
     @State private var showActionConfirm = false
 
-    // Batch progress tracking (also used for single-app actions for UI consistency)
     @State private var batchProgress: (current: Int, total: Int)? = nil
 
     enum AppSortOption: String, CaseIterable {
@@ -30,9 +29,10 @@ struct AppBrowserView: View {
         case package = "Package"
     }
 
-    init(appManager: AppManager, initialFilter: AppFilter) {
+    init(appManager: AppManager, initialFilter: AppFilter, deviceName: String) {
         self.appManager = appManager
         self.initialFilter = initialFilter
+        self.deviceName = deviceName
         _selectedFilter = State(initialValue: initialFilter)
     }
 
@@ -68,7 +68,7 @@ struct AppBrowserView: View {
             }
             content
         }
-        .task(id: selectedFilter) {
+        .task(id: selectedFilter.rawValue + "|" + deviceName) {
             await appManager.fetchApps(filter: selectedFilter)
             selectedPackages = []
         }

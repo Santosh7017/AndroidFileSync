@@ -26,20 +26,45 @@ class ADBManager {
 
     struct ConnectedDevice {
         let serial: String
+        var displayName: String  // "Redmi Note 8" or the raw serial as fallback
         var isWireless: Bool { serial.contains(":") && serial.contains(".") }
+        /// IP string for wireless devices, e.g. "192.168.1.67"
+        var ipAddress: String? {
+            guard isWireless else { return nil }
+            return serial.components(separatedBy: ":").first
+        }
     }
 
-    /// Returns all devices currently listed as 'device' in `adb devices`.
+    /// Returns all devices currently listed as 'device' in `adb devices`,
+    /// enriched with real model names fetched in parallel.
     static func listAllConnectedDevices() async -> [ConnectedDevice] {
         let path = getADBPath()
         guard !path.isEmpty else { return [] }
         let (_, output, _) = await Shell.runAsyncWithTimeout(path, args: ["devices"], timeoutSeconds: 5.0)
-        return output.split(separator: "\n").compactMap { line -> ConnectedDevice? in
+        let serials: [String] = output.split(separator: "\n").compactMap { line -> String? in
             let s = String(line)
             guard !s.starts(with: "List"),
                   s.contains("\tdevice") || s.hasSuffix(" device") else { return nil }
             let serial = String(s.split(separator: "\t").first ?? s.split(separator: " ").first ?? Substring(s))
-            return serial.isEmpty ? nil : ConnectedDevice(serial: serial)
+            return serial.isEmpty ? nil : serial
+        }
+        // Fetch model names in parallel
+        return await withTaskGroup(of: ConnectedDevice.self) { group in
+            for serial in serials {
+                group.addTask {
+                    let (_, raw, _) = await Shell.runAsyncWithTimeout(
+                        path,
+                        args: ["-s", serial, "shell", "getprop", "ro.product.model"],
+                        timeoutSeconds: 3.0
+                    )
+                    let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return ConnectedDevice(serial: serial, displayName: name.isEmpty ? serial : name)
+                }
+            }
+            var result: [ConnectedDevice] = []
+            for await device in group { result.append(device) }
+            // Keep original order (group results arrive out of order)
+            return result.sorted { serials.firstIndex(of: $0.serial) ?? 0 < serials.firstIndex(of: $1.serial) ?? 0 }
         }
     }
 
@@ -99,10 +124,7 @@ class ADBManager {
     }
 
     static func getADBPath() -> String {
-        if let cached = adbPath { 
-            print("📱 ADB: Using cached path: \(cached)")
-            return cached 
-        }
+        if let cached = adbPath { return cached }
         let fileManager = FileManager.default
         let homeDir = fileManager.homeDirectoryForCurrentUser.path
         
@@ -185,7 +207,6 @@ class ADBManager {
         }
         
         guard !foundSerials.isEmpty else {
-            activeDeviceSerial = nil
             print("📱 No device found in ADB output")
             return false
         }
@@ -1045,56 +1066,18 @@ class ADBManager {
         return (exitCode == 0, output + error)
     }
     
-    /// Checks if the currently connected device is via wireless (IP:port format)
+    /// Checks if the currently active device is via wireless (IP:port format)
     static func isWirelessConnection() async -> Bool {
-        let adbPath = getADBPath()
-        guard !adbPath.isEmpty else { return false }
-        
-        let (code, output, _) = await Shell.runAsyncWithTimeout(
-            adbPath,
-            args: ["devices"],
-            timeoutSeconds: 5.0
-        )
-        
-        guard code == 0 else { return false }
-        
-        let lines = output.split(separator: "\n")
-        for line in lines {
-            let s = String(line)
-            if !s.starts(with: "List") &&
-               (s.contains("\tdevice") || s.hasSuffix(" device")) {
-                // Wireless devices show as IP:port (e.g., 192.168.1.5:5555)
-                if s.contains(":") && s.split(separator: "\t").first?.contains(".") == true {
-                    return true
-                }
-            }
-        }
-        return false
+        guard let active = activeDeviceSerial else { return false }
+        // Wireless devices show as IP:port (e.g., 192.168.1.5:5555)
+        return active.contains(":") && active.contains(".")
     }
 
     /// Returns the IP address of the currently connected wireless ADB device,
-    /// or nil if no wireless device is connected.
-    /// Parses `adb devices` output — wireless serials look like "192.168.1.5:5555".
+    /// or nil if the active device is not wireless.
     static func getWirelessIP() async -> String? {
-        let adbPath = getADBPath()
-        guard !adbPath.isEmpty else { return nil }
-
-        let (code, output, _) = await Shell.runAsyncWithTimeout(
-            adbPath, args: ["devices"], timeoutSeconds: 5.0
-        )
-        guard code == 0 else { return nil }
-
-        for line in output.split(separator: "\n").map(String.init) {
-            guard !line.starts(with: "List"),
-                  line.contains("\tdevice") || line.hasSuffix(" device"),
-                  let serial = line.split(separator: "\t").first.map(String.init),
-                  serial.contains(":"),
-                  serial.contains(".")
-            else { continue }
-            // serial = "192.168.1.5:5555" → return "192.168.1.5"
-            return serial.components(separatedBy: ":").first
-        }
-        return nil
+        guard let active = activeDeviceSerial, active.contains(":") && active.contains(".") else { return nil }
+        return active.components(separatedBy: ":").first
     }
 
     // MARK: - Media Scanner

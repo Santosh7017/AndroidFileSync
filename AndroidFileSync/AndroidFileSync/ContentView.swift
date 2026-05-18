@@ -161,6 +161,17 @@ struct ContentView: View {
             .onChange(of: deviceManager.sdCardPath) { newPath in
                 sidebarManager.updateSDCard(path: newPath)
             }
+            .onChange(of: deviceManager.deviceName) { newName in
+                // Reload the file browser whenever the active device changes.
+                // deviceName is set at the end of detectDevice(), so this fires
+                // once the switch is fully complete and the new serial is active.
+                guard deviceManager.isConnected, !newName.isEmpty, newName != "No Device" else { return }
+                Task {
+                    currentPath = await deviceManager.getRealStoragePath()
+                    pathHistory.removeAll()
+                    await loadFiles()
+                }
+            }
     }
 
     // Level 3: layout + input modifiers
@@ -269,7 +280,7 @@ struct ContentView: View {
             ZStack {
                 if let appFilter = activeAppFilter {
                     // ── App Browser ───────────────────────────────────────────
-                    AppBrowserView(appManager: appManager, initialFilter: appFilter)
+                    AppBrowserView(appManager: appManager, initialFilter: appFilter, deviceName: deviceManager.deviceName)
                         .transition(.opacity)
                 } else {
                     // ── File Browser ──────────────────────────────────────────

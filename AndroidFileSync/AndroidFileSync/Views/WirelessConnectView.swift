@@ -566,11 +566,10 @@ struct WirelessConnectView: View {
     // MARK: - Auto-Discovery Tab
 
     private var autoDiscoveryTab: some View {
-        // True if wireless is the ACTIVE connection, or if a wireless device
-        // is already paired/available in adb devices (even while USB is active).
         let wirelessDeviceAvailable = deviceManager.availableDevices.contains(where: { $0.isWireless })
-        let alreadyConnected = deviceManager.isConnected &&
-            (deviceManager.connectionType == .wireless || wirelessDeviceAvailable)
+        // Show the connected banner whenever any device is connected (USB or wireless).
+        // The banner itself handles both cases and shows the appropriate switch options.
+        let alreadyConnected = deviceManager.isConnected
         let status = pairingBrowser.status
         let isSearching = status == .searching
         let deviceFound = status != .idle && status != .searching && status != .pairing && status != .paired
@@ -586,7 +585,6 @@ struct WirelessConnectView: View {
                         .padding(.horizontal, 20)
                         .padding(.top, 20)
 
-                    // Optional: compact re-scan results below the card
                     if showRescanWhileConnected {
                         VStack(spacing: 0) {
                             HStack(spacing: 8) {
@@ -616,10 +614,49 @@ struct WirelessConnectView: View {
                             if deviceFound {
                                 discoveredDevicesPanel
                                     .padding(.horizontal, 20)
-                                    .padding(.bottom, 20)
+                                    .padding(.bottom, 8)
                             }
                         }
                     }
+
+                    // Action buttons — always below the info cards and any rescan results
+                    VStack(spacing: 10) {
+                        Button(action: { showRescanWhileConnected = true; startAutoDiscovery() }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "plus.circle")
+                                Text("Connect Another Device / Re-scan")
+                            }
+                            .font(.subheadline.weight(.medium)).foregroundColor(.blue)
+                            .frame(maxWidth: .infinity).padding(.vertical, 9)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8).fill(Color.blue.opacity(0.08))
+                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.blue.opacity(0.2)))
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        HStack(spacing: 10) {
+                            if deviceManager.connectionType == .wireless {
+                                Button(action: { Task { await deviceManager.disconnectWireless() } }) {
+                                    HStack(spacing: 5) {
+                                        Image(systemName: "xmark.circle")
+                                        Text("Disconnect")
+                                    }
+                                    .font(.subheadline.weight(.medium)).foregroundColor(.white)
+                                    .frame(maxWidth: .infinity).padding(.vertical, 9)
+                                    .background(Color.red.opacity(0.75)).cornerRadius(8)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            Button("Close") { dismiss() }
+                                .font(.subheadline.weight(.medium))
+                                .frame(maxWidth: .infinity).padding(.vertical, 9)
+                                .background(.ultraThinMaterial).cornerRadius(8).buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 16)
+                    .padding(.bottom, 20)
                 }
 
                 // ╔══════════════════════════════════════════════════════╗
@@ -735,11 +772,9 @@ struct WirelessConnectView: View {
         }
         .onAppear {
             showRescanWhileConnected = false
-            // Don't auto-scan if a wireless device is already available (paired/connected).
-            let wirelessAvailable = deviceManager.availableDevices.contains(where: { $0.isWireless })
-            let alreadyWireless = deviceManager.isConnected &&
-                (deviceManager.connectionType == .wireless || wirelessAvailable)
-            if !alreadyWireless && status == .idle {
+            // Only auto-start discovery if nothing is connected at all.
+            // When a device is connected (USB or wireless), show the banner instead.
+            if !deviceManager.isConnected && status == .idle {
                 startAutoDiscovery()
             }
         }
@@ -750,10 +785,17 @@ struct WirelessConnectView: View {
     /// All discovered devices as selectable rows + action panel for the selected one.
     @ViewBuilder
     private var discoveredDevicesPanel: some View {
-        let connectedIP = (deviceManager.isConnected && deviceManager.connectionType == .wireless)
+        // IPs already connected wirelessly to ADB (shown in the switch section above)
+        let alreadyConnectedIPs = Set(
+            deviceManager.availableDevices
+                .filter { $0.isWireless }
+                .compactMap { $0.ipAddress }
+        )
+        // Also exclude the active wireless IP if WiFi is the current connection
+        let activeWirelessIP = (deviceManager.isConnected && deviceManager.connectionType == .wireless)
             ? deviceManager.lastWirelessIP : ""
         let sortedIPs = pairingBrowser.discoveredDevices.keys
-            .filter { $0 != connectedIP }
+            .filter { !alreadyConnectedIPs.contains($0) && $0 != activeWirelessIP }
             .sorted()
         let activeIP: String = {
             if !selectedDeviceIP.isEmpty && sortedIPs.contains(selectedDeviceIP) {
@@ -1010,261 +1052,201 @@ struct WirelessConnectView: View {
         }
     }
 
-    /// Rich info card shown when a WiFi connection is active, OR when a wireless
-    /// device is available in adb devices but USB is currently the active connection.
+    /// Rich info card. Symmetric for both active-WiFi and active-USB scenarios.
+    /// Always shows the full connection details for the active device, plus
+    /// a "switch" row for any other available device.
     @ViewBuilder
     private var connectedBanner: some View {
-        let isWirelessActive  = deviceManager.connectionType == .wireless
-        let wirelessDevices   = deviceManager.availableDevices.filter { $0.isWireless }
+        let isWirelessActive = deviceManager.connectionType == .wireless
+        let isUSBActive      = deviceManager.connectionType == .usb
+        let wirelessDevices  = deviceManager.availableDevices.filter { $0.isWireless }
+
+        let usbDevices = deviceManager.availableDevices.filter { !$0.isWireless }
 
         VStack(spacing: 16) {
 
-            // ── "Switch to WiFi" card — shown when USB is active but WiFi device is available ──
-            if !isWirelessActive, let wifiDev = wirelessDevices.first {
+            // ── Primary connection status card ────────────────────────────────
+            if isWirelessActive {
+                // WiFi is active → full green WiFi card
                 VStack(spacing: 0) {
                     HStack(spacing: 12) {
                         ZStack {
-                            Circle()
-                                .fill(Color.green.opacity(0.12))
-                                .frame(width: 44, height: 44)
+                            Circle().fill(Color.green.opacity(0.15)).frame(width: 52, height: 52)
                             Image(systemName: "wifi")
-                                .font(.system(size: 18, weight: .semibold))
-                                .foregroundColor(.green)
+                                .font(.system(size: 22, weight: .semibold)).foregroundColor(.green)
                         }
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("WiFi Device Available")
-                                .font(.subheadline.weight(.semibold))
-                            Text(wifiDev.serial)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Text("Connected").font(.headline)
+                                Text("WiFi")
+                                    .font(.caption.weight(.semibold)).foregroundColor(.white)
+                                    .padding(.horizontal, 7).padding(.vertical, 2)
+                                    .background(Capsule().fill(Color.green))
+                            }
+                            Text(deviceManager.deviceName)
+                                .font(.subheadline).foregroundColor(.secondary).lineLimit(1)
                         }
                         Spacer()
-                        Button(action: {
-                            Task {
-                                await deviceManager.switchToDevice(serial: wifiDev.serial)
-                                dismiss()
-                            }
-                        }) {
-                            Text("Switch")
-                                .font(.caption.weight(.semibold))
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 5)
-                                .background(Capsule().fill(Color.green))
-                        }
-                        .buttonStyle(.plain)
+                        Circle().fill(Color.green).frame(width: 8, height: 8)
+                            .overlay(Circle().stroke(Color.green.opacity(0.4), lineWidth: 3).scaleEffect(1.6))
                     }
-                    .padding(14)
+                    .padding(16)
                 }
                 .background(
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(Color.green.opacity(0.07))
-                        .overlay(RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.green.opacity(0.18), lineWidth: 1))
+                    RoundedRectangle(cornerRadius: 12).fill(Color.green.opacity(0.07))
+                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.green.opacity(0.18), lineWidth: 1))
                 )
 
-                // Close button when only switching is needed
-                Button("Close") { dismiss() }
-                    .font(.subheadline.weight(.medium))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
-                    .background(.ultraThinMaterial)
-                    .cornerRadius(8)
-                    .buttonStyle(.plain)
-            } else {
-
-            // ── Connection status header ──────────────────────────────────────
-            HStack(spacing: 12) {
-                ZStack {
-                    Circle()
-                        .fill(Color.green.opacity(0.15))
-                        .frame(width: 52, height: 52)
-                    Image(systemName: "wifi")
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundColor(.green)
-                }
-
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text("Connected")
-                            .font(.headline)
-                            .foregroundColor(.primary)
-                        Text("WiFi")
-                            .font(.caption.weight(.semibold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill(Color.green))
+                // WiFi detail grid
+                VStack(spacing: 1) {
+                    infoRow(icon: "network", label: "IP Address",
+                            value: deviceManager.lastWirelessIP.isEmpty ? "Unknown" : deviceManager.lastWirelessIP,
+                            valueFont: .system(.subheadline, design: .monospaced))
+                    Divider().padding(.horizontal, 16)
+                    infoRow(icon: "memorychip", label: "Device", value: deviceManager.deviceName)
+                    if let info = deviceManager.storageStats["/storage/emulated/0"] {
+                        Divider().padding(.horizontal, 16)
+                        infoRow(icon: "internaldrive", label: "Internal Storage", value: info.usedText)
                     }
-                    Text(deviceManager.deviceName)
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
+                    if let sdPath = deviceManager.sdCardPath, let sdInfo = deviceManager.storageStats[sdPath] {
+                        Divider().padding(.horizontal, 16)
+                        infoRow(icon: "sdcard", label: "SD Card", value: sdInfo.usedText)
+                    }
                 }
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color(NSColor.controlBackgroundColor)))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
 
-                Spacer()
+            } else if isUSBActive {
+                // USB is active → full blue USB card
+                VStack(spacing: 0) {
+                    HStack(spacing: 12) {
+                        ZStack {
+                            Circle().fill(Color.blue.opacity(0.15)).frame(width: 52, height: 52)
+                            Image(systemName: "cable.connector")
+                                .font(.system(size: 22, weight: .semibold)).foregroundColor(.blue)
+                        }
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Text("Connected").font(.headline)
+                                Text("USB")
+                                    .font(.caption.weight(.semibold)).foregroundColor(.white)
+                                    .padding(.horizontal, 7).padding(.vertical, 2)
+                                    .background(Capsule().fill(Color.blue))
+                            }
+                            Text(deviceManager.deviceName)
+                                .font(.subheadline).foregroundColor(.secondary).lineLimit(1)
+                        }
+                        Spacer()
+                        Circle().fill(Color.blue).frame(width: 8, height: 8)
+                            .overlay(Circle().stroke(Color.blue.opacity(0.4), lineWidth: 3).scaleEffect(1.6))
+                    }
+                    .padding(16)
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.07))
+                        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.blue.opacity(0.18), lineWidth: 1))
+                )
 
-                // Live connected indicator
-                Circle()
-                    .fill(Color.green)
-                    .frame(width: 8, height: 8)
-                    .overlay(
-                        Circle()
-                            .stroke(Color.green.opacity(0.4), lineWidth: 3)
-                            .scaleEffect(1.6)
-                    )
+                // USB detail grid
+                VStack(spacing: 1) {
+                    infoRow(icon: "memorychip", label: "Device", value: deviceManager.deviceName)
+                    if let info = deviceManager.storageStats["/storage/emulated/0"] {
+                        Divider().padding(.horizontal, 16)
+                        infoRow(icon: "internaldrive", label: "Internal Storage", value: info.usedText)
+                    }
+                    if let sdPath = deviceManager.sdCardPath, let sdInfo = deviceManager.storageStats[sdPath] {
+                        Divider().padding(.horizontal, 16)
+                        infoRow(icon: "sdcard", label: "SD Card", value: sdInfo.usedText)
+                    }
+                }
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color(NSColor.controlBackgroundColor)))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
             }
-            .padding(16)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(Color.green.opacity(0.07))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color.green.opacity(0.18), lineWidth: 1)
-                    )
-            )
 
-            // ── Connection details grid ───────────────────────────────────────
-            VStack(spacing: 1) {
-                infoRow(icon: "network", label: "IP Address",
-                        value: deviceManager.lastWirelessIP.isEmpty ? "Unknown" : deviceManager.lastWirelessIP,
-                        valueFont: .system(.subheadline, design: .monospaced))
-
-                Divider().padding(.horizontal, 16)
-
-                infoRow(icon: "memorychip", label: "Device",
-                        value: deviceManager.deviceName)
-
-                if let internalStorage = deviceManager.storageStats["/storage/emulated/0"] {
-                    Divider().padding(.horizontal, 16)
-                    infoRow(icon: "internaldrive", label: "Internal Storage",
-                            value: internalStorage.usedText)
-                }
-
-                if let sdPath = deviceManager.sdCardPath,
-                   let sdStorage = deviceManager.storageStats[sdPath] {
-                    Divider().padding(.horizontal, 16)
-                    infoRow(icon: "sdcard", label: "SD Card",
-                            value: sdStorage.usedText)
-                }
-            }
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color(NSColor.controlBackgroundColor))
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-
-            // ── Other available devices ───────────────────────────────────────
-            let usbDevices = deviceManager.availableDevices.filter { !$0.isWireless }
-            if !usbDevices.isEmpty {
+            // ── WiFi devices available while USB is active ────────────────────
+            if isUSBActive && !wirelessDevices.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 6) {
-                        Image(systemName: "cable.connector")
-                            .font(.system(size: 12))
-                            .foregroundColor(.secondary)
-                        Text("Also Connected via USB")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundColor(.primary)
+                        Image(systemName: "wifi").font(.system(size: 12)).foregroundColor(.secondary)
+                        Text("Also Available via WiFi").font(.subheadline.weight(.semibold))
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 12)
-
-                    ForEach(usbDevices, id: \.serial) { dev in
+                    .padding(.horizontal, 16).padding(.top, 12)
+                    ForEach(wirelessDevices, id: \.serial) { dev in
                         Button(action: {
-                            Task {
-                                await deviceManager.switchToDevice(serial: dev.serial)
-                                dismiss()
-                            }
+                            Task { await deviceManager.switchToDevice(serial: dev.serial); dismiss() }
                         }) {
                             HStack(spacing: 12) {
                                 ZStack {
-                                    Circle()
-                                        .fill(Color.blue.opacity(0.1))
-                                        .frame(width: 36, height: 36)
-                                    Image(systemName: "cable.connector")
-                                        .font(.system(size: 15, weight: .medium))
-                                        .foregroundColor(.blue)
+                                    Circle().fill(Color.green.opacity(0.1)).frame(width: 36, height: 36)
+                                    Image(systemName: "wifi")
+                                        .font(.system(size: 15, weight: .medium)).foregroundColor(.green)
                                 }
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text("USB Device")
-                                        .font(.subheadline.weight(.medium))
-                                    Text(dev.serial)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                        .lineLimit(1)
+                                    Text(dev.displayName).font(.subheadline.weight(.medium))
+                                    Text(dev.ipAddress ?? dev.serial)
+                                        .font(.caption).foregroundColor(.secondary).lineLimit(1)
                                 }
                                 Spacer()
-                                Text("Switch")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 4)
-                                    .background(Capsule().fill(Color.blue))
+                                Text("Switch").font(.caption.weight(.semibold)).foregroundColor(.white)
+                                    .padding(.horizontal, 10).padding(.vertical, 4)
+                                    .background(Capsule().fill(Color.green))
                             }
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 8)
+                            .padding(.horizontal, 16).padding(.vertical, 8)
                         }
                         .buttonStyle(.plain)
                     }
                 }
                 .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(Color.blue.opacity(0.05))
-                        .overlay(RoundedRectangle(cornerRadius: 10)
-                            .stroke(Color.blue.opacity(0.15), lineWidth: 1))
+                    RoundedRectangle(cornerRadius: 10).fill(Color.green.opacity(0.05))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.green.opacity(0.15), lineWidth: 1))
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 10))
             }
 
-            // Scan for another / additional device
-            Button(action: {
-                showRescanWhileConnected = true
-                startAutoDiscovery()
-            }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "plus.circle")
-                    Text("Connect Another Device / Re-scan")
-                }
-                .font(.subheadline.weight(.medium))
-                .foregroundColor(.blue)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 9)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.blue.opacity(0.08))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.blue.opacity(0.2)))
-                )
-            }
-            .buttonStyle(.plain)
-
-            HStack(spacing: 10) {
-                Button(action: { Task { await deviceManager.disconnectWireless() } }) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "xmark.circle")
-                        Text("Disconnect")
+            // ── USB devices available while WiFi is active ────────────────────
+            if isWirelessActive && !usbDevices.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "cable.connector").font(.system(size: 12)).foregroundColor(.secondary)
+                        Text("Also Connected via USB").font(.subheadline.weight(.semibold))
                     }
-                    .font(.subheadline.weight(.medium))
-                    .foregroundColor(.white)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
-                    .background(Color.red.opacity(0.75))
-                    .cornerRadius(8)
+                    .padding(.horizontal, 16).padding(.top, 12)
+                    ForEach(usbDevices, id: \.serial) { dev in
+                        Button(action: {
+                            Task { await deviceManager.switchToDevice(serial: dev.serial); dismiss() }
+                        }) {
+                            HStack(spacing: 12) {
+                                ZStack {
+                                    Circle().fill(Color.blue.opacity(0.1)).frame(width: 36, height: 36)
+                                    Image(systemName: "cable.connector")
+                                        .font(.system(size: 15, weight: .medium)).foregroundColor(.blue)
+                                }
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(dev.displayName).font(.subheadline.weight(.medium))
+                                    Text(dev.serial)
+                                        .font(.caption).foregroundColor(.secondary).lineLimit(1)
+                                }
+                                Spacer()
+                                Text("Switch").font(.caption.weight(.semibold)).foregroundColor(.white)
+                                    .padding(.horizontal, 10).padding(.vertical, 4)
+                                    .background(Capsule().fill(Color.blue))
+                            }
+                            .padding(.horizontal, 16).padding(.vertical, 8)
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
-                .buttonStyle(.plain)
-
-                Button("Close") { dismiss() }
-                    .font(.subheadline.weight(.medium))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 9)
-                    .background(.ultraThinMaterial)
-                    .cornerRadius(8)
-                    .buttonStyle(.plain)
+                .background(
+                    RoundedRectangle(cornerRadius: 10).fill(Color.blue.opacity(0.05))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.blue.opacity(0.15), lineWidth: 1))
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 10))
             }
-            } // end else (wireless active)
+
         }
         .padding(.top, 4)
     }
+
 
     /// Reusable detail row for the connection info grid.
     private func infoRow(icon: String, label: String, value: String,

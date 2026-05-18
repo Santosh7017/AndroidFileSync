@@ -59,29 +59,37 @@ class DeviceManager: ObservableObject {
             }
         }
         
-        // Enumerate ALL connected devices first (for the device picker)
+        // Enumerate ALL connected devices first (for the device picker).
+        // This never affects which device is "active" — it only fills the
+        // availableDevices list shown in the switcher panel.
         let allDevices = await ADBManager.listAllConnectedDevices()
         await MainActor.run { self.availableDevices = allDevices }
 
-        // Check for ADB devices (with timeout to prevent hanging)
+        // Ask ADB which device to target. isDeviceConnected() honours the existing
+        // activeDeviceSerial if it's still valid, so explicit user switches survive.
         adbAvailable = await ADBManager.isDeviceConnected()
-        print("📱 DeviceManager: ADB available = \(adbAvailable)")
+        print("📱 DeviceManager: ADB available = \(adbAvailable), active = \(ADBManager.activeDeviceSerial ?? "nil")")
         
-        // Check if it's a wireless connection
-        let isWireless = adbAvailable ? await ADBManager.isWirelessConnection() : false
+        // Determine connection type from the *active* device serial,
+        // NOT from whichever device happens to be first in the list.
+        let activeSerial = ADBManager.activeDeviceSerial
+        let isWireless = adbAvailable && (activeSerial?.contains(":") == true && activeSerial?.contains(".") == true)
         
         // Update the state on the main thread
         await MainActor.run {
             if adbAvailable {
                 if isWireless {
                     self.connectionType = .wireless
-                    self.deviceName = "Android Device"
                     self.statusMessage = "Connected via WiFi"
+                    // Derive IP directly from the serial (e.g. "192.168.1.67:40395" → "192.168.1.67")
+                    if let serial = activeSerial, let ip = serial.components(separatedBy: ":").first {
+                        self.lastWirelessIP = ip
+                    }
                 } else {
                     self.connectionType = .usb
-                    self.deviceName = "Android Device"
                     self.statusMessage = "Connected via USB"
-                    self.lastWirelessIP = ""  // clear stale IP when on USB
+                    // Do NOT clear lastWirelessIP here — we may have a WiFi device in
+                    // availableDevices that the user can still switch back to.
                 }
                 self.isConnected = true
                 print("📱 DeviceManager: Device connected (\(self.connectionType.rawValue))!")
@@ -91,6 +99,11 @@ class DeviceManager: ObservableObject {
                 self.statusMessage = "No device detected. Please connect your device."
                 self.isConnected = false
                 self.sdCardPath = nil
+                self.storageStats = [:]
+                // Only clear lastWirelessIP if no wireless device is available at all
+                if !allDevices.contains(where: { $0.isWireless }) {
+                    self.lastWirelessIP = ""
+                }
                 print("📱 DeviceManager: No device found")
             }
             
@@ -98,15 +111,7 @@ class DeviceManager: ObservableObject {
             self.isDetecting = false
         }
 
-        // If wireless, also populate the IP (parses `adb devices` serial like 192.168.x.x:5555)
-        if adbAvailable && isWireless {
-            if let ip = await ADBManager.getWirelessIP(), !ip.isEmpty {
-                await MainActor.run { self.lastWirelessIP = ip }
-                print("📱 DeviceManager: Wireless IP = \(ip)")
-            }
-        }
-
-        // If connected, also probe for device name, SD card + storage stats
+        // If connected, fetch display metadata for the active device
         if adbAvailable {
             await fetchDeviceName()
             await detectSDCard()
@@ -134,8 +139,6 @@ class DeviceManager: ObservableObject {
             Task {
                 // Give ADB ~1.5 s to recognize the newly attached device
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
-                // Clear stale serial — detectDevice will pick the correct one
-                ADBManager.activeDeviceSerial = nil
                 await self.detectDevice()
             }
         }
@@ -337,6 +340,9 @@ class DeviceManager: ObservableObject {
         let (success, message) = await ADBManager.connectWireless(ip: ip, port: port)
         
         if success {
+            // Explicitly make this the active device BEFORE detectDevice() runs,
+            // so isDeviceConnected() honours it and switches away from USB.
+            ADBManager.switchToDevice(serial: "\(ip):\(port)")
             await MainActor.run {
                 self.lastWirelessIP = ip
             }
