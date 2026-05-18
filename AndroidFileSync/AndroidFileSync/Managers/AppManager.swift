@@ -327,8 +327,17 @@ class AppManager: ObservableObject {
         return result
     }
 
+    private func pmArgs(for filter: AppFilter) -> [String] {
+        switch filter {
+        case .all:      return ["shell", "pm", "list", "packages", "-u"]
+        case .user:     return ["shell", "pm", "list", "packages", "-3"]
+        case .system:   return ["shell", "pm", "list", "packages", "-s", "-u"]
+        case .disabled: return ["shell", "pm", "list", "packages", "-u"] // Will be filtered in code
+        }
+    }
+
     /// Fetches apps from the device using `pm list packages`.
-    /// Fast path: 3 parallel ADB calls, no per-app round trips.
+    /// Fast path: parallel ADB calls, no per-app round trips.
     func fetchApps(filter: AppFilter) async {
         await MainActor.run {
             isLoading = true
@@ -343,24 +352,32 @@ class AppManager: ObservableObject {
             return
         }
 
-        // Run all three lists in parallel
+        // Run queries in parallel to get full state
         async let mainFetch = Shell.runAsync(adbPath, args: ADBManager.deviceArgs(pmArgs(for: filter)))
-        async let sysFetch  = Shell.runAsync(adbPath, args: ADBManager.deviceArgs(["shell", "pm", "list", "packages", "-s"]))
-        async let disFetch  = Shell.runAsync(adbPath, args: ADBManager.deviceArgs(["shell", "pm", "list", "packages", "-d"]))
+        async let sysFetch  = Shell.runAsync(adbPath, args: ADBManager.deviceArgs(["shell", "pm", "list", "packages", "-s", "-u"]))
+        async let allFetch  = Shell.runAsync(adbPath, args: ADBManager.deviceArgs(["shell", "pm", "list", "packages"])) // only installed/enabled
+        async let allUFetch = Shell.runAsync(adbPath, args: ADBManager.deviceArgs(["shell", "pm", "list", "packages", "-u"])) // everything
+        async let disFetch  = Shell.runAsync(adbPath, args: ADBManager.deviceArgs(["shell", "pm", "list", "packages", "-d"])) // explicitly disabled
 
         let (_, mainOut, _) = await mainFetch
         let (_, sysOut,  _) = await sysFetch
+        let (_, allOut,  _) = await allFetch
+        let (_, allUOut, _) = await allUFetch
         let (_, disOut,  _) = await disFetch
 
-        let systemPackages  = parsePackageList(sysOut)
-        let disabledPackages = parsePackageList(disOut)
+        let systemPackages = parsePackageList(sysOut)
+        let installedPackages = parsePackageList(allOut)
+        let allPossiblePackages = parsePackageList(allUOut)
+        
+        // "Disabled" = explicitly disabled (-d) OR uninstalled for user (in -u but not in normal list)
+        var disabledPackages = parsePackageList(disOut)
+        let uninstalledForUser = allPossiblePackages.subtracting(installedPackages)
+        disabledPackages.formUnion(uninstalledForUser)
 
-        // Main package set
         var packageNames = parsePackageList(mainOut)
 
-        // For "All" also include disabled packages (they're hidden from normal pm list)
-        if filter == .all {
-            packageNames.formUnion(disabledPackages)
+        if filter == .disabled {
+            packageNames = disabledPackages
         }
 
         guard !packageNames.isEmpty else {
@@ -372,11 +389,10 @@ class AppManager: ObservableObject {
         }
 
         let result: [AppInfo] = packageNames.sorted().map { pkg in
-            // isSystemApp: only mark as system if we know it is
             let isSystem: Bool
             switch filter {
             case .system:   isSystem = true
-            case .user:     isSystem = false   // -3 flag guarantees non-system
+            case .user:     isSystem = false
             case .all:      isSystem = systemPackages.contains(pkg)
             case .disabled: isSystem = systemPackages.contains(pkg)
             }
@@ -384,7 +400,7 @@ class AppManager: ObservableObject {
                 id: pkg,
                 packageName: pkg,
                 displayName: AppInfo.labelFrom(package: pkg),
-                versionName: "",          // loaded on demand — keeps list fast
+                versionName: "",
                 isSystemApp: isSystem,
                 isEnabled: !disabledPackages.contains(pkg)
             )
@@ -576,17 +592,8 @@ class AppManager: ObservableObject {
 
 
 
-    private func pmArgs(for filter: AppFilter) -> [String] {
-        switch filter {
-        case .all:      return ["shell", "pm", "list", "packages"]
-        case .user:     return ["shell", "pm", "list", "packages", "-3"]
-        case .system:   return ["shell", "pm", "list", "packages", "-s"]
-        case .disabled: return ["shell", "pm", "list", "packages", "-d"]
-        }
-    }
-
     // MARK: - Uninstall
-
+    
     /// Uninstall a user-installed app completely.
     func uninstall(package: String) async -> (Bool, String) {
         let adbPath = ADBManager.getADBPath()
