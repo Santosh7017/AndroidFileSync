@@ -50,6 +50,7 @@ struct ContentView: View {
     // Search and sort state
     @State private var searchQuery = ""
     @State private var sortOption: ActionToolbar.SortOption = .name
+    @State private var sortAscending: Bool = true
     
     // Computed filtered files
     private var filteredFiles: [UnifiedFile] {
@@ -63,41 +64,35 @@ struct ContentView: View {
         // Apply sort
         switch sortOption {
         case .name:
-            result.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            result.sort {
+                let cmp = $0.name.localizedCaseInsensitiveCompare($1.name)
+                return sortAscending ? cmp == .orderedAscending : cmp == .orderedDescending
+            }
         case .size:
-            result.sort { $0.size > $1.size }
+            result.sort { sortAscending ? $0.size < $1.size : $0.size > $1.size }
         case .type:
-            // Sort by file type/extension, folders first
-            result.sort { 
-                // Folders always come first
-                if $0.isDirectory != $1.isDirectory {
-                    return $0.isDirectory
-                }
-                // For files, sort by extension first, then by name
-                if !$0.isDirectory && !$1.isDirectory {
-                    let ext0 = ($0.name as NSString).pathExtension.lowercased()
-                    let ext1 = ($1.name as NSString).pathExtension.lowercased()
-                    if ext0 != ext1 {
-                        return ext0 < ext1
-                    }
-                }
-                // Same type - sort by name
-                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            result.sort {
+                let t0 = $0.sortableType
+                let t1 = $1.sortableType
+                if t0 != t1 { return sortAscending ? t0 < t1 : t0 > t1 }
+                // Within same category, sort by name
+                let cmp = $0.name.localizedCaseInsensitiveCompare($1.name)
+                return sortAscending ? cmp == .orderedAscending : cmp == .orderedDescending
             }
         case .date:
-            result.sort { 
-                // Newest first; nil dates go to the end
-                let date0 = $0.modificationDate ?? Date.distantPast
-                let date1 = $1.modificationDate ?? Date.distantPast
-                return date0 > date1
+            result.sort {
+                let d0 = $0.modificationDate ?? Date.distantPast
+                let d1 = $1.modificationDate ?? Date.distantPast
+                return sortAscending ? d0 < d1 : d0 > d1
             }
         }
         
         return result
     }
     
-    private func sortFiles(by option: ActionToolbar.SortOption) {
+    private func sortFiles(by option: ActionToolbar.SortOption, ascending: Bool = true) {
         sortOption = option
+        sortAscending = ascending
     }
 
     var body: some View {
@@ -171,13 +166,6 @@ struct ContentView: View {
     // Level 3: layout + input modifiers
     private var layoutContent: some View {
         VStack(spacing: 0) {
-            HeaderView(
-                deviceManager: deviceManager,
-                downloadManager: downloadManager,
-                uploadManager: uploadManager,
-                showWirelessConnect: $showWirelessConnect
-            )
-            Divider()
 
             if updateChecker.shouldShowBanner {
                 HStack(spacing: 8) {
@@ -260,12 +248,12 @@ struct ContentView: View {
     // Extracted to keep `body` chain under Swift complexity limit
     @ViewBuilder
     private var connectedContent: some View {
-        HSplitView {
+        NavigationSplitView {
             SidebarView(
                 sidebarManager: sidebarManager,
                 currentPath: currentPath,
                 onNavigate: { path in
-                    activeAppFilter = nil   // switch back to file mode
+                    activeAppFilter = nil
                     navigateTo(path)
                 },
                 trashCount: fileActionManager.trashedItems.count,
@@ -276,57 +264,93 @@ struct ContentView: View {
                 },
                 storageStats: deviceManager.storageStats
             )
-
+            .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 300)
+        } detail: {
             ZStack {
                 if let appFilter = activeAppFilter {
                     // ── App Browser ───────────────────────────────────────────
                     AppBrowserView(appManager: appManager, initialFilter: appFilter)
                         .transition(.opacity)
                 } else {
-                // ── File Browser ──────────────────────────────────────────────
-                VStack(spacing: 0) {
-                    ActionToolbar(
-                        currentPath: currentPath,
-                        fileActionManager: fileActionManager,
-                        onRefresh: { await loadFiles() },
-                        searchQuery: $searchQuery,
-                        totalFileCount: files.count,
-                        filteredFileCount: filteredFiles.count,
-                        selectedSort: sortOption,
-                        onSortChanged: { option in sortFiles(by: option) }
-                    )
-                    Divider()
-                    FileBrowserView(
-                        files: filteredFiles,
-                        currentPath: currentPath,
-                        isLoading: isLoading,
-                        canGoBack: !pathHistory.isEmpty,
-                        selectedFiles: $selectedFiles,
-                        onNavigate: navigateTo,
-                        onGoBack: navigateBack,
-                        onDownload: handleDownload,
-                        onUpload: handleUpload,
-                        onDelete: handleDelete,
-                        onRename: handleRename,
-                        onPreview: { file in filePreviewManager.previewFile(file) },
-                        onBatchDelete: handleBatchDelete,
-                        onBatchDownload: handleBatchDownload,
-                        onBatchChangeExtension: { ext in handleBatchChangeExtension(ext) },
-                        onCopy: { files in fileActionManager.copyToClipboard(files) },
-                        onCut: { files in fileActionManager.cutToClipboard(files) },
-                        onDownloadFolder: handleFolderDownload,
-                        onAddToSidebar: { folder in
-                            sidebarManager.addItem(
-                                name: folder.name,
-                                path: folder.path,
-                                icon: "folder.fill",
-                                color: "blue"
-                            )
-                        },
-                        onPermanentDelete: handlePermanentDelete,
-                        sortOption: sortOption,
-                        onSortChange: { option in sortFiles(by: option) }
-                    )
+                    // ── File Browser ──────────────────────────────────────────
+                    VStack(spacing: 0) {
+                        // Clipboard indicator (inline, above file list)
+                        if fileActionManager.isPerformingAction {
+                            HStack(spacing: 8) {
+                                ProgressView().scaleEffect(0.65).frame(width: 14, height: 14)
+                                Text(fileActionManager.currentAction)
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 6)
+                            .background(Color.orange.opacity(0.12))
+                            Divider()
+                        } else if !fileActionManager.clipboard.isEmpty {
+                            HStack(spacing: 8) {
+                                Image(systemName: fileActionManager.clipboardOperation == .cut ? "scissors" : "doc.on.clipboard")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.blue)
+                                Text("\(fileActionManager.clipboard.count) item\(fileActionManager.clipboard.count == 1 ? "" : "s") ready to paste")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                Button {
+                                    Task {
+                                        do { try await fileActionManager.paste(to: currentPath) } catch {}
+                                        await loadFiles()
+                                    }
+                                } label: {
+                                    Label("Paste", systemImage: "doc.on.doc")
+                                        .font(.system(size: 11, weight: .medium))
+                                }
+                                .buttonStyle(.borderless)
+                                Button { fileActionManager.clearClipboard() } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(.secondary.opacity(0.6))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 6)
+                            .background(Color.blue.opacity(0.08))
+                            Divider()
+                        }
+
+                        FileBrowserView(
+                            files: filteredFiles,
+                            currentPath: currentPath,
+                            isLoading: isLoading,
+                            canGoBack: !pathHistory.isEmpty,
+                            selectedFiles: $selectedFiles,
+                            onNavigate: navigateTo,
+                            onGoBack: navigateBack,
+                            onDownload: handleDownload,
+                            onUpload: handleUpload,
+                            onDelete: handleDelete,
+                            onRename: handleRename,
+                            onPreview: { file in filePreviewManager.previewFile(file) },
+                            onBatchDelete: handleBatchDelete,
+                            onBatchDownload: handleBatchDownload,
+                            onBatchChangeExtension: { ext in handleBatchChangeExtension(ext) },
+                            onCopy: { files in fileActionManager.copyToClipboard(files) },
+                            onCut: { files in fileActionManager.cutToClipboard(files) },
+                            onDownloadFolder: handleFolderDownload,
+                            onAddToSidebar: { folder in
+                                sidebarManager.addItem(
+                                    name: folder.name,
+                                    path: folder.path,
+                                    icon: "folder.fill",
+                                    color: "blue"
+                                )
+                            },
+                            onPermanentDelete: handlePermanentDelete,
+                            sortOption: sortOption,
+                            onSortChange: { option, ascending in sortFiles(by: option, ascending: ascending) }
+                        )
+                    }
                 }
 
                 if filePreviewManager.isLoading {
@@ -339,8 +363,126 @@ struct ContentView: View {
                     .padding(24)
                     .background(RoundedRectangle(cornerRadius: 12).fill(.ultraThinMaterial))
                 }
-                } // end else (file browser)
             }
+            .navigationTitle(deviceManager.isConnected ? "Android File Sync" : "")
+            .navigationSubtitle(deviceManager.statusMessage)
+            .toolbar {
+                // ── Left side: New Folder + New File ─────────────────────────
+                ToolbarItemGroup(placement: .navigation) {
+                    Button {
+                        if activeAppFilter == nil,
+                           let name = TextInputDialog.show(
+                            title: "New Folder",
+                            message: "Enter a name for the new folder",
+                            placeholder: "Folder name",
+                            initialValue: "New Folder",
+                            confirmLabel: "Create"
+                        ) {
+                            Task {
+                                do {
+                                    try await fileActionManager.createFolder(at: currentPath, name: name)
+                                    await loadFiles()
+                                } catch { print("Failed: \(error)") }
+                            }
+                        }
+                    } label: {
+                        Label("New Folder", systemImage: "folder.badge.plus")
+                    }
+                    .help("New Folder (⌘⇧N)")
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
+                    .disabled(activeAppFilter != nil)
+
+                    Button {
+                        if activeAppFilter == nil,
+                           let name = TextInputDialog.show(
+                            title: "New File",
+                            message: "Enter a name for the new file",
+                            placeholder: "File name",
+                            initialValue: "untitled.txt",
+                            confirmLabel: "Create"
+                        ) {
+                            Task {
+                                do {
+                                    try await fileActionManager.createFile(at: currentPath, name: name)
+                                    await loadFiles()
+                                } catch { print("Failed: \(error)") }
+                            }
+                        }
+                    } label: {
+                        Label("New File", systemImage: "doc.badge.plus")
+                    }
+                    .help("New File")
+                    .disabled(activeAppFilter != nil)
+                }
+
+                // ── Right side: Sort + Refresh + WiFi ────────────────────────
+                ToolbarItemGroup(placement: .primaryAction) {
+                    // Sort menu (only in file browser)
+                    if activeAppFilter == nil {
+                        Menu {
+                            ForEach(ActionToolbar.SortOption.allCases, id: \.self) { opt in
+                                Button {
+                                    sortFiles(by: opt, ascending: sortOption == opt ? !sortAscending : true)
+                                } label: {
+                                    if sortOption == opt {
+                                        Label(opt.rawValue, systemImage: sortAscending ? "chevron.up" : "chevron.down")
+                                    } else {
+                                        Text(opt.rawValue)
+                                    }
+                                }
+                            }
+                        } label: {
+                            Label(sortOption.rawValue, systemImage: "arrow.up.arrow.down")
+                        }
+                        .help("Sort files")
+                    }
+
+                    Button {
+                        Task { await loadFiles() }
+                    } label: {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .help("Refresh (⌘R)")
+                    .keyboardShortcut("r", modifiers: .command)
+
+                    // Connection button — icon reflects current connection type
+                    Button { showWirelessConnect = true } label: {
+                        if deviceManager.connectionType == .wireless {
+                            Label("WiFi", systemImage: "wifi")
+                                .foregroundColor(.green)
+                        } else if deviceManager.connectionType == .usb {
+                            Label("USB", systemImage: "cable.connector")
+                                .foregroundColor(.primary)
+                        } else {
+                            Label("WiFi", systemImage: "wifi")
+                        }
+                    }
+                    .help(deviceManager.connectionType == .wireless
+                          ? "Manage WiFi connection"
+                          : deviceManager.connectionType == .usb
+                            ? "Connected via USB — tap to manage connections"
+                            : "Connect via WiFi")
+                }
+
+                // ── Status: transfer count ────────────────────────────────────
+                if !downloadManager.activeDownloads.isEmpty || !uploadManager.activeUploads.isEmpty {
+                    ToolbarItem(placement: .status) {
+                        HStack(spacing: 6) {
+                            if !downloadManager.activeDownloads.isEmpty {
+                                Label("\(downloadManager.activeDownloads.count)", systemImage: "arrow.down")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundColor(.blue)
+                            }
+                            if !uploadManager.activeUploads.isEmpty {
+                                Label("\(uploadManager.activeUploads.count)", systemImage: "arrow.up")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundColor(.green)
+                            }
+                        }
+                    }
+                }
+            }
+            .searchable(text: $searchQuery, placement: .toolbar, prompt: "Search files...")
         }
     }
 
@@ -411,6 +553,8 @@ struct ContentView: View {
 
     private func initializeDevice() async {
         await deviceManager.detectDevice()
+        // Start IOKit USB monitor — fires instantly on plug/unplug, zero polling overhead
+        deviceManager.startMonitoring()
         if deviceManager.isConnected {
             currentPath = await deviceManager.getRealStoragePath()
             await loadFiles()

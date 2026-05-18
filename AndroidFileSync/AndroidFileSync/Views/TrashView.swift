@@ -46,7 +46,7 @@ struct TrashView: View {
                 .buttonStyle(.plain)
             }
             .padding()
-            .background(Color(NSColor.controlBackgroundColor))
+            .background(.ultraThinMaterial)
             
             Divider()
             

@@ -32,7 +32,7 @@ struct FileBrowserView: View, Equatable {
     
     // Sorting support
     var sortOption: ActionToolbar.SortOption = .name
-    var onSortChange: ((ActionToolbar.SortOption) -> Void)? = nil
+    var onSortChange: ((ActionToolbar.SortOption, Bool) -> Void)? = nil
     
     // Equatable implementation - only compare data that affects rendering
     static func == (lhs: FileBrowserView, rhs: FileBrowserView) -> Bool {
@@ -43,6 +43,11 @@ struct FileBrowserView: View, Equatable {
         lhs.selectedFiles == rhs.selectedFiles &&
         lhs.sortOption == rhs.sortOption
     }
+    
+    // Table sort state
+    @State private var sortOrder: [KeyPathComparator<UnifiedFile>] = [
+        .init(\.name, order: .forward)
+    ]
     
     // FIX 1: Bring back the state variable for UI feedback
     @State private var isDraggingOver = false
@@ -123,48 +128,74 @@ struct FileBrowserView: View, Equatable {
     // MARK: - View Components
     
     private var pathBar: some View {
-        HStack {
+        HStack(spacing: 0) {
+            // Back button
             if canGoBack {
-                backButton
+                Button(action: onGoBack) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 30, height: 30)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Go back")
             }
-            pathDisplay
+            
+            // Breadcrumb path
+            breadcrumbPath
+            
             Spacer()
-            uploadButton
-            Divider().frame(height: 16).padding(.horizontal, 8)
-            statusIndicator
+            
+            // Item count
+            if isLoading {
+                ProgressView().scaleEffect(0.65).frame(width: 14, height: 14)
+            } else {
+                Text(files.count == 1 ? "1 item" : "\(files.count) items")
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+            }
+            
+            Divider().frame(height: 16).padding(.horizontal, 10)
+            
+            // Upload button — accent-tinted, non-intrusive Apple style
+            Button(action: showUploadDialog) {
+                Label("Upload", systemImage: "arrow.up.circle")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .tint(.accentColor)
+            .help("Upload files to this folder")
         }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
-        .background(Color(NSColor.controlBackgroundColor))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(.bar)
+        .overlay(alignment: .bottom) {
+            Divider()
+        }
     }
     
-    private var backButton: some View {
-        Button(action: onGoBack) {
-            Image(systemName: "chevron.left").font(.title3)
-        }
-        .buttonStyle(.plain)
-        .help("Go back")
-    }
-    
-    private var pathDisplay: some View {
-        HStack {
-            Image(systemName: "folder")
-            Text(currentPath)
-                .font(.system(.body, design: .monospaced))
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-    }
-    
-    private var uploadButton: some View {
-        Button(action: showUploadDialog) {
-            HStack(spacing: 4) {
-                Image(systemName: "arrow.up.circle.fill")
-                Text("Upload").font(.caption)
+    // Breadcrumb segments built from current path
+    private var breadcrumbPath: some View {
+        let segments = currentPath
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+        
+        return HStack(spacing: 2) {
+            Text("/")
+                .font(.system(size: 14))
+                .foregroundColor(.secondary)
+            
+            ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(Color(NSColor.tertiaryLabelColor))
+                Text(segment)
+                    .font(.system(size: 14, weight: index == segments.count - 1 ? .medium : .regular))
+                    .foregroundColor(index == segments.count - 1 ? .primary : .secondary)
+                    .lineLimit(1)
             }
         }
-        .buttonStyle(.borderless)
-        .help("Upload files to this folder")
     }
     
     @ViewBuilder
@@ -172,7 +203,7 @@ struct FileBrowserView: View, Equatable {
         if isLoading {
             ProgressView()
                 .scaleEffect(0.7)
-                .frame(width: 16, height: 16)   // fixed size — prevents growing in the HStack
+                .frame(width: 16, height: 16)
         } else {
             Text("\(files.count) items")
                 .font(.caption)
@@ -260,26 +291,58 @@ struct FileBrowserView: View, Equatable {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
     private var fileList: some View {
-        VStack(spacing: 0) {
-            // Custom sortable column headers
-            SortableFileHeader(
-                currentSort: sortOption,
-                onSortChange: { newSort in
-                    onSortChange?(newSort)
+        Table(files, selection: $selectedFiles, sortOrder: $sortOrder) {
+            TableColumn("Name", value: \.name) { file in
+                HStack(spacing: 8) {
+                    Image(systemName: getFileIcon(for: file))
+                        .foregroundColor(getFileColor(for: file))
+                        .frame(width: 18)
+                    Text(file.name)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
-            )
+            }
             
-            Divider()
+            TableColumn("Size", value: \.size) { file in
+                Text(file.isDirectory ? "--" : formatBytes(file.size))
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+            .width(min: 70, ideal: 90, max: 110)
             
-            // File list with selection
-            ScrollViewReader { proxy in
-                List(files, selection: $selectedFiles) { file in
-                    SortableFileRow(file: file)
-                        .tag(file.id)
-                }
-                .listStyle(.inset)
-                // Use contextMenu with primaryAction for double-click - this is the macOS-native approach
+            TableColumn("Date", value: \.sortableDate) { file in
+                Text(file.modificationDate != nil ? Self.dateFormatter.string(from: file.modificationDate!) : "--")
+                    .font(.system(.callout, design: .default))
+                    .foregroundColor(.secondary)
+            }
+            .width(min: 160, ideal: 170, max: 200)
+            
+            TableColumn("Type", value: \.sortableType) { file in
+                Text(file.isDirectory ? "Folder" : getFileType(for: file))
+                    .font(.callout)
+                    .foregroundColor(.secondary)
+            }
+            // No .width() — fills remaining space, eliminates trailing column separator
+        }
+        .tableStyle(.inset)
+        .scrollContentBackground(.hidden)
+        .onChange(of: sortOrder) { newOrder in
+            guard let first = newOrder.first else { return }
+            let ascending = first.order == .forward
+            if first.keyPath == \UnifiedFile.name { onSortChange?(.name, ascending) }
+            else if first.keyPath == \UnifiedFile.size { onSortChange?(.size, ascending) }
+            else if first.keyPath == \UnifiedFile.sortableDate { onSortChange?(.date, ascending) }
+            else if first.keyPath == \UnifiedFile.sortableType { onSortChange?(.type, ascending) }
+        }
+        // Use contextMenu with primaryAction for double-click - this is the macOS-native approach
                 // that works with selection (macOS 13+)
                 .contextMenu(forSelectionType: UUID.self, menu: { selectedIds in
                     // Context menu for selected items
@@ -391,9 +454,6 @@ struct FileBrowserView: View, Equatable {
                         }
                     }
                 })
-            }
-        }
-        
     }
     
     @ViewBuilder
@@ -546,177 +606,13 @@ struct FileBrowserView: View, Equatable {
         }
     }
 }
-
-// MARK: - Sortable File Header
-
-struct SortableFileHeader: View {
-    let currentSort: ActionToolbar.SortOption
-    let onSortChange: (ActionToolbar.SortOption) -> Void
+// MARK: - Window Drag Area
+// Allows dragging the app window from the path bar (like the title bar)
+private struct WindowDragArea: NSViewRepresentable {
+    func makeNSView(context: Context) -> DraggableNSView { DraggableNSView() }
+    func updateNSView(_ nsView: DraggableNSView, context: Context) {}
     
-    var body: some View {
-        HStack(spacing: 0) {
-            SortableColumnHeader(
-                title: "Name",
-                option: .name,
-                currentSort: currentSort,
-                onTap: onSortChange
-            )
-            .frame(minWidth: 200, maxWidth: .infinity, alignment: .leading)
-            
-            SortableColumnHeader(
-                title: "Size",
-                option: .size,
-                currentSort: currentSort,
-                onTap: onSortChange
-            )
-            .frame(width: 90, alignment: .trailing)
-            
-            SortableColumnHeader(
-                title: "Date",
-                option: .date,
-                currentSort: currentSort,
-                onTap: onSortChange
-            )
-            .frame(width: 100, alignment: .trailing)
-            
-            SortableColumnHeader(
-                title: "Type",
-                option: .type,
-                currentSort: currentSort,
-                onTap: onSortChange
-            )
-            .frame(width: 80, alignment: .center)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.95))
-    }
-}
-
-struct SortableColumnHeader: View {
-    let title: String
-    let option: ActionToolbar.SortOption
-    let currentSort: ActionToolbar.SortOption
-    let onTap: (ActionToolbar.SortOption) -> Void
-    
-    var isSelected: Bool { option == currentSort }
-    
-    var body: some View {
-        Button(action: { onTap(option) }) {
-            HStack(spacing: 4) {
-                Text(title)
-                    .font(.system(.caption, weight: isSelected ? .semibold : .medium))
-                    .foregroundColor(isSelected ? .accentColor : .secondary)
-                
-                if isSelected {
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundColor(.accentColor)
-                }
-            }
-        }
-        .buttonStyle(.plain)
-        .contentShape(Rectangle())
-    }
-}
-
-// MARK: - Sortable File Row View
-
-struct SortableFileRow: View {
-    let file: UnifiedFile
-    
-    private static let dateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateStyle = .short
-        formatter.timeStyle = .short
-        return formatter
-    }()
-    
-    var body: some View {
-        HStack(spacing: 0) {
-            // Name column
-            HStack(spacing: 8) {
-                Image(systemName: fileIcon)
-                    .foregroundColor(fileColor)
-                    .frame(width: 18)
-                
-                Text(file.name)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            .frame(minWidth: 200, maxWidth: .infinity, alignment: .leading)
-            
-            // Size column
-            Text(file.isDirectory ? "--" : formatBytes(file.size))
-                .font(.system(.callout, design: .monospaced))
-                .foregroundColor(.secondary)
-                .frame(width: 90, alignment: .trailing)
-            
-            // Date column
-            Text(dateText)
-                .font(.system(.caption, design: .default))
-                .foregroundColor(.secondary)
-                .frame(width: 100, alignment: .trailing)
-            
-            // Type column
-            Text(file.isDirectory ? "Folder" : fileType)
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .frame(width: 80, alignment: .center)
-        }
-        .padding(.vertical, 4)
-        .contentShape(Rectangle()) // Make entire row tappable
-    }
-    
-    private var dateText: String {
-        if let date = file.modificationDate {
-            return Self.dateFormatter.string(from: date)
-        }
-        return "--"
-    }
-    
-    private var fileIcon: String {
-        if file.isDirectory {
-            switch file.name.lowercased() {
-            case "dcim", "camera": return "camera.fill"
-            case "download", "downloads": return "arrow.down.circle.fill"
-            case "pictures", "photos": return "photo.fill"
-            case "music": return "music.note"
-            case "movies", "videos": return "film.fill"
-            case "documents": return "doc.fill"
-            default: return "folder.fill"
-            }
-        }
-        
-        let ext = (file.name as NSString).pathExtension.lowercased()
-        switch ext {
-        case "jpg", "jpeg", "png", "gif", "heic", "webp": return "photo"
-        case "mp4", "mov", "avi", "mkv": return "film"
-        case "mp3", "m4a", "wav", "flac": return "music.note"
-        case "pdf": return "doc.text"
-        case "zip", "rar", "7z": return "doc.zipper"
-        case "apk": return "app.badge"
-        default: return "doc"
-        }
-    }
-    
-    private var fileColor: Color {
-        if file.isDirectory { return .blue }
-        
-        let ext = (file.name as NSString).pathExtension.lowercased()
-        switch ext {
-        case "jpg", "jpeg", "png", "gif", "heic", "webp": return .purple
-        case "mp4", "mov", "avi", "mkv": return .red
-        case "mp3", "m4a", "wav", "flac": return .pink
-        case "pdf": return .orange
-        case "apk": return .green
-        default: return .secondary
-        }
-    }
-    
-    private var fileType: String {
-        let ext = (file.name as NSString).pathExtension.lowercased()
-        if ext.isEmpty { return "File" }
-        return ext.uppercased()
+    class DraggableNSView: NSView {
+        override var mouseDownCanMoveWindow: Bool { true }
     }
 }

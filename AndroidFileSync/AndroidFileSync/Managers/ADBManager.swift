@@ -21,6 +21,33 @@ class ADBManager {
         }
         return args
     }
+
+    // MARK: - Multi-device
+
+    struct ConnectedDevice {
+        let serial: String
+        var isWireless: Bool { serial.contains(":") && serial.contains(".") }
+    }
+
+    /// Returns all devices currently listed as 'device' in `adb devices`.
+    static func listAllConnectedDevices() async -> [ConnectedDevice] {
+        let path = getADBPath()
+        guard !path.isEmpty else { return [] }
+        let (_, output, _) = await Shell.runAsyncWithTimeout(path, args: ["devices"], timeoutSeconds: 5.0)
+        return output.split(separator: "\n").compactMap { line -> ConnectedDevice? in
+            let s = String(line)
+            guard !s.starts(with: "List"),
+                  s.contains("\tdevice") || s.hasSuffix(" device") else { return nil }
+            let serial = String(s.split(separator: "\t").first ?? s.split(separator: " ").first ?? Substring(s))
+            return serial.isEmpty ? nil : ConnectedDevice(serial: serial)
+        }
+    }
+
+    /// Switch the active target device. Triggers a DeviceManager re-detect to update all state.
+    static func switchToDevice(serial: String) {
+        activeDeviceSerial = serial
+        print("📱 ADB: Switched active device to \(serial)")
+    }
     
     // MARK: - ADB Server Management
     
@@ -162,11 +189,20 @@ class ADBManager {
             print("📱 No device found in ADB output")
             return false
         }
-        
-        // Prefer wireless (IP:port) device if multiple are connected
-        if let wirelessSerial = foundSerials.first(where: { $0.contains(":") && $0.contains(".") }) {
+
+        // Prefer USB device; only fall back to wireless if no USB present.
+        // (User can explicitly switch to wireless via switchToDevice)
+        // Exception: if activeDeviceSerial is already set to a valid serial in the list,
+        // keep that selection (so explicit switches survive re-detect).
+        if let current = activeDeviceSerial, foundSerials.contains(current) {
+            // Honour the existing explicit selection
+            print("📱 Keeping active device: \(current)")
+        } else if let usbSerial = foundSerials.first(where: { !$0.contains(":") }) {
+            activeDeviceSerial = usbSerial
+            print("📱 Using USB device: \(usbSerial)")
+        } else if let wirelessSerial = foundSerials.first(where: { $0.contains(":") && $0.contains(".") }) {
             activeDeviceSerial = wirelessSerial
-            print("📱 Using wireless device: \(wirelessSerial)")
+            print("📱 Using wireless device (no USB found): \(wirelessSerial)")
         } else {
             activeDeviceSerial = foundSerials.first
             print("📱 Using device: \(foundSerials.first ?? "unknown")")

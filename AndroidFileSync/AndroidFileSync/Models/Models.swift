@@ -48,6 +48,33 @@ struct UnifiedFile: Identifiable {
         self.size = adbFile.size
         self.modificationDate = adbFile.modificationDate
     }
+    
+    // MARK: - Sortable Properties for Table
+    var sortableDate: Date {
+        modificationDate ?? Date.distantPast
+    }
+    
+    // Groups files by media category for Type sort: Folders → Images → Videos → Audio → Docs → Other
+    var sortableType: String {
+        if isDirectory { return "0_Folder" }
+        let ext = (name as NSString).pathExtension.lowercased()
+        switch ext {
+        case "jpg", "jpeg", "png", "gif", "heic", "webp", "bmp", "tiff":
+            return "1_Image_" + ext
+        case "mp4", "mov", "avi", "mkv", "m4v", "wmv", "flv":
+            return "2_Video_" + ext
+        case "mp3", "m4a", "wav", "flac", "aac", "ogg":
+            return "3_Audio_" + ext
+        case "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md":
+            return "4_Document_" + ext
+        case "zip", "rar", "7z", "tar", "gz":
+            return "5_Archive_" + ext
+        case "apk":
+            return "6_App_" + ext
+        default:
+            return "7_Other_" + ext
+        }
+    }
 }
 
 

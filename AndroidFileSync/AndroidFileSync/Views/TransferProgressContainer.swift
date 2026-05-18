@@ -17,14 +17,17 @@ struct TransferProgressContainer: View {
             // Show scanning placeholder when enumerating a folder
             HStack(spacing: 8) {
                 ProgressView().scaleEffect(0.7)
-                Text("Scanning \(downloadManager.scanningFolderName)…")
-                    .font(.system(.caption, weight: .semibold))
+                Text("Scanning \(downloadManager.scanningFolderName)...")
+                    .font(.system(.callout, weight: .medium))
                     .foregroundColor(.orange)
                 Spacer()
+                Text("Building file list…")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(Color(NSColor.windowBackgroundColor))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.regularMaterial)
         } else if !downloadManager.activeDownloads.isEmpty || !uploadManager.activeUploads.isEmpty {
             TransferProgressView(
                 title: "Active Transfers",

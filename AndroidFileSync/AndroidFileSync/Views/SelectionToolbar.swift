@@ -126,7 +126,7 @@ struct SelectionToolbar: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
-            .background(Color(NSColor.controlBackgroundColor).opacity(0.95))
+            .background(.regularMaterial)
         }
         // Move to Trash confirmation
         .alert(isSingleSelection ? "Move \(singleItem?.name ?? "item") to Trash?" : "Move \(selectedCount) items to Trash?",

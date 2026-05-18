@@ -16,6 +16,8 @@ class DeviceManager: ObservableObject {
     @Published var deviceName = "No Device"
     @Published var statusMessage = "Scanning for devices..."
     @Published var lastWirelessIP = ""
+    /// All currently connected ADB devices (USB + wireless)
+    @Published var availableDevices: [ADBManager.ConnectedDevice] = []
     /// Path to the physical SD card if one is inserted, e.g. "/storage/1A2B-3C4D"
     @Published var sdCardPath: String? = nil
     /// Storage stats keyed by path (internal / SD card)
@@ -36,6 +38,7 @@ class DeviceManager: ObservableObject {
     }
 
     private var adbAvailable = false
+    private var usbMonitor: USBDeviceMonitor? = nil
     
     enum ConnectionType: String {
         case none = "None"
@@ -56,6 +59,10 @@ class DeviceManager: ObservableObject {
             }
         }
         
+        // Enumerate ALL connected devices first (for the device picker)
+        let allDevices = await ADBManager.listAllConnectedDevices()
+        await MainActor.run { self.availableDevices = allDevices }
+
         // Check for ADB devices (with timeout to prevent hanging)
         adbAvailable = await ADBManager.isDeviceConnected()
         print("📱 DeviceManager: ADB available = \(adbAvailable)")
@@ -105,6 +112,41 @@ class DeviceManager: ObservableObject {
             await detectSDCard()
             await fetchStorageInfo()
         }
+    }
+
+    // MARK: - Device Switching
+
+    /// Switch the active ADB device (e.g. from wireless → USB or between two devices)
+    /// and re-detect all state.
+    func switchToDevice(serial: String) async {
+        ADBManager.switchToDevice(serial: serial)
+        await detectDevice()
+    }
+
+    // MARK: - USB Device Monitor (IOKit, zero-overhead)
+
+    /// Registers IOKit USB attach/detach callbacks. Fires instantly when a USB
+    /// device is plugged or unplugged — no polling, no CPU cost when idle.
+    func startMonitoring() {
+        let monitor = USBDeviceMonitor()
+        monitor.onChange = { [weak self] in
+            guard let self else { return }
+            Task {
+                // Give ADB ~1.5 s to recognize the newly attached device
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                // Clear stale serial — detectDevice will pick the correct one
+                ADBManager.activeDeviceSerial = nil
+                await self.detectDevice()
+            }
+        }
+        monitor.start()
+        usbMonitor = monitor
+        print("📡 IOKit USB monitor started")
+    }
+
+    func stopMonitoring() {
+        usbMonitor?.stop()
+        usbMonitor = nil
     }
 
     // MARK: - Device Name

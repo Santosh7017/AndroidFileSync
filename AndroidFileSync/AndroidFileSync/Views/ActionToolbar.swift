@@ -261,7 +261,7 @@ struct ActionToolbar: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
+        .background(.regularMaterial)
         // Handle Escape key to clear search
         .onExitCommand {
             if isSearchActive {

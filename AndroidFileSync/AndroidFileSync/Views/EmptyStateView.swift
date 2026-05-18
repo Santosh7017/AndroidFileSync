@@ -47,52 +47,22 @@ struct EmptyStateView: View {
             
             // Action buttons
             if !isDetecting {
-                HStack(spacing: 16) {
+                HStack(spacing: 12) {
                     if let onRetry = onRetry {
                         Button(action: onRetry) {
-                            HStack(spacing: 8) {
-                                Image(systemName: "arrow.clockwise")
-                                Text("Try Again")
-                            }
-                            .font(.system(.body, weight: .medium))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 24)
-                            .padding(.vertical, 12)
-                            .background(
-                                LinearGradient(
-                                    colors: [.blue, .blue.opacity(0.8)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                            .cornerRadius(10)
+                            Label("Try Again", systemImage: "arrow.clockwise")
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityElement(children: .ignore)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
                         .accessibilityLabel("Try Again")
                     }
                     
                     if let onWiFi = onConnectWiFi {
                         Button(action: onWiFi) {
-                            HStack(spacing: 8) {
-                                Image(systemName: "wifi")
-                                Text("Connect via WiFi")
-                            }
-                            .font(.system(.body, weight: .medium))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 24)
-                            .padding(.vertical, 12)
-                            .background(
-                                LinearGradient(
-                                    colors: [.green, .green.opacity(0.8)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                            .cornerRadius(10)
+                            Label("Connect via WiFi", systemImage: "wifi")
                         }
-                        .buttonStyle(.plain)
-                        .accessibilityElement(children: .ignore)
+                        .buttonStyle(.bordered)
+                        .controlSize(.large)
                         .accessibilityLabel("Connect via WiFi")
                     }
                 }
@@ -106,7 +76,6 @@ struct EmptyStateView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(NSColor.windowBackgroundColor))
         .id("empty_state_view_\(isDetecting)")
     }
     
@@ -117,13 +86,10 @@ struct EmptyStateView: View {
             instructionRow(number: 3, text: "Or use WiFi — enable Wireless Debugging (Android 11+)", icon: "wifi")
         }
         .padding(20)
-        .background(
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .fill(Color(NSColor.controlBackgroundColor))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
-                )
+                .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
         )
     }
     

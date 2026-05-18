@@ -22,6 +22,9 @@ struct AppBrowserView: View {
     @State private var pendingApp: AppInfo? = nil
     @State private var showActionConfirm = false
 
+    // Batch progress tracking (also used for single-app actions for UI consistency)
+    @State private var batchProgress: (current: Int, total: Int)? = nil
+
     enum AppSortOption: String, CaseIterable {
         case name    = "Name"
         case package = "Package"
@@ -59,6 +62,10 @@ struct AppBrowserView: View {
         VStack(spacing: 0) {
             toolbar
             Divider()
+            // Progress banner — shown for both batch and single-app operations
+            if let progress = batchProgress {
+                batchProgressBanner(progress)
+            }
             content
         }
         .task(id: selectedFilter) {
@@ -168,7 +175,7 @@ struct AppBrowserView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(Color(NSColor.controlBackgroundColor))
+        .background(.ultraThinMaterial)
     }
 
     // MARK: - Content
@@ -283,11 +290,22 @@ struct AppBrowserView: View {
     private func handleAction(_ action: AppAction, app: AppInfo) async {
         switch action {
         case .uninstall, .disable, .clearData, .clearCache:
-            // These are destructive — ask for confirmation first
-            await MainActor.run {
-                pendingAction = action
-                pendingApp = app
-                showActionConfirm = true
+            // If user right-clicks an app that's part of a multi-selection,
+            // treat it as a batch operation on ALL selected apps (not just the one clicked).
+            let isPartOfSelection = selectedPackages.contains(app.packageName)
+            let isMultiSelection  = selectedPackages.count > 1
+
+            if isPartOfSelection && isMultiSelection && (action == .uninstall || action == .disable) {
+                // Route to batch — show batch confirmation for all selected
+                await MainActor.run { showBatchConfirm = true }
+            } else {
+                // Single-app destructive action — ask for confirmation
+                await MainActor.run {
+                    // Ensure only this app is "pending" even if others are highlighted
+                    pendingAction = action
+                    pendingApp = app
+                    showActionConfirm = true
+                }
             }
 
         case .enable:
@@ -309,21 +327,29 @@ struct AppBrowserView: View {
     private func executeAction(_ action: AppAction, app: AppInfo) async {
         switch action {
         case .uninstall:
+            batchProgress = (0, 1)
             let (ok, msg) = await appManager.uninstall(package: app.packageName)
+            batchProgress = nil
             if ok { await appManager.fetchApps(filter: selectedFilter) }
             showResult(msg)
 
         case .disable:
+            batchProgress = (0, 1)
             let (ok, msg) = await appManager.disableSystemApp(package: app.packageName)
+            batchProgress = nil
             if ok { await appManager.fetchApps(filter: selectedFilter) }
             showResult(msg)
 
         case .clearData:
+            batchProgress = (0, 1)
             let (_, msg) = await appManager.clearData(package: app.packageName)
+            batchProgress = nil
             showResult(msg)
 
         case .clearCache:
+            batchProgress = (0, 1)
             let (_, msg) = await appManager.clearCache(package: app.packageName)
+            batchProgress = nil
             showResult(msg)
 
         default:
@@ -420,14 +446,21 @@ struct AppBrowserView: View {
     }
 
     private func performBatchAction() async {
+        let total = selectedPackages.count
+        var current = 0
+        batchProgress = (current, total)
+        
         switch selectedFilter {
         case .system:
             var failed: [String] = []
             for pkg in selectedPackages {
                 let (ok, _) = await appManager.disableSystemApp(package: pkg)
                 if !ok { failed.append(pkg) }
+                current += 1
+                batchProgress = (current, total)
             }
             selectedPackages = []
+            batchProgress = nil
             await appManager.fetchApps(filter: selectedFilter)
             showResult(failed.isEmpty
                 ? "All selected system apps disabled."
@@ -438,22 +471,79 @@ struct AppBrowserView: View {
             for pkg in selectedPackages {
                 let (ok, _) = await appManager.enableApp(package: pkg)
                 if !ok { failed.append(pkg) }
+                current += 1
+                batchProgress = (current, total)
             }
             selectedPackages = []
+            batchProgress = nil
             await appManager.fetchApps(filter: selectedFilter)
             showResult(failed.isEmpty
                 ? "All selected apps re-enabled."
                 : "Some apps could not be enabled: \(failed.joined(separator: ", "))")
 
         default:
-            let results = await appManager.batchUninstall(packages: Array(selectedPackages))
-            let failed = results.filter { !$0.value }.keys
+            var failed: [String] = []
+            for pkg in selectedPackages {
+                let (ok, _) = await appManager.uninstall(package: pkg)
+                if !ok { failed.append(pkg) }
+                current += 1
+                batchProgress = (current, total)
+            }
             selectedPackages = []
+            batchProgress = nil
             await appManager.fetchApps(filter: selectedFilter)
             showResult(failed.isEmpty
                 ? "All selected apps uninstalled successfully."
                 : "Some apps could not be uninstalled: \(failed.joined(separator: ", "))")
         }
+    }
+
+    private func batchActionStyle() -> (action: String, color: Color) {
+        switch selectedFilter {
+        case .system:   return ("Disabling",    .orange)
+        case .disabled: return ("Enabling",     .green)
+        default:        return ("Uninstalling", .red)
+        }
+    }
+
+    @ViewBuilder
+    private func batchProgressBanner(_ progress: (current: Int, total: Int)) -> some View {
+        let style = batchActionStyle()
+        let fraction = progress.total > 0 ? Double(progress.current) / Double(progress.total) : 0.0
+
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                ProgressView()
+                    .scaleEffect(0.75)
+                    .frame(width: 16, height: 16)
+                Text("\(style.action) apps... \(progress.current) of \(progress.total)")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.primary)
+                Spacer()
+                Text("\(Int(fraction * 100))%")
+                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    .foregroundColor(style.color)
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 8)
+            .padding(.bottom, 6)
+
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Rectangle()
+                        .fill(style.color.opacity(0.15))
+                        .frame(height: 3)
+                    Rectangle()
+                        .fill(style.color)
+                        .frame(width: geo.size.width * fraction, height: 3)
+                        .animation(.linear(duration: 0.3), value: fraction)
+                }
+            }
+            .frame(height: 3)
+
+            Divider()
+        }
+        .background(style.color.opacity(0.08))
     }
 
     private func pickAndInstallAPK() async {

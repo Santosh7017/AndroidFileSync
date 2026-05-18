@@ -19,6 +19,10 @@ struct AndroidFileSyncApp: App {
                 uploadManager: uploadManager
             )
         }
+        .defaultSize(width: 1050, height: 660)
+        .windowResizability(.contentMinSize)
+        .windowToolbarStyle(.unified(showsTitle: true))
+        .windowStyle(.titleBar)
     }
 }
 
@@ -32,10 +36,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         
+        // Allow dragging the window from any non-interactive area
+        // (path bar, empty space, breadcrumbs etc.) — the correct Apple approach
+        window.isMovableByWindowBackground = true
+        
         // Register for drag-and-drop
         contentView.registerForDraggedTypes([.fileURL])
-        
-        // Set the coordinator
         (contentView as? NSView)?.window?.registerForDraggedTypes([.fileURL])
     }
 }
