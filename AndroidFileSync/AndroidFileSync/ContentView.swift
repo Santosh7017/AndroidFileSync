@@ -178,35 +178,6 @@ struct ContentView: View {
     private var layoutContent: some View {
         VStack(spacing: 0) {
 
-            if updateChecker.shouldShowBanner {
-                HStack(spacing: 8) {
-                    Image(systemName: "arrow.down.circle.fill")
-                        .foregroundColor(.blue)
-                    Text("Version \(updateChecker.latestVersion) available")
-                        .font(.caption.weight(.medium))
-                    Spacer()
-                    Button(action: { updateChecker.openReleasePage() }) {
-                        Text("Download")
-                            .font(.caption.weight(.semibold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 3)
-                            .background(Color.blue)
-                            .cornerRadius(4)
-                    }
-                    .buttonStyle(.plain)
-                    Button(action: { updateChecker.dismissForToday() }) {
-                        Image(systemName: "xmark")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(Color.blue.opacity(0.08))
-            }
-
             if deviceManager.isConnected {
                 connectedContent
             } else {
@@ -222,6 +193,54 @@ struct ContentView: View {
                 uploadManager: uploadManager,
                 deviceManager: deviceManager
             )
+        }
+        .overlay(alignment: .topTrailing) {
+            if updateChecker.shouldShowBanner {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.down.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(.white)
+                    Text("v\(updateChecker.latestVersion) available")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white)
+                    
+                    Button(action: { updateChecker.openReleasePage() }) {
+                        Text("Update")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(.blue)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 2)
+                            .background(Color.white)
+                            .cornerRadius(10)
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Button(action: { updateChecker.dismissForToday() }) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(.white.opacity(0.8))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                .background(
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [Color.blue, Color.blue.opacity(0.85)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
+                )
+                .padding(.top, 6)
+                .padding(.trailing, 280) 
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .animation(.spring(response: 0.4, dampingFraction: 0.8), value: updateChecker.shouldShowBanner)
+                .zIndex(100)
+            }
         }
         .frame(minWidth: 800, minHeight: 600)
         .onAppear {

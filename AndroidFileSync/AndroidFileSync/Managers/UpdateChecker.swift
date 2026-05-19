@@ -13,6 +13,7 @@ class UpdateChecker: ObservableObject {
     /// True when an update exists AND the user hasn't dismissed it today
     var shouldShowBanner: Bool {
         guard updateAvailable else { return false }
+        
         if let dismissedDate = UserDefaults.standard.object(forKey: "updateDismissedDate") as? Date {
             return !Calendar.current.isDateInToday(dismissedDate)
         }
@@ -28,7 +29,7 @@ class UpdateChecker: ObservableObject {
     private let repoName = "AndroidFileSync"
     
     var currentVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+        return Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
     }
     
     func checkForUpdates() {
