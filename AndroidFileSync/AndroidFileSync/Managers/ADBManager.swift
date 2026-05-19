@@ -584,8 +584,7 @@ class ADBManager {
                                 }
                             }
                             
-                            // Poll every 1 second
-                            Thread.sleep(forTimeInterval: 1.0)
+                            Thread.sleep(forTimeInterval: 2)
                         }
                     }
                     
