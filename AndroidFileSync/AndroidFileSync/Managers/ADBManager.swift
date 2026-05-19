@@ -1088,8 +1088,14 @@ class ADBManager {
         guard !adbPath.isEmpty else { return }
         
         let escapedPath = path.replacingOccurrences(of: "'", with: "'\\''")
-        // Use am broadcast to scan just this one file — returns almost instantly
-        let command = "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d 'file://\(escapedPath)' >/dev/null 2>&1"
+        
+        // Two strategies combined — both target ONLY this specific file, never the whole device:
+        //
+        // 1. Modern (Android 11+): "cmd media.scanner scan" indexes just this one file
+        // 2. Legacy (Android ≤10): broadcast intent for single-file scan
+        //
+        // Whichever matches the device's Android version will work; the other silently no-ops.
+        let command = "cmd media.scanner scan '\(escapedPath)' >/dev/null 2>&1; am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d 'file://\(escapedPath)' >/dev/null 2>&1"
         
         _ = await Shell.runAsync(adbPath, args: deviceArgs(["shell", command]))
     }
