@@ -70,48 +70,53 @@ class DeviceManager: ObservableObject {
                 // ADB 37's `adb mdns services` resolves current ip:port in real-time.
                 let savedIPs = UserDefaults.standard.stringArray(forKey: "connectedWirelessDevices") ?? []
                 if !savedIPs.isEmpty {
-                    var connectedIPs = Set<String>()
-                    
-                    // Retry up to 3 times — mDNS needs time after server restart
-                    for attempt in 1...3 {
-                        try? await Task.sleep(nanoseconds: 1_000_000_000) // 1s between attempts
+                    Task {
+                        var connectedIPs = Set<String>()
                         
-                        let (code, mdnsOut, _) = await Shell.runAsyncWithTimeout(
-                            adbPath, args: ["mdns", "services"], timeoutSeconds: 3.0
-                        )
-                        guard code == 0 else { continue }
-                        
-                        print("📱 DeviceManager: mDNS poll attempt \(attempt)/3")
-                        
-                        for savedIP in savedIPs where !connectedIPs.contains(savedIP) {
-                            // Find this IP's _adb-tls-connect._tcp service
-                            for line in mdnsOut.split(separator: "\n") {
-                                let str = String(line)
-                                guard str.contains("_adb-tls-connect._tcp"),
-                                      str.contains(savedIP) else { continue }
-                                // Extract ip:port
-                                let parts = str.split(whereSeparator: { $0 == "\t" || $0 == " " }).map(String.init)
-                                guard let ipPort = parts.first(where: { $0.hasPrefix(savedIP + ":") }) else { break }
-                                
-                                print("📱 DeviceManager: Reconnecting to: \(ipPort)")
-                                let (_, out, _) = await Shell.runAsyncWithTimeout(
-                                    adbPath, args: ["connect", ipPort], timeoutSeconds: 5.0
-                                )
-                                if out.lowercased().contains("connected") {
-                                    connectedIPs.insert(savedIP)
-                                    print("📱 DeviceManager: ✅ Connected to \(ipPort)")
-                                } else {
-                                    print("📱 DeviceManager: ❌ Failed: \(out.trimmingCharacters(in: .whitespacesAndNewlines))")
+                        // Retry up to 3 times — mDNS needs time after server restart
+                        for attempt in 1...3 {
+                            try? await Task.sleep(nanoseconds: 1_000_000_000) // 1s between attempts
+                            
+                            let (code, mdnsOut, _) = await Shell.runAsyncWithTimeout(
+                                adbPath, args: ["mdns", "services"], timeoutSeconds: 3.0
+                            )
+                            guard code == 0 else { continue }
+                            
+                            print("📱 DeviceManager: mDNS poll attempt \(attempt)/3")
+                            
+                            for savedIP in savedIPs where !connectedIPs.contains(savedIP) {
+                                // Find this IP's _adb-tls-connect._tcp service
+                                for line in mdnsOut.split(separator: "\n") {
+                                    let str = String(line)
+                                    guard str.contains("_adb-tls-connect._tcp"),
+                                          str.contains(savedIP) else { continue }
+                                    // Extract ip:port
+                                    let parts = str.split(whereSeparator: { $0 == "\t" || $0 == " " }).map(String.init)
+                                    guard let ipPort = parts.first(where: { $0.hasPrefix(savedIP + ":") }) else { break }
+                                    
+                                    print("📱 DeviceManager: Reconnecting to: \(ipPort)")
+                                    let (_, out, _) = await Shell.runAsyncWithTimeout(
+                                        adbPath, args: ["connect", ipPort], timeoutSeconds: 5.0
+                                    )
+                                    if out.lowercased().contains("connected") {
+                                        connectedIPs.insert(savedIP)
+                                        print("📱 DeviceManager: ✅ Connected to \(ipPort)")
+                                    } else {
+                                        print("📱 DeviceManager: ❌ Failed: \(out.trimmingCharacters(in: .whitespacesAndNewlines))")
+                                    }
+                                    break
                                 }
-                                break
                             }
+                            
+                            // All known devices found — stop retrying
+                            if connectedIPs.count >= savedIPs.count { break }
                         }
                         
-                        // All known devices found — stop retrying
-                        if connectedIPs.count >= savedIPs.count { break }
+                        print("📱 DeviceManager: Reconnected \(connectedIPs.count)/\(savedIPs.count) devices")
+                        
+                        // Trigger a refresh of availableDevices so the newly connected devices appear
+                        await self.detectDevice()
                     }
-                    
-                    print("📱 DeviceManager: Reconnected \(connectedIPs.count)/\(savedIPs.count) devices")
                 }
             }
         }
@@ -433,6 +438,14 @@ class DeviceManager: ObservableObject {
             await detectDevice()
             return (true, message)
         } else {
+            // If connection fails (e.g. authorization revoked), remove from saved list
+            // so the UI falls back to "Tap to pair" and stops auto-reconnecting
+            var saved = UserDefaults.standard.stringArray(forKey: "connectedWirelessDevices") ?? []
+            if let idx = saved.firstIndex(of: ip) {
+                saved.remove(at: idx)
+                UserDefaults.standard.set(saved, forKey: "connectedWirelessDevices")
+            }
+            
             await MainActor.run {
                 self.isDetecting = false
                 self.statusMessage = message

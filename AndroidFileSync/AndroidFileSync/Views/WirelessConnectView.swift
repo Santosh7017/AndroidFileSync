@@ -43,48 +43,59 @@ class ADBPairingBrowser: ObservableObject {
     @Published var discoveredDevices: [String: DiscoveredDevice] = [:]
     /// When true, skip all automatic `adb connect` calls (user explicitly disconnected)
     static var suppressAutoConnect = false
+    /// Tracks IPs currently being auto-connected to prevent spamming adb commands
+    @MainActor static var autoConnectingIPs = Set<String>()
+    /// IPs where connection failed (authorization revoked) — need re-pairing.
+    /// Prevents auto-reconnect and forces the pairing form in the UI.
+    @MainActor static var needsRepairing = Set<String>()
+    /// Called when connect services change — refresh the ADB device list
+    var onDeviceListChanged: (() -> Void)?
     
     private var pairingBrowser: NWBrowser?
     private var connectBrowser: NWBrowser?
     
-    // Map of endpoints to resolve details for accurate removal
-    // We store Hashable Representation mapping instead of NWEndpoint directly,
-    // as NWEndpoint is an enum and hashes correctly by its host/port values or service.
-    // `key` is the same key used in discoveredDevices (serviceName if known, else ip).
-    private var endpointToIPAndType: [NWEndpoint: (ip: String, isPairing: Bool, key: String)] = [:]
-    private var activeConnections: [NWEndpoint: NWConnection] = [:]
     private var mdnsPollTimer: Timer?
     
     private let queue = DispatchQueue(label: "com.androidfilesync.adb.mdns")
     
     func startBrowsing() {
+        // Cancel existing browsers before restarting
+        pairingBrowser?.cancel()
+        connectBrowser?.cancel()
+        
         print("📶 NWBrowser: Browsing for _adb-tls-pairing._tcp + _adb-tls-connect._tcp...")
 
-        // 1. Pairing Browser — resolves endpoints via NWConnection (safe, pairing port)
+        // ── ADB 37 approach ──────────────────────────────────────────────
+        // NWBrowser gives us INSTANT event notifications (device appeared/disappeared).
+        // `adb mdns services` gives us the actual IP:port resolution.
+        // We do NOT create TCP connections (NWConnection) to the device at all,
+        // avoiding TCP RSTs, auth prompts, and flickering.
+
+        // 1. Pairing Browser — instant notification when pairing dialog opens/closes
         let pairParams = NWParameters.tcp
         if let ipOpts = pairParams.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
-            ipOpts.version = .v4 // Force IPv4 everywhere
+            ipOpts.version = .v4
         }
-        pairParams.includePeerToPeer = true // Helps discover devices on direct WiFi links
+        pairParams.includePeerToPeer = true
         pairingBrowser = NWBrowser(for: .bonjour(type: "_adb-tls-pairing._tcp", domain: "local."), using: pairParams)
 
-        pairingBrowser?.browseResultsChangedHandler = { [weak self] results, changes in
-            for change in changes {
-                switch change {
-                case .added(let result), .changed(_, let result, _):
-                    self?.resolveEndpoint(result.endpoint, isPairing: true)
-                case .removed(let result):
-                    self?.handleRemoval(for: result.endpoint)
-                default:
-                    break
+        pairingBrowser?.browseResultsChangedHandler = { [weak self] _, changes in
+            // Any change (added/removed/changed) → rapid-poll adb mdns services
+            // ADB's mDNS daemon may lag slightly behind NWBrowser, so poll multiple times
+            if !changes.isEmpty {
+                DispatchQueue.main.async {
+                    self?.pollADBMdnsServices()
+                }
+                // Retry polls after short delays to catch services ADB hasn't indexed yet
+                for delay in [1.0, 2.0] {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                        self?.pollADBMdnsServices()
+                    }
                 }
             }
         }
 
-        // 2. Connect Browser — watches for _adb-tls-connect._tcp for INSTANT detection
-        //    but does NOT call resolveEndpoint (NWConnection to connect port triggers
-        //    phone notification). Instead, triggers an immediate adb mdns services poll
-        //    which resolves the IP in a read-only way.
+        // 2. Connect Browser — instant notification when wireless debugging toggled
         let connectParams = NWParameters.tcp
         if let ipOpts = connectParams.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
             ipOpts.version = .v4
@@ -98,19 +109,40 @@ class ADBPairingBrowser: ObservableObject {
                 case .removed(let result):
                     // Device turned off wireless debugging — remove from list instantly
                     if case let .service(name, _, _, _) = result.endpoint, name.hasPrefix("adb-") {
+                        let ipToDisconnect = self?.discoveredDevices[name]?.ip
                         DispatchQueue.main.async {
-                            self?.discoveredDevices.removeValue(forKey: name)
+                            // Don't remove devices that need re-pairing — keep them visible
+                            // so the user can still see the pairing form
+                            let keepForRepairing = ipToDisconnect.map { ADBPairingBrowser.needsRepairing.contains($0) } ?? false
+                            if !keepForRepairing {
+                                self?.discoveredDevices.removeValue(forKey: name)
+                            }
                             self?.evaluateStatus()
+                            
+                            // Force adb disconnect, but NOT for devices needing re-pair
+                            // (those are expected to be in a flaky connect state)
+                            if let ip = ipToDisconnect,
+                               !ADBPairingBrowser.needsRepairing.contains(ip) {
+                                Task {
+                                    let adbPath = ADBManager.getADBPath()
+                                    if !adbPath.isEmpty {
+                                        print("📡 NWBrowser: Device \(name) removed, forcing adb disconnect \(ip)")
+                                        _ = await Shell.runAsyncWithTimeout(adbPath, args: ["disconnect", ip], timeoutSeconds: 3.0)
+                                    }
+                                    self?.onDeviceListChanged?()
+                                }
+                            }
                         }
                     }
                 default:
                     break
                 }
             }
-            // Any change → instant poll for details (adds/updates)
+            // Any change → instant poll for details + refresh device list
             if !changes.isEmpty {
                 DispatchQueue.main.async {
                     self?.pollADBMdnsServices()
+                    self?.onDeviceListChanged?()
                 }
             }
         }
@@ -120,8 +152,7 @@ class ADBPairingBrowser: ObservableObject {
 
         ADBPairingBrowser.suppressAutoConnect = false
         DispatchQueue.main.async {
-            self.discoveredDevices.removeAll()
-            self.endpointToIPAndType.removeAll()
+            // Don't clear discoveredDevices — preserve existing data across restarts
             self.status = .searching
             self.startMdnsPolling()
         }
@@ -135,17 +166,11 @@ class ADBPairingBrowser: ObservableObject {
         mdnsPollTimer?.invalidate()
         mdnsPollTimer = nil
         
-        for (_, connection) in activeConnections {
-            connection.cancel()
-        }
-        activeConnections.removeAll()
-        
         DispatchQueue.main.async {
             if self.status == .searching {
                 self.status = .idle
             }
             self.discoveredDevices.removeAll()
-            self.endpointToIPAndType.removeAll()
         }
     }
     
@@ -222,131 +247,56 @@ class ADBPairingBrowser: ObservableObject {
 
                 // Check if this IP is already connected by matching against adb devices
                 let isPaired = isConnectService && connectedSerials.contains(where: { $0.contains(ip) })
+                
+                // Auto-reconnect to previously known devices that just reappeared on mDNS
+                if isConnectService && !isPaired && !ADBPairingBrowser.suppressAutoConnect
+                    && !ADBPairingBrowser.needsRepairing.contains(ip) {
+                    let savedIPs = UserDefaults.standard.stringArray(forKey: "connectedWirelessDevices") ?? []
+                    if savedIPs.contains(ip) {
+                        let connectAddr = "\(ip):\(port)"
+                        Task { @MainActor in
+                            if !ADBPairingBrowser.autoConnectingIPs.contains(ip) {
+                                ADBPairingBrowser.autoConnectingIPs.insert(ip)
+                                print("📶 NWBrowser: Auto-reconnecting to known device \(connectAddr)")
+                                let (exitCode, out, err) = await Shell.runAsyncWithTimeout(
+                                    adbPath, args: ["connect", connectAddr], timeoutSeconds: 5.0
+                                )
+                                
+                                let combined = (out + err).lowercased()
+                                if combined.contains("failed") || combined.contains("cannot connect") || exitCode != 0 {
+                                    // Connection failed (likely authorization revoked)
+                                    // Remove from saved list to stop auto-reconnect loop and allow re-pairing
+                                    var saved = UserDefaults.standard.stringArray(forKey: "connectedWirelessDevices") ?? []
+                                    if let idx = saved.firstIndex(of: ip) {
+                                        saved.remove(at: idx)
+                                        UserDefaults.standard.set(saved, forKey: "connectedWirelessDevices")
+                                        print("📶 NWBrowser: Auto-reconnect failed, removing \(ip) from known devices.")
+                                    }
+                                }
+                                
+                                ADBPairingBrowser.autoConnectingIPs.remove(ip)
+                                self.onDeviceListChanged?()
+                            }
+                        }
+                    }
+                }
 
                 await MainActor.run {
                     let existing = self.discoveredDevices[dictKey]
+                    // Don't mark as paired if this IP needs re-pairing
+                    let blocked = ADBPairingBrowser.needsRepairing.contains(ip)
                     let updatedDevice = DiscoveredDevice(
                         ip: ip,
                         serviceName: existing?.serviceName ?? serviceName,
                         hostname: existing?.hostname ?? hostname,
                         pairingPort: isPairingService ? port : existing?.pairingPort,
                         connectPort: isConnectService ? port : existing?.connectPort,
-                        verifiedPaired: isPaired ? true : existing?.verifiedPaired
+                        verifiedPaired: (isPaired && !blocked) ? true : existing?.verifiedPaired
                     )
                     self.discoveredDevices[dictKey] = updatedDevice
                     self.evaluateStatus()
                 }
             }
-        }
-    }
-    
-    private func resolveEndpoint(_ endpoint: NWEndpoint, isPairing: Bool) {
-        activeConnections[endpoint]?.cancel()
-        
-        // Extract Bonjour service name from the endpoint before connecting.
-        // NWEndpoint.service gives us the stable identifier e.g. "adb-XXXX"
-        var bonjourServiceName: String? = nil
-        if case let .service(name, _, _, _) = endpoint {
-            bonjourServiceName = name.hasPrefix("adb-") ? name : nil
-        }
-        
-        let connectionParams = NWParameters.tcp
-        if let ipOpts = connectionParams.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
-            ipOpts.version = .v4
-        }
-        let connection = NWConnection(to: endpoint, using: connectionParams)
-        activeConnections[endpoint] = connection
-        
-        connection.stateUpdateHandler = { [weak self] state in
-            switch state {
-            case .ready:
-                if let path = connection.currentPath,
-                   case let .hostPort(host, port) = path.remoteEndpoint {
-                    
-                    let ipString = "\(host)"
-                    let cleanIp = ipString.components(separatedBy: "%").first ?? ipString
-                    let portNumber = port.rawValue
-                    // Derive hostname from service name if Bonjour gave us one
-                    let derivedHostname: String? = bonjourServiceName.map { "\($0).local" }
-                    // Stable dict key: prefer service name over raw IP
-                    let dictKey = bonjourServiceName ?? cleanIp
-                    
-                    print("📶 NWBrowser: \(isPairing ? "Pairing" : "Connect") -> \(dictKey) (\(cleanIp):\(portNumber))")
-                    
-                    DispatchQueue.main.async {
-                        self?.endpointToIPAndType[endpoint] = (cleanIp, isPairing, dictKey)
-                        
-                        let existing = self?.discoveredDevices[dictKey]
-                        let device = DiscoveredDevice(
-                            ip: cleanIp,
-                            serviceName: bonjourServiceName ?? existing?.serviceName,
-                            hostname: derivedHostname ?? existing?.hostname,
-                            pairingPort: isPairing ? portNumber : existing?.pairingPort,
-                            connectPort: isPairing ? existing?.connectPort : portNumber,
-                            verifiedPaired: existing?.verifiedPaired
-                        )
-                        self?.discoveredDevices[dictKey] = device
-                        self?.evaluateStatus()
-                        
-                        // Check if already paired (read-only — checks adb devices, no adb connect)
-                        if !isPairing, device.verifiedPaired == nil {
-                            self?.verifyPairing(deviceKey: dictKey, ip: cleanIp, port: portNumber, hostname: derivedHostname)
-                        }
-                    }
-                    
-                    // Critical: Close connection so Android doesn't get flooded
-                    connection.cancel()
-                    DispatchQueue.main.async {
-                        self?.activeConnections.removeValue(forKey: endpoint)
-                    }
-                }
-            case .failed(let error):
-                print("📶 NWBrowser: Endpoint resolution failed: \(error)")
-                connection.cancel()
-                DispatchQueue.main.async {
-                    self?.activeConnections.removeValue(forKey: endpoint)
-                }
-            case .cancelled:
-                DispatchQueue.main.async {
-                    self?.activeConnections.removeValue(forKey: endpoint)
-                }
-            default:
-                break
-            }
-        }
-        
-        connection.start(queue: queue)
-    }
-    
-    private func handleRemoval(for endpoint: NWEndpoint) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            
-            if let info = self.endpointToIPAndType[endpoint] {
-                let wasPairing = info.isPairing
-                let dictKey = info.key
-                
-                if var device = self.discoveredDevices[dictKey] {
-                    if info.isPairing {
-                        device.pairingPort = nil
-                    } else {
-                        device.connectPort = nil
-                    }
-                    
-                    if device.pairingPort == nil && device.connectPort == nil {
-                        self.discoveredDevices.removeValue(forKey: dictKey)
-                    } else {
-                        self.discoveredDevices[dictKey] = device
-                    }
-                }
-                self.endpointToIPAndType.removeValue(forKey: endpoint)
-                
-                // Restart pairing browser to clear mDNS cache for faster rediscovery
-                if wasPairing {
-                    self.restartPairingBrowser()
-                }
-            }
-            self.evaluateStatus()
         }
     }
     
@@ -358,67 +308,6 @@ class ADBPairingBrowser: ObservableObject {
         } else {
             if self.status == .searching {
                 self.status = .deviceFound
-            }
-        }
-    }
-    
-    /// Restarts just the pairing browser to clear mDNS cache.
-    /// Called when a pairing service disappears (user closed the dialog on phone).
-    private func restartPairingBrowser() {
-        pairingBrowser?.cancel()
-        
-        // Short delay so macOS flushes the old mDNS entry
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self = self else { return }
-            
-            let pairParams = NWParameters.tcp
-            if let ipOpts = pairParams.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
-                ipOpts.version = .v4
-            }
-            pairParams.includePeerToPeer = true
-            self.pairingBrowser = NWBrowser(for: .bonjour(type: "_adb-tls-pairing._tcp", domain: "local."), using: pairParams)
-            
-            self.pairingBrowser?.browseResultsChangedHandler = { [weak self] results, changes in
-                for change in changes {
-                    switch change {
-                    case .added(let result), .changed(_, let result, _):
-                        self?.resolveEndpoint(result.endpoint, isPairing: true)
-                    case .removed(let result):
-                        self?.handleRemoval(for: result.endpoint)
-                    default:
-                        break
-                    }
-                }
-            }
-            
-            self.pairingBrowser?.start(queue: self.queue)
-            print("📶 Pairing browser restarted for fresh discovery")
-        }
-    }
-    
-    /// Checks if a device is already paired by looking at `adb devices` output.
-    /// NEVER calls `adb connect` — that's reserved for explicit user actions only.
-    private func verifyPairing(deviceKey: String, ip: String, port: UInt16, hostname: String?) {
-        Task.detached(priority: .userInitiated) {
-            let adbPath = ADBManager.getADBPath()
-            guard !adbPath.isEmpty else { return }
-
-            // Read-only check: is this device IP already in adb devices?
-            let (_, devOut, _) = await Shell.runAsyncWithTimeout(
-                adbPath, args: ["devices"], timeoutSeconds: 3.0
-            )
-            let isPaired = devOut.split(separator: "\n").contains { line in
-                let s = String(line)
-                return (s.contains("\tdevice") || s.contains(" device")) && s.contains(ip)
-            }
-
-            print("📶 Pairing check for \(ip):\(port): \(isPaired ? "✅ PAIRED (in adb devices)" : "⏳ not yet connected")")
-
-            await MainActor.run { [weak self] in
-                if var device = self?.discoveredDevices[deviceKey] {
-                    device.verifiedPaired = isPaired
-                    self?.discoveredDevices[deviceKey] = device
-                }
             }
         }
     }
@@ -539,6 +428,11 @@ struct WirelessConnectView: View {
         }
         .frame(width: 500, height: 620)
         .onAppear {
+            // Refresh availableDevices when NWBrowser detects device changes
+            let dm = deviceManager
+            pairingBrowser.onDeviceListChanged = {
+                Task { await dm.detectDevice() }
+            }
 
             if !hasSeenWifiSetup {
                 showSetupPopup = true
@@ -612,7 +506,6 @@ struct WirelessConnectView: View {
                             // Collapsible header — tap to hide
                             Button(action: {
                                 showRescanWhileConnected = false
-                                pairingBrowser.stopBrowsing()
                             }) {
                                 HStack(spacing: 8) {
                                     if isSearching {
@@ -784,11 +677,8 @@ struct WirelessConnectView: View {
         }
         .onAppear {
             showRescanWhileConnected = false
-            // Only auto-start discovery if nothing is connected at all.
-            // When a device is connected (USB or wireless), show the banner instead.
-            if !deviceManager.isConnected && status == .idle {
-                startAutoDiscovery()
-            }
+            // Start discovery unconditionally so we instantly detect if devices connect/disconnect
+            pairingBrowser.startBrowsing()
         }
     }
 
@@ -993,10 +883,11 @@ struct WirelessConnectView: View {
             .padding(14)
             .background(RoundedRectangle(cornerRadius: 10).fill(Color.green.opacity(0.06)))
 
-        } else if let cPort = deviceObj?.connectPort {
-            // Device has wireless debugging on — show Connect button.
+        } else if let cPort = deviceObj?.connectPort,
+                  !ADBPairingBrowser.needsRepairing.contains(deviceIP) {
+            // Device has wireless debugging on AND is not flagged as needing re-pair.
             // If already paired: connect succeeds immediately.
-            // If not paired: connect fails → user sees error and pairing form.
+            // If not paired: connect fails → flag as needsRepairing → shows pairing form.
             VStack(spacing: 10) {
                 HStack(spacing: 6) {
                     Image(systemName: isAlreadyPaired ? "checkmark.shield.fill" : "wifi")
@@ -1015,11 +906,20 @@ struct WirelessConnectView: View {
                         )
                         await MainActor.run {
                             if success {
+                                // Connection succeeded — clear any repairing flag
+                                ADBPairingBrowser.needsRepairing.remove(deviceIP)
                                 pairingBrowser.status = .paired
                                 onConnected?()
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { dismiss() }
                             } else {
-                                pairingBrowser.status = .failed("Connection failed. Device may need pairing.")
+                                // Mark as needing re-pairing — this is stable and won't be
+                                // overwritten by mDNS polls. The UI will show pairing form.
+                                ADBPairingBrowser.needsRepairing.insert(deviceIP)
+                                if var dev = pairingBrowser.discoveredDevices[activeKey] {
+                                    dev.verifiedPaired = false
+                                    pairingBrowser.discoveredDevices[activeKey] = dev
+                                }
+                                pairingBrowser.status = .failed("Connection refused. Please re-pair the device.")
                             }
                         }
                     }
@@ -1498,6 +1398,11 @@ struct WirelessConnectView: View {
                     pairingBrowser.status = .failed(pairMessage)
                 }
                 return
+            }
+            
+            // Pairing succeeded — clear the "needs repairing" flag
+            await MainActor.run {
+                ADBPairingBrowser.needsRepairing.remove(device.ip)
             }
             
             // Give Android a moment to update internal state
