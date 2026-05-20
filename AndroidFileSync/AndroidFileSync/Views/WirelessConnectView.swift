@@ -23,8 +23,13 @@ enum AutoDiscoveryStatus: Equatable {
 }
 
 struct DiscoveredDevice: Identifiable, Equatable {
-    var id: String { ip }
+    /// Stable identity: Bonjour service name (e.g. "adb-XXXX") when known, otherwise the IP.
+    var id: String { serviceName ?? ip }
     let ip: String
+    /// Bonjour service name, e.g. "adb-XXXX" — stable across IP changes (ADB 37+)
+    let serviceName: String?
+    /// mDNS hostname, e.g. "adb-XXXX.local" — preferred connect target (ADB 37+)
+    let hostname: String?
     var pairingPort: UInt16?
     var connectPort: UInt16?
     var verifiedPaired: Bool?
@@ -34,7 +39,10 @@ struct DiscoveredDevice: Identifiable, Equatable {
 /// Uses NWBrowser and NWConnection for real-time resolution (bypasses mDNSResponder cache).
 class ADBPairingBrowser: ObservableObject {
     @Published var status: AutoDiscoveryStatus = .idle
+    /// Keyed by stable service name (e.g. "adb-XXXX") when available, otherwise by IP.
     @Published var discoveredDevices: [String: DiscoveredDevice] = [:]
+    /// When true, skip all automatic `adb connect` calls (user explicitly disconnected)
+    static var suppressAutoConnect = false
     
     private var pairingBrowser: NWBrowser?
     private var connectBrowser: NWBrowser?
@@ -42,16 +50,17 @@ class ADBPairingBrowser: ObservableObject {
     // Map of endpoints to resolve details for accurate removal
     // We store Hashable Representation mapping instead of NWEndpoint directly,
     // as NWEndpoint is an enum and hashes correctly by its host/port values or service.
-    private var endpointToIPAndType: [NWEndpoint: (ip: String, isPairing: Bool)] = [:]
+    // `key` is the same key used in discoveredDevices (serviceName if known, else ip).
+    private var endpointToIPAndType: [NWEndpoint: (ip: String, isPairing: Bool, key: String)] = [:]
     private var activeConnections: [NWEndpoint: NWConnection] = [:]
     private var mdnsPollTimer: Timer?
     
     private let queue = DispatchQueue(label: "com.androidfilesync.adb.mdns")
     
     func startBrowsing() {
-        print("📶 NWBrowser: Browsing for _adb-tls-pairing._tcp and _adb-tls-connect._tcp...")
+        print("📶 NWBrowser: Browsing for _adb-tls-pairing._tcp + _adb-tls-connect._tcp...")
 
-        // 1. Setup Pairing Browser
+        // 1. Pairing Browser — resolves endpoints via NWConnection (safe, pairing port)
         let pairParams = NWParameters.tcp
         if let ipOpts = pairParams.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
             ipOpts.version = .v4 // Force IPv4 everywhere
@@ -72,7 +81,10 @@ class ADBPairingBrowser: ObservableObject {
             }
         }
 
-        // 2. Setup Connect Browser
+        // 2. Connect Browser — watches for _adb-tls-connect._tcp for INSTANT detection
+        //    but does NOT call resolveEndpoint (NWConnection to connect port triggers
+        //    phone notification). Instead, triggers an immediate adb mdns services poll
+        //    which resolves the IP in a read-only way.
         let connectParams = NWParameters.tcp
         if let ipOpts = connectParams.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
             ipOpts.version = .v4
@@ -80,15 +92,25 @@ class ADBPairingBrowser: ObservableObject {
         connectParams.includePeerToPeer = true
         connectBrowser = NWBrowser(for: .bonjour(type: "_adb-tls-connect._tcp", domain: "local."), using: connectParams)
 
-        connectBrowser?.browseResultsChangedHandler = { [weak self] results, changes in
+        connectBrowser?.browseResultsChangedHandler = { [weak self] _, changes in
             for change in changes {
                 switch change {
-                case .added(let result), .changed(_, let result, _):
-                    self?.resolveEndpoint(result.endpoint, isPairing: false)
                 case .removed(let result):
-                    self?.handleRemoval(for: result.endpoint)
+                    // Device turned off wireless debugging — remove from list instantly
+                    if case let .service(name, _, _, _) = result.endpoint, name.hasPrefix("adb-") {
+                        DispatchQueue.main.async {
+                            self?.discoveredDevices.removeValue(forKey: name)
+                            self?.evaluateStatus()
+                        }
+                    }
                 default:
                     break
+                }
+            }
+            // Any change → instant poll for details (adds/updates)
+            if !changes.isEmpty {
+                DispatchQueue.main.async {
+                    self?.pollADBMdnsServices()
                 }
             }
         }
@@ -96,13 +118,11 @@ class ADBPairingBrowser: ObservableObject {
         pairingBrowser?.start(queue: queue)
         connectBrowser?.start(queue: queue)
 
-        // Reset state and start polling AFTER clear — on the main thread so we don’t
-        // wipe results that the immediate poll already wrote.
+        ADBPairingBrowser.suppressAutoConnect = false
         DispatchQueue.main.async {
             self.discoveredDevices.removeAll()
             self.endpointToIPAndType.removeAll()
             self.status = .searching
-            // Fallback: poll ADB’s own mDNS (bypasses macOS mDNS cache)
             self.startMdnsPolling()
         }
     }
@@ -150,74 +170,71 @@ class ADBPairingBrowser: ObservableObject {
     /// Finds BOTH:
     ///   - _adb-tls-pairing._tcp  → device with pairing dialog open (needs code)
     ///   - _adb-tls-connect._tcp  → device with wireless debugging on (can direct-connect if already paired)
+    /// ADB 37+ output format:
+    ///   adb-XXXX  _adb-tls-pairing._tcp  192.168.1.69:41583  adb-XXXX.local
     private func pollADBMdnsServices() {
         Task {
             let adbPath = ADBManager.getADBPath()
             guard !adbPath.isEmpty else { return }
-            
+
+            // Read-only: get already-connected device IPs from adb devices
+            let (_, devicesOutput, _) = await Shell.runAsyncWithTimeout(
+                adbPath, args: ["devices"], timeoutSeconds: 3.0
+            )
+            let connectedSerials = devicesOutput.split(separator: "\n").compactMap { line -> String? in
+                let s = String(line)
+                guard s.contains("\tdevice") || s.contains(" device") else { return nil }
+                return s.components(separatedBy: "\t").first?.trimmingCharacters(in: .whitespaces)
+                    ?? s.components(separatedBy: " ").first?.trimmingCharacters(in: .whitespaces)
+            }
+
             let (code, output, _) = await Shell.runAsyncWithTimeout(
                 adbPath, args: ["mdns", "services"], timeoutSeconds: 3.0
             )
             guard code == 0 else { return }
-            
-            // Parse lines like:
-            //   adb-XXXX  _adb-tls-pairing._tcp  192.168.1.69:41583
-            //   adb-YYYY  _adb-tls-connect._tcp   192.168.1.69:35921
+
             for line in output.split(separator: "\n") {
                 let str = String(line)
                 let isPairingService = str.contains("_adb-tls-pairing._tcp")
                 let isConnectService = str.contains("_adb-tls-connect._tcp")
                 guard isPairingService || isConnectService else { continue }
-                
-                // Extract IP:port from the end of the line
+
                 let parts = str.split(whereSeparator: { $0 == "\t" || $0 == " " }).map(String.init)
-                guard let last = parts.last, last.contains(":") else { continue }
-                
-                let ipPort = last.split(separator: ":")
-                guard ipPort.count == 2,
-                      let port = UInt16(ipPort[1]) else { continue }
-                let ip = String(ipPort[0])
-                
-                await MainActor.run {
-                    var device = self.discoveredDevices[ip] ?? DiscoveredDevice(ip: ip)
-                    if isPairingService {
-                        if device.pairingPort != port { device.pairingPort = port }
-                    } else {
-                        // Connect service found — device has wireless debugging on.
-                        // Try direct adb connect (works if already paired).
-                        if device.connectPort != port { device.connectPort = port }
-                    }
-                    self.discoveredDevices[ip] = device
-                    self.evaluateStatus()
+
+                let serviceName: String? = parts.first.flatMap { p in
+                    p.hasPrefix("adb-") ? p : nil
                 }
 
-                // For connect-service devices, verify/attempt direct connection
-                if isConnectService {
-                    let port = port
-                    let ip = ip
-                    Task.detached(priority: .utility) {
-                        let adb = ADBManager.getADBPath()
-                        guard !adb.isEmpty else { return }
-                        let target = "\(ip):\(port)"
-                        let (_, out, err) = await Shell.runAsyncWithTimeout(
-                            adb, args: ["connect", target], timeoutSeconds: 4.0
-                        )
-                        let combined = (out + err).lowercased()
-                        let connected = combined.contains("connected to") || combined.contains("already connected")
-                        print("📶 mdns connect-service \(target): \(connected ? "✅ connected" : "❌ not paired yet")")
-                        if connected {
-                            await MainActor.run { [weak self] in
-                                if var dev = self?.discoveredDevices[ip] {
-                                    dev.verifiedPaired = true
-                                    self?.discoveredDevices[ip] = dev
-                                    self?.evaluateStatus()
-                                }
-                            }
-                        } else {
-                            // Not paired yet — disconnect cleanly
-                            _ = await Shell.runAsyncWithTimeout(adb, args: ["disconnect", target], timeoutSeconds: 3.0)
-                        }
-                    }
+                guard let ipPortString = parts.first(where: { part in
+                    let comps = part.split(separator: ":")
+                    return comps.count >= 2 && UInt16(comps.last!) != nil
+                }) else { continue }
+
+                let ipPort = ipPortString.split(separator: ":")
+                guard let portString = ipPort.last, let port = UInt16(portString) else { continue }
+                let ip = ipPort.dropLast().joined(separator: ":")
+
+                let hostname: String? = parts.last.flatMap { p in
+                    p.hasSuffix(".local") ? p : nil
+                }
+
+                let dictKey = serviceName ?? ip
+
+                // Check if this IP is already connected by matching against adb devices
+                let isPaired = isConnectService && connectedSerials.contains(where: { $0.contains(ip) })
+
+                await MainActor.run {
+                    let existing = self.discoveredDevices[dictKey]
+                    let updatedDevice = DiscoveredDevice(
+                        ip: ip,
+                        serviceName: existing?.serviceName ?? serviceName,
+                        hostname: existing?.hostname ?? hostname,
+                        pairingPort: isPairingService ? port : existing?.pairingPort,
+                        connectPort: isConnectService ? port : existing?.connectPort,
+                        verifiedPaired: isPaired ? true : existing?.verifiedPaired
+                    )
+                    self.discoveredDevices[dictKey] = updatedDevice
+                    self.evaluateStatus()
                 }
             }
         }
@@ -225,6 +242,13 @@ class ADBPairingBrowser: ObservableObject {
     
     private func resolveEndpoint(_ endpoint: NWEndpoint, isPairing: Bool) {
         activeConnections[endpoint]?.cancel()
+        
+        // Extract Bonjour service name from the endpoint before connecting.
+        // NWEndpoint.service gives us the stable identifier e.g. "adb-XXXX"
+        var bonjourServiceName: String? = nil
+        if case let .service(name, _, _, _) = endpoint {
+            bonjourServiceName = name.hasPrefix("adb-") ? name : nil
+        }
         
         let connectionParams = NWParameters.tcp
         if let ipOpts = connectionParams.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
@@ -242,25 +266,31 @@ class ADBPairingBrowser: ObservableObject {
                     let ipString = "\(host)"
                     let cleanIp = ipString.components(separatedBy: "%").first ?? ipString
                     let portNumber = port.rawValue
+                    // Derive hostname from service name if Bonjour gave us one
+                    let derivedHostname: String? = bonjourServiceName.map { "\($0).local" }
+                    // Stable dict key: prefer service name over raw IP
+                    let dictKey = bonjourServiceName ?? cleanIp
                     
-                    print("📶 NWBrowser: \(isPairing ? "Pairing" : "Connect") -> \(cleanIp):\(portNumber)")
+                    print("📶 NWBrowser: \(isPairing ? "Pairing" : "Connect") -> \(dictKey) (\(cleanIp):\(portNumber))")
                     
                     DispatchQueue.main.async {
-                        self?.endpointToIPAndType[endpoint] = (cleanIp, isPairing)
+                        self?.endpointToIPAndType[endpoint] = (cleanIp, isPairing, dictKey)
                         
-                        var device = self?.discoveredDevices[cleanIp] ?? DiscoveredDevice(ip: cleanIp)
-                        if isPairing {
-                            device.pairingPort = portNumber
-                        } else {
-                            device.connectPort = portNumber
-                        }
-                        
-                        self?.discoveredDevices[cleanIp] = device
+                        let existing = self?.discoveredDevices[dictKey]
+                        let device = DiscoveredDevice(
+                            ip: cleanIp,
+                            serviceName: bonjourServiceName ?? existing?.serviceName,
+                            hostname: derivedHostname ?? existing?.hostname,
+                            pairingPort: isPairing ? portNumber : existing?.pairingPort,
+                            connectPort: isPairing ? existing?.connectPort : portNumber,
+                            verifiedPaired: existing?.verifiedPaired
+                        )
+                        self?.discoveredDevices[dictKey] = device
                         self?.evaluateStatus()
                         
-                        // Verify actual pairing status via adb connect
+                        // Check if already paired (read-only — checks adb devices, no adb connect)
                         if !isPairing, device.verifiedPaired == nil {
-                            self?.verifyPairing(ip: cleanIp, port: portNumber)
+                            self?.verifyPairing(deviceKey: dictKey, ip: cleanIp, port: portNumber, hostname: derivedHostname)
                         }
                     }
                     
@@ -294,8 +324,9 @@ class ADBPairingBrowser: ObservableObject {
             
             if let info = self.endpointToIPAndType[endpoint] {
                 let wasPairing = info.isPairing
+                let dictKey = info.key
                 
-                if var device = self.discoveredDevices[info.ip] {
+                if var device = self.discoveredDevices[dictKey] {
                     if info.isPairing {
                         device.pairingPort = nil
                     } else {
@@ -303,9 +334,9 @@ class ADBPairingBrowser: ObservableObject {
                     }
                     
                     if device.pairingPort == nil && device.connectPort == nil {
-                        self.discoveredDevices.removeValue(forKey: info.ip)
+                        self.discoveredDevices.removeValue(forKey: dictKey)
                     } else {
-                        self.discoveredDevices[info.ip] = device
+                        self.discoveredDevices[dictKey] = device
                     }
                 }
                 self.endpointToIPAndType.removeValue(forKey: endpoint)
@@ -365,37 +396,28 @@ class ADBPairingBrowser: ObservableObject {
         }
     }
     
-    /// Attempts a quick `adb connect` to check if the device is actually paired.
-    private func verifyPairing(ip: String, port: UInt16) {
+    /// Checks if a device is already paired by looking at `adb devices` output.
+    /// NEVER calls `adb connect` — that's reserved for explicit user actions only.
+    private func verifyPairing(deviceKey: String, ip: String, port: UInt16, hostname: String?) {
         Task.detached(priority: .userInitiated) {
             let adbPath = ADBManager.getADBPath()
             guard !adbPath.isEmpty else { return }
-            
-            let target = "\(ip):\(port)"
-            print("📶 Verifying pairing for \(target)...")
-            
-            let (_, output, error) = await Shell.runAsyncWithTimeout(
-                adbPath,
-                args: ["connect", target],
-                timeoutSeconds: 4.0
+
+            // Read-only check: is this device IP already in adb devices?
+            let (_, devOut, _) = await Shell.runAsyncWithTimeout(
+                adbPath, args: ["devices"], timeoutSeconds: 3.0
             )
-            
-            let combined = (output + error).lowercased()
-            let isActuallyPaired = combined.contains("connected to") || combined.contains("already connected")
-            
-            // Always disconnect — this was just a test, not an actual user-initiated connect
-            _ = await Shell.runAsyncWithTimeout(
-                adbPath,
-                args: ["disconnect", target],
-                timeoutSeconds: 3.0
-            )
-            
-            print("📶 Pairing verification for \(target): \(isActuallyPaired ? "✅ PAIRED" : "❌ NOT PAIRED")")
-            
+            let isPaired = devOut.split(separator: "\n").contains { line in
+                let s = String(line)
+                return (s.contains("\tdevice") || s.contains(" device")) && s.contains(ip)
+            }
+
+            print("📶 Pairing check for \(ip):\(port): \(isPaired ? "✅ PAIRED (in adb devices)" : "⏳ not yet connected")")
+
             await MainActor.run { [weak self] in
-                if var device = self?.discoveredDevices[ip] {
-                    device.verifiedPaired = isActuallyPaired
-                    self?.discoveredDevices[ip] = device
+                if var device = self?.discoveredDevices[deviceKey] {
+                    device.verifiedPaired = isPaired
+                    self?.discoveredDevices[deviceKey] = device
                 }
             }
         }
@@ -587,26 +609,36 @@ struct WirelessConnectView: View {
 
                     if showRescanWhileConnected {
                         VStack(spacing: 0) {
-                            HStack(spacing: 8) {
-                                if isSearching {
-                                    ProgressView().scaleEffect(0.7)
-                                } else {
-                                    Image(systemName: "wifi.circle")
-                                        .foregroundColor(.blue)
-                                }
-                                Text(isSearching ? "Scanning for other devices…" : "Other devices on network")
-                                    .font(.subheadline.weight(.medium))
-                                    .foregroundColor(isSearching ? .secondary : .primary)
-                                Spacer()
-                                if !isSearching {
-                                    Button(action: startAutoDiscovery) {
-                                        Image(systemName: "arrow.clockwise")
-                                            .font(.subheadline)
+                            // Collapsible header — tap to hide
+                            Button(action: {
+                                showRescanWhileConnected = false
+                                pairingBrowser.stopBrowsing()
+                            }) {
+                                HStack(spacing: 8) {
+                                    if isSearching {
+                                        ProgressView().scaleEffect(0.7)
+                                    } else {
+                                        Image(systemName: "wifi.circle")
+                                            .foregroundColor(.blue)
                                     }
-                                    .buttonStyle(.plain)
-                                    .foregroundColor(.blue)
+                                    Text(isSearching ? "Scanning…" : "Other devices on network")
+                                        .font(.subheadline.weight(.medium))
+                                        .foregroundColor(isSearching ? .secondary : .primary)
+                                    Spacer()
+                                    if !isSearching {
+                                        Button(action: startAutoDiscovery) {
+                                            Image(systemName: "arrow.clockwise")
+                                                .font(.subheadline)
+                                        }
+                                        .buttonStyle(.plain)
+                                        .foregroundColor(.blue)
+                                    }
+                                    Image(systemName: "chevron.up")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundColor(.secondary)
                                 }
                             }
+                            .buttonStyle(.plain)
                             .padding(.horizontal, 20)
                             .padding(.top, 16)
                             .padding(.bottom, isSearching ? 12 : 8)
@@ -619,44 +651,24 @@ struct WirelessConnectView: View {
                         }
                     }
 
-                    // Action buttons — always below the info cards and any rescan results
-                    VStack(spacing: 10) {
+                    // Toggle button for "Other devices" section
+                    if !showRescanWhileConnected {
                         Button(action: { showRescanWhileConnected = true; startAutoDiscovery() }) {
                             HStack(spacing: 6) {
-                                Image(systemName: "plus.circle")
-                                Text("Connect Another Device / Re-scan")
+                                Image(systemName: "wifi.circle")
+                                    .foregroundColor(.blue)
+                                Text("Other devices on network")
+                                    .font(.subheadline.weight(.medium))
+                                Spacer()
+                                Image(systemName: "chevron.down")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundColor(.secondary)
                             }
-                            .font(.subheadline.weight(.medium)).foregroundColor(.blue)
-                            .frame(maxWidth: .infinity).padding(.vertical, 9)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8).fill(Color.blue.opacity(0.08))
-                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.blue.opacity(0.2)))
-                            )
                         }
                         .buttonStyle(.plain)
-
-                        HStack(spacing: 10) {
-                            if deviceManager.connectionType == .wireless {
-                                Button(action: { Task { await deviceManager.disconnectWireless() } }) {
-                                    HStack(spacing: 5) {
-                                        Image(systemName: "xmark.circle")
-                                        Text("Disconnect")
-                                    }
-                                    .font(.subheadline.weight(.medium)).foregroundColor(.white)
-                                    .frame(maxWidth: .infinity).padding(.vertical, 9)
-                                    .background(Color.red.opacity(0.75)).cornerRadius(8)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                            Button("Close") { dismiss() }
-                                .font(.subheadline.weight(.medium))
-                                .frame(maxWidth: .infinity).padding(.vertical, 9)
-                                .background(.ultraThinMaterial).cornerRadius(8).buttonStyle(.plain)
-                        }
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 14)
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.top, 16)
-                    .padding(.bottom, 20)
                 }
 
                 // ╔══════════════════════════════════════════════════════╗
@@ -785,42 +797,67 @@ struct WirelessConnectView: View {
     /// All discovered devices as selectable rows + action panel for the selected one.
     @ViewBuilder
     private var discoveredDevicesPanel: some View {
-        // IPs already connected wirelessly to ADB (shown in the switch section above)
-        let alreadyConnectedIPs = Set(
-            deviceManager.availableDevices
-                .filter { $0.isWireless }
-                .compactMap { $0.ipAddress }
-        )
-        // Also exclude the active wireless IP if WiFi is the current connection
-        let activeWirelessIP = (deviceManager.isConnected && deviceManager.connectionType == .wireless)
-            ? deviceManager.lastWirelessIP : ""
-        let sortedIPs = pairingBrowser.discoveredDevices.keys
-            .filter { !alreadyConnectedIPs.contains($0) && $0 != activeWirelessIP }
+        // Exclude devices already displayed elsewhere in this dialog:
+        // 1. The active WiFi device (shown in the Connected card)
+        // 2. When USB-connected: wireless devices from availableDevices
+        //    (shown in "Also Available via WiFi" with Switch buttons)
+        //    When WiFi-connected: only the active device — other wireless
+        //    devices are NOT shown in "Also Connected via USB", so they
+        //    must remain in discovery.
+        let excludedIPs: Set<String> = {
+            var ips = Set<String>()
+            guard deviceManager.isConnected else { return ips }
+
+            // Always exclude the active wireless device IP
+            let wip = deviceManager.lastWirelessIP
+            if !wip.isEmpty { ips.insert(wip) }
+            if let serial = ADBManager.activeDeviceSerial,
+               ADBManager.isWirelessSerial(serial),
+               let ip = serial.components(separatedBy: ":").first, ip.contains(".") {
+                ips.insert(ip)
+            }
+
+            // Only exclude other wireless devices when connected via USB
+            // (because they're shown in "Also Available via WiFi" section)
+            if deviceManager.connectionType == .usb {
+                for dev in deviceManager.availableDevices where dev.isWireless {
+                    if let ip = dev.serial.components(separatedBy: ":").first, ip.contains(".") {
+                        ips.insert(ip)
+                    }
+                }
+            }
+            return ips
+        }()
+        let sortedKeys = pairingBrowser.discoveredDevices.keys
+            .filter { key in
+                guard let device = pairingBrowser.discoveredDevices[key] else { return false }
+                return !excludedIPs.contains(device.ip)
+            }
             .sorted()
-        let activeIP: String = {
-            if !selectedDeviceIP.isEmpty && sortedIPs.contains(selectedDeviceIP) {
+        let activeKey: String = {
+            if !selectedDeviceIP.isEmpty && sortedKeys.contains(selectedDeviceIP) {
                 return selectedDeviceIP
             }
-            return sortedIPs.first ?? ""
+            return sortedKeys.first ?? ""
         }()
 
         Group {
-            if !sortedIPs.isEmpty {
+            if !sortedKeys.isEmpty {
                 VStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Text(sortedIPs.count > 1 ? "\(sortedIPs.count) Devices Found" : "Device Found")
+                            Text(sortedKeys.count > 1 ? "\(sortedKeys.count) Devices Found" : "Device Found")
                                 .font(.subheadline.weight(.semibold))
                             Spacer()
-                            if sortedIPs.count > 1 {
+                            if sortedKeys.count > 1 {
                                 Text("Tap to select")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
                         }
 
-                        ForEach(sortedIPs, id: \.self) { ip in
-                            discoveredDeviceRow(ip: ip, isSelected: ip == activeIP)
+                        ForEach(sortedKeys, id: \.self) { key in
+                            discoveredDeviceRow(deviceKey: key, isSelected: key == activeKey)
                         }
                     }
                     .padding(14)
@@ -829,7 +866,7 @@ struct WirelessConnectView: View {
                             .fill(Color(NSColor.controlBackgroundColor).opacity(0.5))
                     )
 
-                    discoveredDeviceActionPanel(for: activeIP)
+                    discoveredDeviceActionPanel(for: activeKey)
                 }
             }
         }
@@ -858,12 +895,14 @@ struct WirelessConnectView: View {
     }
 
     /// A single selectable device row for the discovered list.
-    private func discoveredDeviceRow(ip: String, isSelected: Bool) -> some View {
-        let dev = pairingBrowser.discoveredDevices[ip]
+    /// `deviceKey` is the dictionary key (service name or IP).
+    private func discoveredDeviceRow(deviceKey: String, isSelected: Bool) -> some View {
+        let dev = pairingBrowser.discoveredDevices[deviceKey]
         let isAlreadyPaired = dev?.verifiedPaired == true
+        let displayIP = dev?.ip ?? deviceKey
 
         return Button(action: {
-            selectedDeviceIP = ip
+            selectedDeviceIP = deviceKey
             visiblePairingPort = ""
             if let port = dev?.pairingPort { visiblePairingPort = String(port) }
         }) {
@@ -877,16 +916,19 @@ struct WirelessConnectView: View {
                         .foregroundColor(isSelected ? .blue : .secondary)
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(ip)
+                    Text(displayIP)
                         .font(.system(.subheadline, design: .monospaced).weight(.medium))
                         .foregroundColor(.primary)
                     Group {
                         if isAlreadyPaired {
                             Text("Already paired · tap to connect")
                                 .foregroundColor(.green)
-                        } else if dev?.verifiedPaired == nil && dev?.connectPort != nil {
-                            Text("Verifying pairing…")
-                                .foregroundColor(.secondary)
+                        } else if dev?.connectPort != nil {
+                            // Device has wireless debugging on — may be paired or not.
+                            // We can't check without calling adb connect (triggers phone notification).
+                            // Show neutral prompt — user taps to connect.
+                            Text("Tap to connect")
+                                .foregroundColor(.blue)
                         } else {
                             Text("Needs pairing")
                                 .foregroundColor(.orange)
@@ -917,14 +959,16 @@ struct WirelessConnectView: View {
         .buttonStyle(.plain)
     }
 
-    /// Action panel shown below the device list for the currently selected IP.
+    /// Action panel shown below the device list for the currently selected device key.
+    /// `activeKey` is the dictionary key (service name or IP).
     @ViewBuilder
-    private func discoveredDeviceActionPanel(for activeIP: String) -> some View {
+    private func discoveredDeviceActionPanel(for activeKey: String) -> some View {
+        let deviceObj = pairingBrowser.discoveredDevices[activeKey]
+        let deviceIP = deviceObj?.ip ?? activeKey
         let isCurrentlyConnected = deviceManager.isConnected
             && deviceManager.connectionType == .wireless
-            && deviceManager.lastWirelessIP == activeIP
-            && !activeIP.isEmpty
-        let deviceObj = pairingBrowser.discoveredDevices[activeIP]
+            && deviceManager.lastWirelessIP == deviceIP
+            && !deviceIP.isEmpty
         let isAlreadyPaired = deviceObj?.verifiedPaired == true
 
         if isCurrentlyConnected {
@@ -949,38 +993,33 @@ struct WirelessConnectView: View {
             .padding(14)
             .background(RoundedRectangle(cornerRadius: 10).fill(Color.green.opacity(0.06)))
 
-        } else if deviceObj?.verifiedPaired == nil && deviceObj?.connectPort != nil {
-            // Still verifying — show a brief spinner
+        } else if let cPort = deviceObj?.connectPort {
+            // Device has wireless debugging on — show Connect button.
+            // If already paired: connect succeeds immediately.
+            // If not paired: connect fails → user sees error and pairing form.
             VStack(spacing: 10) {
                 HStack(spacing: 6) {
-                    ProgressView().scaleEffect(0.7)
-                    Text("Verifying pairing…")
-                        .font(.subheadline.weight(.medium)).foregroundColor(.secondary)
-                }
-            }
-            .frame(maxWidth: .infinity)
-            .padding(14)
-            .background(RoundedRectangle(cornerRadius: 10).fill(Color(NSColor.controlBackgroundColor)))
-
-        } else if isAlreadyPaired, let cPort = deviceObj?.connectPort {
-            // Paired but not connected — just needs adb connect
-            VStack(spacing: 10) {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.shield.fill").foregroundColor(.blue)
-                    Text("Device is already paired")
-                        .font(.subheadline.weight(.semibold)).foregroundColor(.blue)
+                    Image(systemName: isAlreadyPaired ? "checkmark.shield.fill" : "wifi")
+                        .foregroundColor(isAlreadyPaired ? .green : .blue)
+                    Text(isAlreadyPaired ? "Already paired" : "Tap to connect")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(isAlreadyPaired ? .green : .blue)
                 }
                 Button(action: {
                     pairingBrowser.status = .pairing
                     Task {
-                        let (success, _) = await deviceManager.connectWirelessly(ip: activeIP, port: String(cPort))
+                        let (success, _) = await deviceManager.connectWirelessly(
+                            ip: deviceIP,
+                            port: String(cPort),
+                            hostname: deviceObj?.hostname
+                        )
                         await MainActor.run {
                             if success {
                                 pairingBrowser.status = .paired
                                 onConnected?()
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { dismiss() }
                             } else {
-                                pairingBrowser.status = .failed("Connection failed. Re-pair on your phone.")
+                                pairingBrowser.status = .failed("Connection failed. Device may need pairing.")
                             }
                         }
                     }
@@ -1038,11 +1077,11 @@ struct WirelessConnectView: View {
             .background(RoundedRectangle(cornerRadius: 10).fill(Color(NSColor.controlBackgroundColor)))
             .onAppear {
                 if visiblePairingPort.isEmpty,
-                   let port = pairingBrowser.discoveredDevices[activeIP]?.pairingPort {
+                   let port = pairingBrowser.discoveredDevices[activeKey]?.pairingPort {
                     visiblePairingPort = String(port)
                 }
             }
-            .onChange(of: pairingBrowser.discoveredDevices[activeIP]?.pairingPort) { newPort in
+            .onChange(of: pairingBrowser.discoveredDevices[activeKey]?.pairingPort) { newPort in
                 if let port = newPort {
                     visiblePairingPort = String(port)
                 } else {
@@ -1087,8 +1126,16 @@ struct WirelessConnectView: View {
                                 .font(.subheadline).foregroundColor(.secondary).lineLimit(1)
                         }
                         Spacer()
-                        Circle().fill(Color.green).frame(width: 8, height: 8)
-                            .overlay(Circle().stroke(Color.green.opacity(0.4), lineWidth: 3).scaleEffect(1.6))
+                        // Disconnect link — subtle, inside the card
+                        Button(action: { Task { await deviceManager.disconnectWireless() } }) {
+                            Text("Disconnect")
+                                .font(.caption.weight(.medium))
+                                .foregroundColor(.red.opacity(0.8))
+                                .padding(.horizontal, 10).padding(.vertical, 5)
+                                .background(Color.red.opacity(0.1))
+                                .cornerRadius(6)
+                        }
+                        .buttonStyle(.plain)
                     }
                     .padding(16)
                 }
@@ -1163,23 +1210,30 @@ struct WirelessConnectView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 10))
             }
 
-            // ── WiFi devices available while USB is active ────────────────────
-            if isUSBActive && !wirelessDevices.isEmpty {
+            // ── Other available devices (unified — USB + WiFi) ────────────────
+            // Show ALL connected devices except the active one, with appropriate icons
+            let otherDevices = deviceManager.availableDevices.filter { dev in
+                dev.serial != ADBManager.activeDeviceSerial
+            }
+            if !otherDevices.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 6) {
-                        Image(systemName: "wifi").font(.system(size: 12)).foregroundColor(.secondary)
-                        Text("Also Available via WiFi").font(.subheadline.weight(.semibold))
+                        Image(systemName: "rectangle.stack").font(.system(size: 12)).foregroundColor(.secondary)
+                        Text("Other available devices").font(.subheadline.weight(.semibold))
                     }
                     .padding(.horizontal, 16).padding(.top, 12)
-                    ForEach(wirelessDevices, id: \.serial) { dev in
+                    ForEach(otherDevices, id: \.serial) { dev in
+                        let devIsWireless = dev.isWireless
+                        let devColor: Color = devIsWireless ? .green : .blue
+                        let devIcon = devIsWireless ? "wifi" : "cable.connector"
                         Button(action: {
                             Task { await deviceManager.switchToDevice(serial: dev.serial); dismiss() }
                         }) {
                             HStack(spacing: 12) {
                                 ZStack {
-                                    Circle().fill(Color.green.opacity(0.1)).frame(width: 36, height: 36)
-                                    Image(systemName: "wifi")
-                                        .font(.system(size: 15, weight: .medium)).foregroundColor(.green)
+                                    Circle().fill(devColor.opacity(0.1)).frame(width: 36, height: 36)
+                                    Image(systemName: devIcon)
+                                        .font(.system(size: 15, weight: .medium)).foregroundColor(devColor)
                                 }
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(dev.displayName).font(.subheadline.weight(.medium))
@@ -1189,7 +1243,7 @@ struct WirelessConnectView: View {
                                 Spacer()
                                 Text("Switch").font(.caption.weight(.semibold)).foregroundColor(.white)
                                     .padding(.horizontal, 10).padding(.vertical, 4)
-                                    .background(Capsule().fill(Color.green))
+                                    .background(Capsule().fill(devColor))
                             }
                             .padding(.horizontal, 16).padding(.vertical, 8)
                         }
@@ -1197,48 +1251,8 @@ struct WirelessConnectView: View {
                     }
                 }
                 .background(
-                    RoundedRectangle(cornerRadius: 10).fill(Color.green.opacity(0.05))
-                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.green.opacity(0.15), lineWidth: 1))
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-            }
-
-            // ── USB devices available while WiFi is active ────────────────────
-            if isWirelessActive && !usbDevices.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "cable.connector").font(.system(size: 12)).foregroundColor(.secondary)
-                        Text("Also Connected via USB").font(.subheadline.weight(.semibold))
-                    }
-                    .padding(.horizontal, 16).padding(.top, 12)
-                    ForEach(usbDevices, id: \.serial) { dev in
-                        Button(action: {
-                            Task { await deviceManager.switchToDevice(serial: dev.serial); dismiss() }
-                        }) {
-                            HStack(spacing: 12) {
-                                ZStack {
-                                    Circle().fill(Color.blue.opacity(0.1)).frame(width: 36, height: 36)
-                                    Image(systemName: "cable.connector")
-                                        .font(.system(size: 15, weight: .medium)).foregroundColor(.blue)
-                                }
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(dev.displayName).font(.subheadline.weight(.medium))
-                                    Text(dev.serial)
-                                        .font(.caption).foregroundColor(.secondary).lineLimit(1)
-                                }
-                                Spacer()
-                                Text("Switch").font(.caption.weight(.semibold)).foregroundColor(.white)
-                                    .padding(.horizontal, 10).padding(.vertical, 4)
-                                    .background(Capsule().fill(Color.blue))
-                            }
-                            .padding(.horizontal, 16).padding(.vertical, 8)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .background(
-                    RoundedRectangle(cornerRadius: 10).fill(Color.blue.opacity(0.05))
-                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.blue.opacity(0.15), lineWidth: 1))
+                    RoundedRectangle(cornerRadius: 10).fill(Color(NSColor.controlBackgroundColor).opacity(0.5))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.secondary.opacity(0.15), lineWidth: 1))
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 10))
             }
@@ -1498,7 +1512,11 @@ struct WirelessConnectView: View {
             }
             
             for tryPort in fallbackPorts {
-                let (s, _) = await deviceManager.connectWirelessly(ip: device.ip, port: tryPort)
+                let (s, _) = await deviceManager.connectWirelessly(
+                    ip: device.ip,
+                    port: tryPort,
+                    hostname: device.hostname
+                )
                 if s {
                     await MainActor.run {
                         pairingBrowser.status = .paired

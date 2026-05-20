@@ -110,7 +110,7 @@ struct FileRowView: View {
             Button {
                 onDownload(file)
             } label: {
-                Label("Download", systemImage: "arrow.down.circle")
+                Label("Download to Mac", systemImage: "arrow.down.circle")
             }
             
             Divider()

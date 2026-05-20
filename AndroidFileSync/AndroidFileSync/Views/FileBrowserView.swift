@@ -160,7 +160,7 @@ struct FileBrowserView: View, Equatable {
             
             // Upload button — accent-tinted, non-intrusive Apple style
             Button(action: showUploadDialog) {
-                Label("Upload", systemImage: "arrow.up.circle")
+                Label("Upload to Android", systemImage: "arrow.up.circle")
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
@@ -363,7 +363,7 @@ struct FileBrowserView: View, Equatable {
                         
                         // Download
                         if !firstItem.isDirectory || !isSingleSelection {
-                            Button(isSingleSelection ? "Download" : "Download Selected") {
+                            Button(isSingleSelection ? "Download to Mac" : "Download Selected to Mac") {
                                 if isSingleSelection, let file = selectedItems.first, !file.isDirectory {
                                     onDownload(file)
                                 } else {
@@ -378,7 +378,7 @@ struct FileBrowserView: View, Equatable {
                             Button {
                                 onDownloadFolder?(firstItem)
                             } label: {
-                                Label("Download Folder", systemImage: "folder.badge.gearshape")
+                                Label("Download Folder to Mac", systemImage: "folder.badge.gearshape")
                             }
 
                             // ── Add to Sidebar ──────────────────────────────
@@ -464,7 +464,7 @@ struct FileBrowserView: View, Equatable {
         
         // Download - show for files
         if !file.isDirectory {
-            Button(isSingleSelection ? "Download" : "Download Selected") {
+            Button(isSingleSelection ? "Download to Mac" : "Download Selected to Mac") {
                 if isSingleSelection {
                     onDownload(file)
                 } else {
@@ -479,7 +479,7 @@ struct FileBrowserView: View, Equatable {
             Button {
                 onDownloadFolder?(file)
             } label: {
-                Label("Download Folder", systemImage: "folder.badge.gearshape")
+                Label("Download Folder to Mac", systemImage: "folder.badge.gearshape")
             }
             Divider()
         }

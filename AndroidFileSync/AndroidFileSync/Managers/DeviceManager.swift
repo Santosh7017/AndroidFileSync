@@ -39,6 +39,10 @@ class DeviceManager: ObservableObject {
 
     private var adbAvailable = false
     private var usbMonitor: USBDeviceMonitor? = nil
+    /// True when user explicitly disconnected — prevents auto-reconnect
+    @Published var userDisconnected = false
+    /// One-time flag: restart ADB server on first detection to apply env var
+    private var hasRestartedServer = false
     
     enum ConnectionType: String {
         case none = "None"
@@ -50,7 +54,68 @@ class DeviceManager: ObservableObject {
     
     func detectDevice() async {
         print("📱 DeviceManager: Starting device detection...")
-        
+
+        // One-time: restart ADB server so it picks up ADB_MDNS_AUTO_CONNECT=0
+        // (a server from Android Studio or a previous session may be running with auto-connect ON)
+        if !hasRestartedServer {
+            hasRestartedServer = true
+            let adbPath = ADBManager.getADBPath()
+            if !adbPath.isEmpty {
+                print("📱 DeviceManager: Restarting ADB server with auto-connect disabled...")
+                _ = await Shell.runAsyncWithTimeout(adbPath, args: ["kill-server"], timeoutSeconds: 3.0)
+                _ = await Shell.runAsyncWithTimeout(adbPath, args: ["start-server"], timeoutSeconds: 5.0)
+
+                // Reconnect ALL previously connected wireless devices using ADB 37 mDNS
+                // We save IPs only (ports change on every toggle).
+                // ADB 37's `adb mdns services` resolves current ip:port in real-time.
+                let savedIPs = UserDefaults.standard.stringArray(forKey: "connectedWirelessDevices") ?? []
+                if !savedIPs.isEmpty {
+                    var connectedIPs = Set<String>()
+                    
+                    // Retry up to 3 times — mDNS needs time after server restart
+                    for attempt in 1...3 {
+                        try? await Task.sleep(nanoseconds: 1_000_000_000) // 1s between attempts
+                        
+                        let (code, mdnsOut, _) = await Shell.runAsyncWithTimeout(
+                            adbPath, args: ["mdns", "services"], timeoutSeconds: 3.0
+                        )
+                        guard code == 0 else { continue }
+                        
+                        print("📱 DeviceManager: mDNS poll attempt \(attempt)/3")
+                        
+                        for savedIP in savedIPs where !connectedIPs.contains(savedIP) {
+                            // Find this IP's _adb-tls-connect._tcp service
+                            for line in mdnsOut.split(separator: "\n") {
+                                let str = String(line)
+                                guard str.contains("_adb-tls-connect._tcp"),
+                                      str.contains(savedIP) else { continue }
+                                // Extract ip:port
+                                let parts = str.split(whereSeparator: { $0 == "\t" || $0 == " " }).map(String.init)
+                                guard let ipPort = parts.first(where: { $0.hasPrefix(savedIP + ":") }) else { break }
+                                
+                                print("📱 DeviceManager: Reconnecting to: \(ipPort)")
+                                let (_, out, _) = await Shell.runAsyncWithTimeout(
+                                    adbPath, args: ["connect", ipPort], timeoutSeconds: 5.0
+                                )
+                                if out.lowercased().contains("connected") {
+                                    connectedIPs.insert(savedIP)
+                                    print("📱 DeviceManager: ✅ Connected to \(ipPort)")
+                                } else {
+                                    print("📱 DeviceManager: ❌ Failed: \(out.trimmingCharacters(in: .whitespacesAndNewlines))")
+                                }
+                                break
+                            }
+                        }
+                        
+                        // All known devices found — stop retrying
+                        if connectedIPs.count >= savedIPs.count { break }
+                    }
+                    
+                    print("📱 DeviceManager: Reconnected \(connectedIPs.count)/\(savedIPs.count) devices")
+                }
+            }
+        }
+
         // Ensure UI shows "detecting" state
         if !isDetecting {
             await MainActor.run { 
@@ -65,15 +130,17 @@ class DeviceManager: ObservableObject {
         let allDevices = await ADBManager.listAllConnectedDevices()
         await MainActor.run { self.availableDevices = allDevices }
 
-        // Ask ADB which device to target. isDeviceConnected() honours the existing
-        // activeDeviceSerial if it's still valid, so explicit user switches survive.
+        // Ask ADB which device to target.
         adbAvailable = await ADBManager.isDeviceConnected()
+        // If user explicitly disconnected, don't auto-pick wireless devices
+        if userDisconnected, let serial = ADBManager.activeDeviceSerial, ADBManager.isWirelessSerial(serial) {
+            adbAvailable = false
+        }
         print("📱 DeviceManager: ADB available = \(adbAvailable), active = \(ADBManager.activeDeviceSerial ?? "nil")")
         
-        // Determine connection type from the *active* device serial,
-        // NOT from whichever device happens to be first in the list.
+        // Determine connection type from the active serial
         let activeSerial = ADBManager.activeDeviceSerial
-        let isWireless = adbAvailable && (activeSerial?.contains(":") == true && activeSerial?.contains(".") == true)
+        let isWireless = adbAvailable && (activeSerial.map { ADBManager.isWirelessSerial($0) } ?? false)
         
         // Update the state on the main thread
         await MainActor.run {
@@ -81,8 +148,8 @@ class DeviceManager: ObservableObject {
                 if isWireless {
                     self.connectionType = .wireless
                     self.statusMessage = "Connected via WiFi"
-                    // Derive IP directly from the serial (e.g. "192.168.1.67:40395" → "192.168.1.67")
-                    if let serial = activeSerial, let ip = serial.components(separatedBy: ":").first {
+                    // Traditional serial: IP is embedded (e.g. "192.168.1.67:40395")
+                    if let serial = activeSerial, serial.contains(":"), let ip = serial.components(separatedBy: ":").first {
                         self.lastWirelessIP = ip
                     }
                 } else {
@@ -113,6 +180,13 @@ class DeviceManager: ObservableObject {
 
         // If connected, fetch display metadata for the active device
         if adbAvailable {
+            // ADB 37+ mDNS serial: resolve IP since it's not in the serial
+            if isWireless {
+                let currentIP = await MainActor.run { self.lastWirelessIP }
+                if currentIP.isEmpty, let resolvedIP = await ADBManager.getWirelessIP() {
+                    await MainActor.run { self.lastWirelessIP = resolvedIP }
+                }
+            }
             await fetchDeviceName()
             await detectSDCard()
             await fetchStorageInfo()
@@ -290,7 +364,7 @@ class DeviceManager: ObservableObject {
     // MARK: - Wireless Connection (Android 11+)
     
     /// Pair and connect to an Android 11+ device wirelessly
-    func pairAndConnect(ip: String, pairingPort: String, pairingCode: String, connectPort: String) async -> (Bool, String) {
+    func pairAndConnect(ip: String, pairingPort: String, pairingCode: String, connectPort: String, hostname: String? = nil) async -> (Bool, String) {
         await MainActor.run {
             self.isDetecting = true
             self.statusMessage = "Pairing with device..."
@@ -311,8 +385,10 @@ class DeviceManager: ObservableObject {
             self.statusMessage = "Paired! Connecting..."
         }
         
-        // Step 2: Connect
-        let (connectSuccess, connectMessage) = await ADBManager.connectWireless(ip: ip, port: connectPort)
+        // Step 2: Connect — try .local hostname first (ADB 37+), fall back to IP
+        let (connectSuccess, connectMessage) = await ADBManager.connectWireless(
+            ip: ip, port: connectPort, hostname: hostname
+        )
         
         if connectSuccess {
             await MainActor.run {
@@ -320,7 +396,7 @@ class DeviceManager: ObservableObject {
             }
             // Re-detect to update all state properly
             await detectDevice()
-            return (true, "Connected wirelessly to \(ip)")
+            return (true, "Connected wirelessly to \(hostname ?? ip)")
         } else {
             await MainActor.run {
                 self.isDetecting = false
@@ -330,14 +406,17 @@ class DeviceManager: ObservableObject {
         }
     }
     
-    /// Connect to a previously paired device
-    func connectWirelessly(ip: String, port: String = "5555") async -> (Bool, String) {
+    /// Connect to a previously paired device.
+    /// Pass `hostname` (e.g. "adb-XXXX.local") when available for ADB 37+ stability.
+    func connectWirelessly(ip: String, port: String = "5555", hostname: String? = nil) async -> (Bool, String) {
+        ADBPairingBrowser.suppressAutoConnect = false
         await MainActor.run {
             self.isDetecting = true
-            self.statusMessage = "Connecting to \(ip)..."
+            self.statusMessage = "Connecting to \(hostname ?? ip)..."
+            self.userDisconnected = false
         }
         
-        let (success, message) = await ADBManager.connectWireless(ip: ip, port: port)
+        let (success, message) = await ADBManager.connectWireless(ip: ip, port: port, hostname: hostname)
         
         if success {
             // Explicitly make this the active device BEFORE detectDevice() runs,
@@ -346,6 +425,11 @@ class DeviceManager: ObservableObject {
             await MainActor.run {
                 self.lastWirelessIP = ip
             }
+            // Persist for reconnection on next app launch (add to array)
+            // Save just the IP — ports change on every wireless debugging toggle
+            var saved = UserDefaults.standard.stringArray(forKey: "connectedWirelessDevices") ?? []
+            if !saved.contains(ip) { saved.append(ip) }
+            UserDefaults.standard.set(saved, forKey: "connectedWirelessDevices")
             await detectDevice()
             return (true, message)
         } else {
@@ -359,11 +443,20 @@ class DeviceManager: ObservableObject {
     
     /// Disconnect wireless device
     func disconnectWireless() async {
+        ADBPairingBrowser.suppressAutoConnect = true
         let _ = await ADBManager.disconnectAllWireless()
+        // Clear all saved wireless devices
+        UserDefaults.standard.removeObject(forKey: "connectedWirelessDevices")
         await MainActor.run {
             self.lastWirelessIP = ""
+            self.isConnected = false
+            self.connectionType = .none
+            self.deviceName = "No Device"
+            self.statusMessage = "Disconnected. Connect a device to continue."
+            self.sdCardPath = nil
+            self.storageStats = [:]
+            self.userDisconnected = true
         }
-        await detectDevice()
     }
     
     /// Re-detect device after QR pairing auto-connected it

@@ -96,7 +96,7 @@ struct SelectionToolbar: View {
                     Button {
                         onDownload()
                     } label: {
-                        Label(isSingleSelection ? "Download" : "Download All", systemImage: "arrow.down.circle.fill")
+                        Label(isSingleSelection ? "Download to Mac" : "Download All to Mac", systemImage: "arrow.down.circle.fill")
                             .font(.caption)
                     }
                     .buttonStyle(.borderless)

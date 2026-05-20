@@ -1,6 +1,14 @@
 import Foundation
 
 struct Shell {
+    /// Environment variables applied to ALL processes launched by Shell.
+    /// ADB_MDNS_AUTO_CONNECT=0 prevents ADB server from auto-connecting to
+    /// all previously paired devices on the network.
+    private static var adbEnvironment: [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        env["ADB_MDNS_AUTO_CONNECT"] = "0"
+        return env
+    }
     static func run(_ command: String, args: [String]) -> (Int32, String, String) {
         let process = Process()
         let stdout = Pipe()
@@ -8,6 +16,7 @@ struct Shell {
         
         process.executableURL = URL(fileURLWithPath: command)
         process.arguments = args
+        process.environment = adbEnvironment
         process.standardOutput = stdout
         process.standardError = stderr
         
@@ -36,6 +45,7 @@ struct Shell {
             
             process.executableURL = URL(fileURLWithPath: command)
             process.arguments = args
+            process.environment = adbEnvironment
             process.standardOutput = stdout
             process.standardError = stderr
             
@@ -66,6 +76,7 @@ struct Shell {
             
             process.executableURL = URL(fileURLWithPath: command)
             process.arguments = args
+            process.environment = adbEnvironment
             process.standardOutput = stdout
             process.standardError = stderr
             
@@ -136,6 +147,7 @@ struct Shell {
                 
                 process.executableURL = URL(fileURLWithPath: command)
                 process.arguments = args
+                process.environment = adbEnvironment
                 process.standardOutput = stdout
                 process.standardError = stderr
                 
@@ -195,6 +207,7 @@ struct Shell {
                 
                 process.executableURL = URL(fileURLWithPath: command)
                 process.arguments = args
+                process.environment = adbEnvironment
                 process.standardOutput = stdout
                 process.standardError = stderr
                 

@@ -44,6 +44,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         contentView.registerForDraggedTypes([.fileURL])
         (contentView as? NSView)?.window?.registerForDraggedTypes([.fileURL])
     }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Clean up ADB connections so phones don't stay showing "wireless debugging connected"
+        let adbPath = ADBManager.getADBPath()
+        guard !adbPath.isEmpty else { return }
+        _ = Shell.run(adbPath, args: ["disconnect"])
+        _ = Shell.run(adbPath, args: ["kill-server"])
+    }
 }
 
 struct ConnectionBadge: View {

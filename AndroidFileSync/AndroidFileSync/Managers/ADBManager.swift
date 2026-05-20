@@ -27,10 +27,10 @@ class ADBManager {
     struct ConnectedDevice {
         let serial: String
         var displayName: String  // "Redmi Note 8" or the raw serial as fallback
-        var isWireless: Bool { serial.contains(":") && serial.contains(".") }
-        /// IP string for wireless devices, e.g. "192.168.1.67"
+        var isWireless: Bool { ADBManager.isWirelessSerial(serial) }
+        /// IP for wireless devices (nil for mDNS serials without embedded IP)
         var ipAddress: String? {
-            guard isWireless else { return nil }
+            guard isWireless, serial.contains(":") else { return nil }
             return serial.components(separatedBy: ":").first
         }
     }
@@ -128,12 +128,22 @@ class ADBManager {
         let fileManager = FileManager.default
         let homeDir = fileManager.homeDirectoryForCurrentUser.path
         
-        // First, try bundled ADB in app Resources
-        if let bundledPath = Bundle.main.path(forResource: "adb", ofType: nil) {
-            if fileManager.fileExists(atPath: bundledPath) {
-                print("📱 ADB: Found bundled ADB at: \(bundledPath)")
-                adbPath = bundledPath
-                return bundledPath
+        // Try bundled ADB — check multiple locations since Bundle.main path varies
+        // between debug (Xcode DerivedData) and release (app bundle) builds.
+        let execDir = (Bundle.main.executablePath as NSString?)?.deletingLastPathComponent ?? ""
+        let bundledCandidates = [
+            Bundle.main.path(forResource: "adb", ofType: nil),                 // Release bundle
+            Bundle.main.resourcePath.map { "\($0)/adb" },                       // Resources dir
+            execDir.isEmpty ? nil : "\(execDir)/../Resources/adb",              // Debug run
+            execDir.isEmpty ? nil : "\(execDir)/adb",                           // Flat layout
+        ].compactMap { $0 }
+
+        for candidate in bundledCandidates {
+            if fileManager.fileExists(atPath: candidate) {
+                let resolved = (candidate as NSString).standardizingPath
+                print("📱 ADB: Using bundled ADB at: \(resolved)")
+                adbPath = resolved
+                return resolved
             }
         }
         
@@ -211,19 +221,16 @@ class ADBManager {
             return false
         }
 
-        // Prefer USB device; only fall back to wireless if no USB present.
-        // (User can explicitly switch to wireless via switchToDevice)
-        // Exception: if activeDeviceSerial is already set to a valid serial in the list,
-        // keep that selection (so explicit switches survive re-detect).
+        // Prefer USB; fall back to wireless. ADB 37+ mDNS serials look like
+        // "adb-XXXX._adb-tls-connect._tcp" (no colon), so check for that too.
         if let current = activeDeviceSerial, foundSerials.contains(current) {
-            // Honour the existing explicit selection
             print("📱 Keeping active device: \(current)")
-        } else if let usbSerial = foundSerials.first(where: { !$0.contains(":") }) {
+        } else if let usbSerial = foundSerials.first(where: { !Self.isWirelessSerial($0) }) {
             activeDeviceSerial = usbSerial
             print("📱 Using USB device: \(usbSerial)")
-        } else if let wirelessSerial = foundSerials.first(where: { $0.contains(":") && $0.contains(".") }) {
+        } else if let wirelessSerial = foundSerials.first(where: { Self.isWirelessSerial($0) }) {
             activeDeviceSerial = wirelessSerial
-            print("📱 Using wireless device (no USB found): \(wirelessSerial)")
+            print("📱 Using wireless device: \(wirelessSerial)")
         } else {
             activeDeviceSerial = foundSerials.first
             print("📱 Using device: \(foundSerials.first ?? "unknown")")
@@ -997,38 +1004,56 @@ class ADBManager {
         return (true, combined)
     }
     
-    /// Connects to a device over WiFi after pairing
+    /// Connects to a device over WiFi after pairing.
+    /// ADB 37+ supports stable mDNS hostnames (e.g. `adb-XXXX.local`) that remain valid
+    /// even when the phone's IP changes. When `hostname` is provided, this method tries
+    /// connecting via the hostname first and falls back to the raw IP automatically.
     /// - Parameters:
-    ///   - ip: Device IP address
-    ///   - port: Connection port (usually 5555, or the port shown in wireless debugging)
+    ///   - ip: Device IP address (used as fallback)
+    ///   - port: Connection port (shown in wireless debugging settings)
+    ///   - hostname: Optional mDNS hostname, e.g. "adb-XXXX.local" (ADB 37+)
     /// - Returns: Tuple of (success, message)
-    static func connectWireless(ip: String, port: String = "5555") async -> (Bool, String) {
+    static func connectWireless(ip: String, port: String = "5555", hostname: String? = nil) async -> (Bool, String) {
         let adbPath = getADBPath()
         guard !adbPath.isEmpty else {
             return (false, "ADB not found")
         }
-        
-        let target = "\(ip):\(port)"
-        print("📶 ADB: Connecting to \(target)...")
-        
-        let (exitCode, output, error) = await Shell.runAsyncWithTimeout(
-            adbPath,
-            args: ["connect", target],
-            timeoutSeconds: 10.0
-        )
-        
-        let combined = output + error
-        print("📶 ADB Connect result: code=\(exitCode), output=\(combined)")
-        
-        if combined.lowercased().contains("connected to") {
-            return (true, "Connected to \(target)")
-        } else if combined.lowercased().contains("already connected") {
-            return (true, "Already connected to \(target)")
-        } else if combined.lowercased().contains("cannot connect") || combined.lowercased().contains("failed") {
-            return (false, "Cannot connect to \(target). Make sure Wireless Debugging is enabled.")
+
+        // Helper: attempt a single adb connect and return whether it succeeded
+        func attempt(target: String) async -> (Bool, String) {
+            print("📶 ADB: Connecting to \(target)...")
+            let (exitCode, output, error) = await Shell.runAsyncWithTimeout(
+                adbPath, args: ["connect", target], timeoutSeconds: 10.0
+            )
+            let combined = output + error
+            print("📶 ADB Connect result: code=\(exitCode), output=\(combined)")
+            let lower = combined.lowercased()
+            if lower.contains("connected to") || lower.contains("already connected") {
+                return (true, combined)
+            }
+            if lower.contains("cannot connect") || lower.contains("failed") {
+                return (false, combined)
+            }
+            return (exitCode == 0, combined)
         }
-        
-        return (exitCode == 0, combined)
+
+        // 1. Try the stable .local hostname first (ADB 37+)
+        if let host = hostname, !host.isEmpty {
+            let hostnameTarget = "\(host):\(port)"
+            let (success, msg) = await attempt(target: hostnameTarget)
+            if success {
+                return (true, "Connected to \(hostnameTarget)")
+            }
+            print("📶 ADB: hostname connect failed (\(msg)), falling back to IP...")
+        }
+
+        // 2. Fall back to raw IP:port
+        let ipTarget = "\(ip):\(port)"
+        let (success, msg) = await attempt(target: ipTarget)
+        if success {
+            return (true, "Connected to \(ipTarget)")
+        }
+        return (false, "Cannot connect to \(ipTarget). Make sure Wireless Debugging is enabled.")
     }
     
     /// Disconnects from a wireless device
@@ -1062,21 +1087,66 @@ class ADBManager {
             timeoutSeconds: 5.0
         )
         
-        return (exitCode == 0, output + error)
+        let result = (exitCode == 0, output + error)
+        // Clear the active serial if it was a wireless device
+        if let serial = activeDeviceSerial, isWirelessSerial(serial) {
+            activeDeviceSerial = nil
+        }
+        return result
     }
     
     /// Checks if the currently active device is via wireless (IP:port format)
     static func isWirelessConnection() async -> Bool {
         guard let active = activeDeviceSerial else { return false }
-        // Wireless devices show as IP:port (e.g., 192.168.1.5:5555)
-        return active.contains(":") && active.contains(".")
+        return isWirelessSerial(active)
     }
 
-    /// Returns the IP address of the currently connected wireless ADB device,
-    /// or nil if the active device is not wireless.
+    /// Checks if a serial represents a wireless device.
+    /// Handles both traditional IP:port and ADB 37+ mDNS serials.
+    static func isWirelessSerial(_ serial: String) -> Bool {
+        // Traditional: "192.168.1.69:38101"
+        if serial.contains(":") && serial.contains(".") { return true }
+        // ADB 37+: "adb-XXXX._adb-tls-connect._tcp"
+        if serial.contains("._adb-tls-") { return true }
+        return false
+    }
+
+    /// Returns the IP of the wirelessly connected device, or nil.
     static func getWirelessIP() async -> String? {
-        guard let active = activeDeviceSerial, active.contains(":") && active.contains(".") else { return nil }
-        return active.components(separatedBy: ":").first
+        guard let active = activeDeviceSerial, isWirelessSerial(active) else { return nil }
+        // Traditional serial: extract IP before the colon
+        if active.contains(":") && active.contains(".") {
+            return active.components(separatedBy: ":").first
+        }
+        // ADB 37+ mDNS serial: resolve IP via `ip addr show wlan0`
+        // This is more reliable than `ip route` which may pick USB/VPN interfaces
+        let adbPath = getADBPath()
+        guard !adbPath.isEmpty else { return nil }
+        let (_, output, _) = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", "ip", "-f", "inet", "addr", "show", "wlan0"]), timeoutSeconds: 5.0
+        )
+        // Parse "inet 192.168.1.67/24" from output
+        if let range = output.range(of: "inet ") {
+            let afterInet = output[range.upperBound...]
+            if let ip = afterInet.split(separator: "/").first.map(String.init) {
+                return ip.trimmingCharacters(in: .whitespaces)
+            }
+        }
+        // Fallback: try ip route (less reliable but better than nothing)
+        let (_, routeOutput, _) = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", "ip", "route"]), timeoutSeconds: 5.0
+        )
+        // Look for wlan route first, then any route
+        for line in routeOutput.split(separator: "\n") {
+            let s = String(line)
+            if s.contains("wlan"), let r = s.range(of: "src ") {
+                return String(s[r.upperBound...].split(separator: " ").first ?? "")
+            }
+        }
+        if let range = routeOutput.range(of: "src ") {
+            return String(routeOutput[range.upperBound...].split(separator: " ").first ?? "")
+        }
+        return nil
     }
 
     // MARK: - Media Scanner
