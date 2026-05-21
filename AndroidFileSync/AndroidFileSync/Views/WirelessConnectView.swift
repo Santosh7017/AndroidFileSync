@@ -1111,9 +1111,33 @@ struct WirelessConnectView: View {
             }
 
             // ── Other available devices (unified — USB + WiFi) ────────────────
-            // Show ALL connected devices except the active one, with appropriate icons
+            // Show ALL connected devices except the active one, with appropriate icons.
+            // Also exclude wireless devices that resolve to the same IP as the
+            // active connection (the same device can appear with both an IP:port
+            // serial and an mDNS serial like "adb-XXXX._adb-tls-connect._tcp").
+            let activeIP: String? = {
+                if deviceManager.connectionType == .wireless {
+                    let wip = deviceManager.lastWirelessIP
+                    if !wip.isEmpty { return wip }
+                    if let serial = ADBManager.activeDeviceSerial,
+                       serial.contains(":"), serial.contains(".") {
+                        return serial.components(separatedBy: ":").first
+                    }
+                }
+                return nil
+            }()
             let otherDevices = deviceManager.availableDevices.filter { dev in
-                dev.serial != ADBManager.activeDeviceSerial
+                guard dev.serial != ADBManager.activeDeviceSerial else { return false }
+                // Exclude wireless devices that are the same as the active wireless device
+                if let activeIP = activeIP, dev.isWireless {
+                    // IP:port serial — compare IP directly
+                    if let devIP = dev.ipAddress, devIP == activeIP { return false }
+                    // mDNS serial (no embedded IP) — match by device name
+                    if dev.ipAddress == nil && dev.displayName == deviceManager.deviceName {
+                        return false
+                    }
+                }
+                return true
             }
             if !otherDevices.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {

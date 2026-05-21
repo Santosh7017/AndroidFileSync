@@ -649,19 +649,39 @@ struct ContentView: View {
         
         // Fire-and-forget background folder sizing
         let pathSnapshot = currentPath
+        let dirsSnapshot = newFiles.filter { $0.isDirectory }
+        
         // If folderSizes is already populated, we're refreshing after an operation
-        // (delete/rename/paste) — invalidate cache so we get fresh data.
-        // If empty, we're navigating fresh — use the cache for instant revisits.
         if !folderSizes.isEmpty {
-            ADBManager.invalidateFolderSizeCache(for: pathSnapshot)
             folderSizes = [:]
         }
+        
         Task.detached(priority: .background) {
-            let sizes = await ADBManager.fetchFolderSizes(forParent: pathSnapshot)
-            await MainActor.run {
-                // Only apply if we're still viewing the same folder
-                guard self.currentPath == pathSnapshot else { return }
-                self.folderSizes = sizes
+            await withTaskGroup(of: (String, UInt64?).self) { group in
+                let maxConcurrent = 3
+                var index = 0
+                
+                // Add initial tasks
+                while index < min(maxConcurrent, dirsSnapshot.count) {
+                    let dir = dirsSnapshot[index]
+                    group.addTask { return (dir.path, await ADBManager.fetchSingleFolderSize(path: dir.path)) }
+                    index += 1
+                }
+                
+                // Process results and add more tasks
+                for await (path, sizeOpt) in group {
+                    if let size = sizeOpt {
+                        await MainActor.run {
+                            guard self.currentPath == pathSnapshot else { return }
+                            self.folderSizes[path] = size
+                        }
+                    }
+                    if index < dirsSnapshot.count {
+                        let nextDir = dirsSnapshot[index]
+                        group.addTask { return (nextDir.path, await ADBManager.fetchSingleFolderSize(path: nextDir.path)) }
+                        index += 1
+                    }
+                }
             }
         }
     }
@@ -843,6 +863,7 @@ struct ContentView: View {
             await manager.uploadFilesToPaths(files: allItems)
 
             try? await Task.sleep(nanoseconds: 1_000_000_000)
+            ADBManager.invalidateFolderSizeCache()
             await loadFiles()
             await deviceManager.fetchStorageInfo()
         }
@@ -854,7 +875,8 @@ struct ContentView: View {
             do {
                 try await fileActionManager.deleteFile(file)
                 
-                // Refresh file list after deletion
+                // Invalidate cache and refresh
+                ADBManager.invalidateFolderSizeCache()
                 await loadFiles()
                 await deviceManager.fetchStorageInfo()
             } catch {
@@ -871,7 +893,8 @@ struct ContentView: View {
             do {
                 try await fileActionManager.renameFile(file, to: newName)
                 
-                // Refresh file list after rename
+                // Invalidate cache and refresh
+                ADBManager.invalidateFolderSizeCache()
                 await loadFiles()
             } catch {
                 await MainActor.run {
@@ -898,6 +921,7 @@ struct ContentView: View {
                 
                 // Clear selection and refresh
                 selectedFiles.removeAll()
+                ADBManager.invalidateFolderSizeCache()
                 await loadFiles()
                 await deviceManager.fetchStorageInfo()
             } catch {
