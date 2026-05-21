@@ -50,7 +50,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let adbPath = ADBManager.getADBPath()
         guard !adbPath.isEmpty else { return }
         _ = Shell.run(adbPath, args: ["disconnect"])
-        _ = Shell.run(adbPath, args: ["kill-server"])
     }
 }
 

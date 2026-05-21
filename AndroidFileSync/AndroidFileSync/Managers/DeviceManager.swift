@@ -55,83 +55,149 @@ class DeviceManager: ObservableObject {
     func detectDevice() async {
         print("📱 DeviceManager: Starting device detection...")
 
-        // One-time: restart ADB server so it picks up ADB_MDNS_AUTO_CONNECT=0
-        // (a server from Android Studio or a previous session may be running with auto-connect ON)
-        if !hasRestartedServer {
+        // Fast path: Check for already-connected devices (USB or existing wireless session)
+        var allDevices = await ADBManager.listAllConnectedDevices()
+        
+        // If no devices found but we have saved wireless IPs, THEN attempt the heavy reconnect
+        // We run this in the background so it doesn't block the UI from instantly showing "Disconnected"
+        if allDevices.isEmpty && !hasRestartedServer {
             hasRestartedServer = true
-            let adbPath = ADBManager.getADBPath()
-            if !adbPath.isEmpty {
-                print("📱 DeviceManager: Restarting ADB server with auto-connect disabled...")
-                _ = await Shell.runAsyncWithTimeout(adbPath, args: ["kill-server"], timeoutSeconds: 3.0)
-                _ = await Shell.runAsyncWithTimeout(adbPath, args: ["start-server"], timeoutSeconds: 5.0)
-
-                // Reconnect ALL previously connected wireless devices using ADB 37 mDNS
-                // We save IPs only (ports change on every toggle).
-                // AWAIT this so the "Scanning..." screen stays visible until reconnection completes.
-                let savedIPs = UserDefaults.standard.stringArray(forKey: "connectedWirelessDevices") ?? []
-                if !savedIPs.isEmpty {
-                    var connectedIPs = Set<String>()
-                    
-                    // Retry up to 3 times — mDNS needs time after server restart
-                    for attempt in 1...3 {
-                        try? await Task.sleep(nanoseconds: 1_000_000_000) // 1s between attempts
+            let savedIPs = UserDefaults.standard.stringArray(forKey: "connectedWirelessDevices") ?? []
+            
+            if !savedIPs.isEmpty {
+                Task { [weak self] in
+                    let adbPath = ADBManager.getADBPath()
+                    if !adbPath.isEmpty {
+                        print("📱 DeviceManager: No active devices. Attempting to reconnect wireless devices...")
                         
-                        let (code, mdnsOut, _) = await Shell.runAsyncWithTimeout(
-                            adbPath, args: ["mdns", "services"], timeoutSeconds: 3.0
-                        )
-                        guard code == 0 else { continue }
-                        
-                        print("📱 DeviceManager: mDNS poll attempt \(attempt)/3")
-                        
-                        for savedIP in savedIPs where !connectedIPs.contains(savedIP) {
-                            // Find this IP's _adb-tls-connect._tcp service
-                            for line in mdnsOut.split(separator: "\n") {
-                                let str = String(line)
-                                guard str.contains("_adb-tls-connect._tcp"),
-                                      str.contains(savedIP) else { continue }
-                                // Extract ip:port
-                                let parts = str.split(whereSeparator: { $0 == "\t" || $0 == " " }).map(String.init)
-                                guard let ipPort = parts.first(where: { $0.hasPrefix(savedIP + ":") }) else { break }
-                                
-                                print("📱 DeviceManager: Reconnecting to: \(ipPort)")
-                                let (_, out, _) = await Shell.runAsyncWithTimeout(
-                                    adbPath, args: ["connect", ipPort], timeoutSeconds: 5.0
-                                )
-                                if out.lowercased().contains("connected") {
-                                    connectedIPs.insert(savedIP)
-                                    print("📱 DeviceManager: ✅ Connected to \(ipPort)")
-                                } else {
-                                    print("📱 DeviceManager: ❌ Failed: \(out.trimmingCharacters(in: .whitespacesAndNewlines))")
-                                }
+                        // Reconnect saved wireless devices using mDNS
+                        var connectedIPs = Set<String>()
+                        for attempt in 1...2 {
+                            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
+                            
+                            let (code, mdnsOut, _) = await Shell.runAsyncWithTimeout(
+                                adbPath, args: ["mdns", "services"], timeoutSeconds: 2.0
+                            )
+                            guard code == 0 else { continue }
+                            
+                            guard mdnsOut.contains("_adb-tls-connect._tcp") else {
+                                print("📱 DeviceManager: No mDNS services found, skipping reconnect")
                                 break
                             }
+                            
+                            print("📱 DeviceManager: mDNS poll attempt \(attempt)/2")
+                            
+                            for savedIP in savedIPs where !connectedIPs.contains(savedIP) {
+                                for line in mdnsOut.split(separator: "\n") {
+                                    let str = String(line)
+                                    guard str.contains("_adb-tls-connect._tcp"),
+                                          str.contains(savedIP) else { continue }
+                                    let parts = str.split(whereSeparator: { $0 == "\t" || $0 == " " }).map(String.init)
+                                    guard let ipPort = parts.first(where: { $0.hasPrefix(savedIP + ":") }) else { break }
+                                    
+                                    print("📱 DeviceManager: Reconnecting to: \(ipPort)")
+                                    let (_, out, _) = await Shell.runAsyncWithTimeout(
+                                        adbPath, args: ["connect", ipPort], timeoutSeconds: 3.0
+                                    )
+                                    if out.lowercased().contains("connected") {
+                                        connectedIPs.insert(savedIP)
+                                        print("📱 DeviceManager: ✅ Connected to \(ipPort)")
+                                    } else {
+                                        print("📱 DeviceManager: ❌ Failed: \(out.trimmingCharacters(in: .whitespacesAndNewlines))")
+                                    }
+                                    break
+                                }
+                            }
+                            
+                            if connectedIPs.count >= savedIPs.count { break }
                         }
+                        print("📱 DeviceManager: Reconnected \(connectedIPs.count)/\(savedIPs.count) devices")
                         
-                        // All known devices found — stop retrying
-                        if connectedIPs.count >= savedIPs.count { break }
+                        // If we successfully reconnected in the background, refresh the UI!
+                        if !connectedIPs.isEmpty {
+                            await self?.detectDevice()
+                        } else {
+                            // Hunt failed, explicitly update UI to disconnected ONLY if a USB device
+                            // hasn't already connected in the meantime!
+                            await MainActor.run {
+                                guard let self = self, !self.isConnected else { return }
+                                self.connectionType = .none
+                                self.deviceName = "No Device"
+                                self.statusMessage = "No device detected. Please connect your device."
+                                self.isConnected = false
+                                self.sdCardPath = nil
+                                self.storageStats = [:]
+                                self.isDetecting = false
+                            }
+                        }
                     }
-                    
-                    print("📱 DeviceManager: Reconnected \(connectedIPs.count)/\(savedIPs.count) devices")
                 }
+                
+                // Return early so we DON'T update the UI to "Disconnected" while the background task is running!
+                // This keeps the spinner active on first launch.
+                return
+            } else {
+                print("📱 DeviceManager: No saved wireless devices, skipping server restart")
             }
         }
 
-        // Ensure UI shows "detecting" state
-        if !isDetecting {
-            await MainActor.run { 
-                self.isDetecting = true 
-                self.statusMessage = "Scanning for devices..."
-            }
-        }
-        
-        // Enumerate ALL connected devices first (for the device picker).
-        // This never affects which device is "active" — it only fills the
-        // availableDevices list shown in the switcher panel.
-        let allDevices = await ADBManager.listAllConnectedDevices()
         await MainActor.run { self.availableDevices = allDevices }
 
-        // Ask ADB which device to target.
-        adbAvailable = await ADBManager.isDeviceConnected()
+        // Derive active device from the list (same logic as isDeviceConnected but without a second adb call)
+        if !allDevices.isEmpty {
+            // Always validate wireless devices — ADB can show stale wireless
+            // connections even after the phone disconnected or left the network.
+            let hasWireless = allDevices.contains(where: { $0.isWireless })
+            if hasWireless {
+                var validDevices: [ADBManager.ConnectedDevice] = []
+                let adbPath = ADBManager.getADBPath()
+                for dev in allDevices {
+                    if dev.isWireless {
+                        // Quick liveness check — 1.5s timeout
+                        let (code, out, _) = await Shell.runAsyncWithTimeout(
+                            adbPath,
+                            args: ["-s", dev.serial, "shell", "echo", "ok"],
+                            timeoutSeconds: 1.5
+                        )
+                        if code == 0 && out.trimmingCharacters(in: .whitespacesAndNewlines) == "ok" {
+                            validDevices.append(dev)
+                        } else {
+                            print("📱 DeviceManager: Stale wireless device removed: \(dev.serial)")
+                            // Disconnect the stale entry so ADB stops listing it
+                            let _ = await Shell.runAsyncWithTimeout(
+                                adbPath, args: ["disconnect", dev.serial], timeoutSeconds: 2.0
+                            )
+                        }
+                    } else {
+                        validDevices.append(dev)
+                    }
+                }
+                allDevices = validDevices
+                await MainActor.run { self.availableDevices = allDevices }
+            }
+            
+            let updatedSerials = allDevices.map { $0.serial }
+            if let current = ADBManager.activeDeviceSerial, updatedSerials.contains(current) {
+                // Keep current active device
+                print("📱 DeviceManager: Keeping active device: \(current)")
+            } else if let usbSerial = updatedSerials.first(where: { !ADBManager.isWirelessSerial($0) }) {
+                ADBManager.activeDeviceSerial = usbSerial
+                print("📱 DeviceManager: Using USB device: \(usbSerial)")
+            } else if let wirelessSerial = updatedSerials.first(where: { ADBManager.isWirelessSerial($0) }) {
+                ADBManager.activeDeviceSerial = wirelessSerial
+                print("📱 DeviceManager: Using wireless device: \(wirelessSerial)")
+            } else {
+                ADBManager.activeDeviceSerial = nil
+            }
+            adbAvailable = !allDevices.isEmpty
+        } else {
+            adbAvailable = false
+            // Clear stale active serial so it doesn't block future detections
+            ADBManager.activeDeviceSerial = nil
+            // Allow wireless reconnect to fire again on next detection
+            hasRestartedServer = false
+        }
+        
         // If user explicitly disconnected, don't auto-pick wireless devices
         if userDisconnected, let serial = ADBManager.activeDeviceSerial, ADBManager.isWirelessSerial(serial) {
             adbAvailable = false
@@ -145,6 +211,11 @@ class DeviceManager: ObservableObject {
         // Update the state on the main thread
         await MainActor.run {
             if adbAvailable {
+                // Set device name instantly from the allDevices list without extra adb calls
+                if let active = allDevices.first(where: { $0.serial == ADBManager.activeDeviceSerial }) {
+                    self.deviceName = active.displayName
+                }
+                
                 if isWireless {
                     self.connectionType = .wireless
                     self.statusMessage = "Connected via WiFi"
@@ -178,18 +249,17 @@ class DeviceManager: ObservableObject {
             self.isDetecting = false
         }
 
-        // If connected, fetch display metadata for the active device
+        // If connected, fetch non-critical metadata concurrently so we don't block the UI
         if adbAvailable {
-            // ADB 37+ mDNS serial: resolve IP since it's not in the serial
-            if isWireless {
-                let currentIP = await MainActor.run { self.lastWirelessIP }
-                if currentIP.isEmpty, let resolvedIP = await ADBManager.getWirelessIP() {
-                    await MainActor.run { self.lastWirelessIP = resolvedIP }
+            Task {
+                // ADB 37+ mDNS serial: resolve IP since it's not in the serial
+                if isWireless {
+                    let currentIP = await MainActor.run { self.lastWirelessIP }
+                    if currentIP.isEmpty, let resolvedIP = await ADBManager.getWirelessIP() {
+                        await MainActor.run { self.lastWirelessIP = resolvedIP }
+                    }
                 }
             }
-            await fetchDeviceName()
-            await detectSDCard()
-            await fetchStorageInfo()
         }
     }
 
@@ -211,9 +281,33 @@ class DeviceManager: ObservableObject {
         monitor.onChange = { [weak self] in
             guard let self else { return }
             Task {
-                // Give ADB ~1.5 s to recognize the newly attached device
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                // Snapshot the device count before detection
+                let previousDeviceCount = await MainActor.run { self.availableDevices.count }
+                
+                // Try immediately (fastest for disconnects, and sometimes connects)
                 await self.detectDevice()
+                
+                // Poll a few times for ADB to register the change.
+                // - On connect: ADB can take ~0.5-1s to register a new USB device
+                // - On disconnect: detectDevice() above handles it instantly
+                // We poll until the device list has actually changed or we time out.
+                let hasUSBDevice = { @MainActor in
+                    self.availableDevices.contains(where: { !$0.isWireless })
+                }
+                for _ in 1...4 {
+                    let connected = await MainActor.run { self.isConnected }
+                    let hasUSB = await hasUSBDevice()
+                    // Stop if: we're connected AND have a USB device, OR if we were
+                    // already connected (WiFi) and the device list updated
+                    let currentCount = await MainActor.run { self.availableDevices.count }
+                    if connected && hasUSB { break }
+                    if connected && currentCount != previousDeviceCount { break }
+                    if !connected && currentCount == 0 {
+                        // Disconnect detected and reflected
+                    }
+                    try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
+                    await self.detectDevice()
+                }
             }
         }
         monitor.start()
@@ -224,24 +318,6 @@ class DeviceManager: ObservableObject {
     func stopMonitoring() {
         usbMonitor?.stop()
         usbMonitor = nil
-    }
-
-    // MARK: - Device Name
-
-    /// Reads the real device name via `adb shell getprop ro.product.model`
-    /// (e.g. "Redmi Note 13") and updates deviceName.
-    func fetchDeviceName() async {
-        let adbPath = ADBManager.getADBPath()
-        guard !adbPath.isEmpty else { return }
-        let (_, output, _) = await Shell.runAsync(
-            adbPath,
-            args: ADBManager.deviceArgs(["shell", "getprop", "ro.product.model"])
-        )
-        let name = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !name.isEmpty {
-            await MainActor.run { self.deviceName = name }
-            print("📱 DeviceManager: Device name = \(name)")
-        }
     }
 
     // MARK: - SD Card Detection

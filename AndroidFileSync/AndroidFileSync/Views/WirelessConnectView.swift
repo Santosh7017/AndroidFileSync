@@ -679,6 +679,8 @@ struct WirelessConnectView: View {
             showRescanWhileConnected = false
             // Start discovery unconditionally so we instantly detect if devices connect/disconnect
             pairingBrowser.startBrowsing()
+            // Re-validate connection state (catches stale wireless connections)
+            Task { await deviceManager.detectDevice() }
         }
     }
 

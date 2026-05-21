@@ -174,6 +174,7 @@ struct ContentView: View {
                 // Reload the file browser whenever the active device changes.
                 // deviceName is set at the end of detectDevice(), so this fires
                 // once the switch is fully complete and the new serial is active.
+                // This is the ONLY place that triggers loadFiles() on connection.
                 guard deviceManager.isConnected, !newName.isEmpty, newName != "No Device" else { return }
                 Task {
                     currentPath = await deviceManager.getRealStoragePath()
@@ -274,11 +275,8 @@ struct ContentView: View {
         .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
             if !deviceManager.isConnected && !deviceManager.isDetecting {
                 Task {
+                    // Just detect — onChange(of: deviceManager.deviceName) will trigger loadFiles()
                     await deviceManager.detectDevice()
-                    if deviceManager.isConnected {
-                        currentPath = await deviceManager.getRealStoragePath()
-                        await loadFiles()
-                    }
                 }
             }
         }
@@ -595,13 +593,28 @@ struct ContentView: View {
     // MARK: - Functions (Your navigation and data loading logic)
 
     private func initializeDevice() async {
-        await deviceManager.detectDevice()
-        // Start IOKit USB monitor — fires instantly on plug/unplug, zero polling overhead
+        // Start IOKit USB monitor FIRST — fires instantly on plug/unplug
         deviceManager.startMonitoring()
-        if deviceManager.isConnected {
-            currentPath = await deviceManager.getRealStoragePath()
-            await loadFiles()
+        
+        await deviceManager.detectDevice()
+        
+        // Poll for USB cold-start ONLY when there are no saved wireless devices.
+        // If saved wireless IPs exist, detectDevice() already kicked off a background
+        // reconnect task with its own retry logic. Running both simultaneously causes
+        // the polling loop to flash "No Device Connected" while the reconnect is in progress.
+        let savedWirelessIPs = UserDefaults.standard.stringArray(forKey: "connectedWirelessDevices") ?? []
+        if !deviceManager.isConnected && savedWirelessIPs.isEmpty {
+            for _ in 1...10 {
+                try? await Task.sleep(nanoseconds: 300_000_000) // 0.3s
+                await deviceManager.detectDevice()
+                if deviceManager.isConnected { break }
+            }
         }
+        
+        // NOTE: We do NOT call loadFiles() here.
+        // The .onChange(of: deviceManager.deviceName) observer fires whenever detectDevice()
+        // sets a new device name, and it is the single source of truth for loading files.
+        // Calling loadFiles() here too caused a race condition where files were loaded twice.
     }
     
     /// Refreshes the sidebar storage stats (Internal Storage bar) after a file operation
@@ -645,6 +658,13 @@ struct ContentView: View {
             self.files = newFiles
             isLoading = false
             downloadManager.resumeUpdates()  // Resume progress updates
+        }
+        
+        // Now that files are loaded, fetch SD card and storage info in the background.
+        // Doing this here prevents ADB contention during the critical file loading phase!
+        Task {
+            await deviceManager.detectSDCard()
+            await deviceManager.fetchStorageInfo()
         }
         
         // Fire-and-forget background folder sizing

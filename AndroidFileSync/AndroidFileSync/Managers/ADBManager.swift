@@ -59,7 +59,7 @@ class ADBManager {
                     let (_, raw, _) = await Shell.runAsyncWithTimeout(
                         path,
                         args: ["-s", serial, "shell", "getprop", "ro.product.model"],
-                        timeoutSeconds: 3.0
+                        timeoutSeconds: 1.0
                     )
                     let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
                     return ConnectedDevice(serial: serial, displayName: name.isEmpty ? serial : name)
@@ -437,67 +437,147 @@ class ADBManager {
         return files
     }
     
-    // Helper for small directories - uses ls -la for full details
+    // Helper for small directories — tries stat first (modern), falls back to ls -la (legacy)
     private static func listFilesWithDetails(path: String, adbPath: String, exactNames: [String]) async throws -> [ADBFile] {
-        let command = "ls -la '\(path)'"
         
-        let (code, output, error) = await Shell.runAsyncWithTimeout(
-            adbPath,
-            args: deviceArgs(["shell", command]),
-            timeoutSeconds: 60.0
-        )
-        
-        if code != 0 {
-            throw NSError(
-                domain: "ADBError",
-                code: Int(code),
-                userInfo: [NSLocalizedDescriptionKey: error.isEmpty ? "Failed to list files" : error]
-            )
+        // ── Strategy 1: stat (modern Android 7+, toybox) ──────────────────
+        // stat -c gives pipe-delimited output that's trivial to parse.
+        let statFiles = await listFilesViaStat(path: path, adbPath: adbPath, exactNames: exactNames)
+        if statFiles.count == exactNames.count {
+            return statFiles                       // stat worked for every file
         }
+        
+        // ── Strategy 2: ls -la (legacy fallback for old phones) ───────────
+        // Only attempt this if stat missed some/all files.
+        let lsFiles = await listFilesViaLs(path: path, adbPath: adbPath, exactNames: exactNames)
+        if lsFiles.count > statFiles.count {
+            // ls -la recovered more files — use it, but supplement with stat
+            // results for any files ls may have missed.
+            let lsNames = Set(lsFiles.map { $0.name })
+            var merged = lsFiles
+            for f in statFiles where !lsNames.contains(f.name) {
+                merged.append(f)
+            }
+            if merged.count == exactNames.count { return merged }
+            // Still missing some — fall through to raw fallback
+            return fillMissing(from: exactNames, existing: merged, basePath: path)
+        }
+        
+        // stat was better (or both equally incomplete) — supplement stat
+        if !statFiles.isEmpty {
+            return fillMissing(from: exactNames, existing: statFiles, basePath: path)
+        }
+        if !lsFiles.isEmpty {
+            return fillMissing(from: exactNames, existing: lsFiles, basePath: path)
+        }
+        
+        // ── Strategy 3: raw names fallback (nothing else worked) ──────────
+        return fillMissing(from: exactNames, existing: [], basePath: path)
+    }
+    
+    // MARK: - stat-based listing (modern)
+    private static func listFilesViaStat(path: String, adbPath: String, exactNames: [String]) async -> [ADBFile] {
+        var files: [ADBFile] = []
+        let batchSize = 50
+        for i in stride(from: 0, to: exactNames.count, by: batchSize) {
+            let end = min(i + batchSize, exactNames.count)
+            let batch = Array(exactNames[i..<end])
+            
+            let escapedArgs = batch.map { "'\($0.replacingOccurrences(of: "'", with: "'\\''"))'" }.joined(separator: " ")
+            let command = "cd '\(path.replacingOccurrences(of: "'", with: "'\\''"))' && stat -c '%A|%s|%Y|%n' \(escapedArgs) 2>/dev/null"
+            
+            let (code, output, _) = await Shell.runAsyncWithTimeout(
+                adbPath, args: deviceArgs(["shell", command]), timeoutSeconds: 30.0
+            )
+            guard code == 0 else { continue }
+            
+            output.enumerateLines { line, _ in
+                let parts = line.split(separator: "|", maxSplits: 3)
+                guard parts.count == 4 else { return }
+                let perms = String(parts[0])
+                let size  = UInt64(parts[1]) ?? 0
+                let ts    = Double(parts[2])
+                let name  = String(parts[3])
+                let isDir = perms.hasPrefix("d")
+                let modDate = ts.map { Date(timeIntervalSince1970: $0) }
+                let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
+                files.append(ADBFile(name: name, path: fullPath, isDirectory: isDir, size: size, modificationDate: modDate))
+            }
+        }
+        return files
+    }
+    
+    // MARK: - ls -la based listing (legacy)
+    private static func listFilesViaLs(path: String, adbPath: String, exactNames: [String]) async -> [ADBFile] {
+        let command = "ls -la '\(path.replacingOccurrences(of: "'", with: "'\\''"))'"
+        let (code, output, _) = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", command]), timeoutSeconds: 60.0
+        )
+        guard code == 0 else { return [] }
         
         var files: [ADBFile] = []
         let lines = output.components(separatedBy: "\n")
         
-        // Date formatter for Android ls -la output (format: YYYY-MM-DD HH:MM)
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd HH:mm"
         dateFormatter.locale = Locale(identifier: "en_US_POSIX")
         
         for exactName in exactNames {
-            // Find the line that ends with this exact name
-            // (Note: ls -la might have a space or symlink arrow before the name, but checking suffix is safer)
-            guard let lineStr = lines.first(where: { $0.hasSuffix(" " + exactName) || $0.hasSuffix(" " + exactName + "\r") }) else {
-                continue
-            }
+            // Find the line ending with this exact name
+            guard let lineStr = lines.first(where: {
+                $0.hasSuffix(" " + exactName) || $0.hasSuffix(" " + exactName + "\r")
+            }) else { continue }
             
             let cleanLine = lineStr.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
             let parts = cleanLine.split(whereSeparator: { $0.isWhitespace })
-            guard parts.count >= 8 else { continue }
+            // Android ls -la outputs 7 or 8 columns depending on device/version
+            guard parts.count >= 7 else { continue }
             
             let perms = String(parts[0])
             let isDir = perms.hasPrefix("d")
-            let size = UInt64(parts[4]) ?? 0
             
-            // Parse date - Android ls -la typically shows: YYYY-MM-DD HH:MM
-            var modDate: Date? = nil
-            if parts.count >= 7 {
-                // Find where the date looks like YYYY-MM-DD
-                for i in 4..<(parts.count - 1) {
-                    let dateCandidate = String(parts[i])
-                    if dateCandidate.contains("-") && dateCandidate.count == 10 {
-                        let timeCandidate = String(parts[i+1])
-                        let dateStr = "\(dateCandidate) \(timeCandidate)"
-                        modDate = dateFormatter.date(from: dateStr)
+            // Find the date columns (YYYY-MM-DD HH:MM) to anchor the layout
+            var dateIndex: Int? = nil
+            for idx in 3..<(parts.count - 1) {
+                let candidate = String(parts[idx])
+                if candidate.count == 10 && candidate.contains("-") {
+                    let next = String(parts[idx + 1])
+                    if next.count == 5 && next.contains(":") {
+                        dateIndex = idx
                         break
                     }
                 }
             }
             
+            var size: UInt64 = 0
+            var modDate: Date? = nil
+            
+            if let di = dateIndex {
+                // Size is the column immediately before the date
+                if di > 0 { size = UInt64(parts[di - 1]) ?? 0 }
+                let dateStr = "\(parts[di]) \(parts[di + 1])"
+                modDate = dateFormatter.date(from: dateStr)
+            } else {
+                // Couldn't find date — try column 4 as size (standard 8-col layout)
+                if parts.count >= 8 { size = UInt64(parts[4]) ?? 0 }
+            }
+            
             let fullPath = path.hasSuffix("/") ? path + exactName : path + "/" + exactName
             files.append(ADBFile(name: exactName, path: fullPath, isDirectory: isDir, size: size, modificationDate: modDate))
         }
-        
         return files
+    }
+    
+    // MARK: - Raw-name fallback (guarantees no files are lost)
+    private static func fillMissing(from exactNames: [String], existing: [ADBFile], basePath: String) -> [ADBFile] {
+        let parsed = Set(existing.map { $0.name })
+        var result = existing
+        for name in exactNames where !parsed.contains(name) {
+            let fullPath = basePath.hasSuffix("/") ? basePath + name : basePath + "/" + name
+            let isDir = !name.contains(".")
+            result.append(ADBFile(name: name, path: fullPath, isDirectory: isDir, size: 0, modificationDate: nil))
+        }
+        return result
     }
 
     static func pullFileWithProgress(
