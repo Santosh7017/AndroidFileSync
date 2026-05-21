@@ -34,6 +34,9 @@ struct FileBrowserView: View, Equatable {
     var sortOption: ActionToolbar.SortOption = .name
     var onSortChange: ((ActionToolbar.SortOption, Bool) -> Void)? = nil
     
+    // Folder sizes fetched asynchronously — keyed by folder path
+    var folderSizes: [String: UInt64] = [:]
+    
     // Equatable implementation - only compare data that affects rendering
     static func == (lhs: FileBrowserView, rhs: FileBrowserView) -> Bool {
         lhs.files.map(\.id) == rhs.files.map(\.id) &&
@@ -41,7 +44,8 @@ struct FileBrowserView: View, Equatable {
         lhs.isLoading == rhs.isLoading &&
         lhs.canGoBack == rhs.canGoBack &&
         lhs.selectedFiles == rhs.selectedFiles &&
-        lhs.sortOption == rhs.sortOption
+        lhs.sortOption == rhs.sortOption &&
+        lhs.folderSizes == rhs.folderSizes
     }
     
     // Table sort state
@@ -312,9 +316,21 @@ struct FileBrowserView: View, Equatable {
             }
             
             TableColumn("Size", value: \.size) { file in
-                Text(file.isDirectory ? "--" : formatBytes(file.size))
-                    .font(.system(.callout, design: .monospaced))
-                    .foregroundColor(.secondary)
+                if file.isDirectory {
+                    if let size = folderSizes[file.path] {
+                        Text(formatBytes(size))
+                            .font(.system(.callout, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("--")
+                            .font(.system(.callout, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                } else {
+                    Text(formatBytes(file.size))
+                        .font(.system(.callout, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
             }
             .width(min: 70, ideal: 90, max: 110)
             

@@ -26,6 +26,7 @@ struct ContentView: View {
     @State private var pathHistory: [String] = []
     @State private var isLoading = false
     @State private var loadTask: Task<Void, Never>? = nil
+    @State private var folderSizes: [String: UInt64] = [:]
     
     // File action manager
     @StateObject private var fileActionManager = FileActionManager()
@@ -386,7 +387,8 @@ struct ContentView: View {
                             },
                             onPermanentDelete: handlePermanentDelete,
                             sortOption: sortOption,
-                            onSortChange: { option, ascending in sortFiles(by: option, ascending: ascending) }
+                            onSortChange: { option, ascending in sortFiles(by: option, ascending: ascending) },
+                            folderSizes: folderSizes
                         )
                     }
                 }
@@ -644,6 +646,24 @@ struct ContentView: View {
             isLoading = false
             downloadManager.resumeUpdates()  // Resume progress updates
         }
+        
+        // Fire-and-forget background folder sizing
+        let pathSnapshot = currentPath
+        // If folderSizes is already populated, we're refreshing after an operation
+        // (delete/rename/paste) — invalidate cache so we get fresh data.
+        // If empty, we're navigating fresh — use the cache for instant revisits.
+        if !folderSizes.isEmpty {
+            ADBManager.invalidateFolderSizeCache(for: pathSnapshot)
+            folderSizes = [:]
+        }
+        Task.detached(priority: .background) {
+            let sizes = await ADBManager.fetchFolderSizes(forParent: pathSnapshot)
+            await MainActor.run {
+                // Only apply if we're still viewing the same folder
+                guard self.currentPath == pathSnapshot else { return }
+                self.folderSizes = sizes
+            }
+        }
     }
 
     private func navigateTo(_ path: String) {
@@ -657,6 +677,7 @@ struct ContentView: View {
         pathHistory.append(currentPath)
         currentPath = path
         isLoading = true
+        folderSizes = [:]
         
         loadTask = Task.detached(priority: .userInitiated) {
             await self.loadFiles()
@@ -673,6 +694,7 @@ struct ContentView: View {
         
         currentPath = previousPath
         isLoading = true
+        folderSizes = [:]
         
         loadTask = Task.detached(priority: .userInitiated) {
             await self.loadFiles()

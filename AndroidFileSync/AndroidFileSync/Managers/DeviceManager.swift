@@ -465,6 +465,8 @@ class DeviceManager: ObservableObject {
             self.storageStats = [:]
             self.userDisconnected = true
         }
+        // All cached sizes are stale after disconnect
+        ADBManager.invalidateFolderSizeCache()
     }
     
     /// Re-detect device after QR pairing auto-connected it

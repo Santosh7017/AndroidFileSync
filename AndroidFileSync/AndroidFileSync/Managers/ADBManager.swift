@@ -8,6 +8,10 @@ class ADBManager {
     // Cache the path so we don't search every time
     private static var adbPath: String?
     
+    // Cache folder sizes: [parentPath: [childFolderPath: sizeInBytes]]
+    // Populated lazily by fetchFolderSizes, returned instantly on revisit.
+    private static var folderSizeCache: [String: [String: UInt64]] = [:]
+    
     // Track the active device serial for multi-device support
     static var activeDeviceSerial: String?
     
@@ -263,6 +267,59 @@ class ADBManager {
         progressCallback?(results.count)
         print("📂 Recursive scan of '\(path)': found \(results.count) files")
         return results
+    }
+
+    // MARK: - Folder Sizes
+
+    /// Returns the size (in bytes) of each immediate child folder under `path`.
+    /// Results are cached in memory — revisiting a folder is instant.
+    static func fetchFolderSizes(forParent path: String) async -> [String: UInt64] {
+        // Return from cache if already computed
+        if let cached = folderSizeCache[path] {
+            return cached
+        }
+
+        let adbPath = getADBPath()
+        guard !adbPath.isEmpty else { return [:] }
+
+        // Single simple command — no pipes, no find, no xargs.
+        // du -sk path/*/ lists all immediate subdirectories with sizes in KB.
+        let escapedPath = path.replacingOccurrences(of: "'", with: "'\\''")
+        let command = "du -sk '\(escapedPath)'/*/ 2>/dev/null"
+        let (_, output, _) = await Shell.runAsyncWithTimeout(
+            adbPath,
+            args: deviceArgs(["shell", command]),
+            timeoutSeconds: 15.0
+        )
+
+        var sizes: [String: UInt64] = [:]
+        output.enumerateLines { line, _ in
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            // du output: "<KB>\t<path>/"
+            let parts = trimmed.split(separator: "\t", maxSplits: 1)
+            guard parts.count == 2 else { return }
+            let kb = UInt64(parts[0].trimmingCharacters(in: .whitespaces)) ?? 0
+            var folderPath = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+            // Remove trailing slash that du adds for directories
+            if folderPath.hasSuffix("/") { folderPath = String(folderPath.dropLast()) }
+            guard !folderPath.isEmpty else { return }
+            sizes[folderPath] = kb * 1024
+        }
+
+        // Cache for instant revisit
+        folderSizeCache[path] = sizes
+        return sizes
+    }
+
+    /// Invalidates cached folder sizes.
+    /// - Parameter path: If provided, clears only that parent path. If nil, clears entire cache.
+    static func invalidateFolderSizeCache(for path: String? = nil) {
+        if let path = path {
+            folderSizeCache.removeValue(forKey: path)
+        } else {
+            folderSizeCache.removeAll()
+        }
     }
 
     static func listFiles(path: String) async throws -> [ADBFile] {
