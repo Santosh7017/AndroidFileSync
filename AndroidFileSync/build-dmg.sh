@@ -26,6 +26,8 @@ xcodebuild -project "$APP_NAME.xcodeproj" \
     -configuration Release \
     -derivedDataPath "$BUILD_DIR/DerivedData" \
     -destination 'platform=macOS' \
+    ARCHS="x86_64 arm64" \
+    ONLY_ACTIVE_ARCH=NO \
     CODE_SIGN_IDENTITY="-" \
     CODE_SIGNING_REQUIRED=NO \
     CODE_SIGNING_ALLOWED=NO \

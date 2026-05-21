@@ -147,32 +147,11 @@ class ADBManager {
             }
         }
         
-        // Fallback to system-installed ADB - check many possible locations
-        let possiblePaths = [
-            // Homebrew (Apple Silicon and Intel)
-            "/opt/homebrew/bin/adb",
-            "/usr/local/bin/adb",
-            // Android Studio default SDK locations
-            "\(homeDir)/Library/Android/sdk/platform-tools/adb",
-            "\(homeDir)/Android/Sdk/platform-tools/adb",
-            // Common alternative locations
-            "/Applications/Android Studio.app/Contents/plugins/android-sdk/platform-tools/adb",
-            "/usr/bin/adb",
-            // MacPorts
-            "/opt/local/bin/adb"
-        ]
-        
-        for path in possiblePaths {
-            if fileManager.fileExists(atPath: path) {
-                print("📱 ADB: Found system ADB at: \(path)")
-                adbPath = path
-                return path
-            }
-        }
-        
-        print("❌ ADB: Not found in any known location. Checked: \(possiblePaths)")
-        // Return empty string since "adb" without a full path will fail
-        return ""
+        // If bundled adb is completely missing, fallback to generic 'adb' in PATH
+        // We explicitly do not scan system directories like Homebrew or Android SDK anymore.
+        print("⚠️ ADB: Bundled ADB not found! Falling back to generic PATH 'adb'")
+        adbPath = "adb"
+        return "adb"
     }
 
     static func isDeviceConnected() async -> Bool {

@@ -43,6 +43,7 @@
 				Managers/USBDeviceMonitor.swift,
 				Models/AppInfo.swift,
 				Models/Models.swift,
+				Resources/adb,
 				Utilities/ConflictDialog.swift,
 				Utilities/DropCoordinator.swift,
 				Utilities/FileDropDelegate.swift,
