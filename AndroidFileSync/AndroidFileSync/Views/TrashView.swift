@@ -9,6 +9,7 @@ import SwiftUI
 
 struct TrashView: View {
     @ObservedObject var fileActionManager: FileActionManager
+    var onStorageChanged: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var showEmptyTrashConfirmation = false
     @State private var showPermanentDeleteConfirmation = false
@@ -80,6 +81,7 @@ struct TrashView: View {
                         Button {
                             Task {
                                 try? await fileActionManager.restoreFile(item)
+                                onStorageChanged?()
                             }
                         } label: {
                             Label("Restore", systemImage: "arrow.uturn.backward")
@@ -108,6 +110,7 @@ struct TrashView: View {
             Button("Empty Trash", role: .destructive) {
                 Task {
                     try? await fileActionManager.emptyTrash()
+                    onStorageChanged?()
                 }
             }
         } message: {
@@ -122,6 +125,7 @@ struct TrashView: View {
                 if let item = itemToDelete {
                     Task {
                         try? await fileActionManager.permanentlyDeleteFromTrash(item)
+                        onStorageChanged?()
                     }
                 }
                 itemToDelete = nil

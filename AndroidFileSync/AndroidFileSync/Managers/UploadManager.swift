@@ -14,6 +14,7 @@ class UploadManager: ObservableObject {
     @Published var batchTotal: Int = 0
     @Published var batchCompleted: Int = 0
     @Published var isBatchUploading: Bool = false
+    @Published var batchCancelled: Bool = false
     
     // Live-adjustable concurrency (1-8 slots), persisted across launches
     @Published var maxConcurrent: Int {
@@ -145,12 +146,15 @@ class UploadManager: ObservableObject {
     func cancelAllUploads() {
         print("🛑 Cancelling ALL uploads")
         
-        // Set all cancellation flags
+        // Set batch-level flag to stop the loop from enqueuing new files
+        batchCancelled = true
+        isBatchUploading = false
+        
+        // Set all cancellation flags for currently active uploads
         flagLock.lock()
         for key in cancellationFlags.keys {
             cancellationFlags[key] = true
         }
-        // Also flag all active uploads
         for key in activeUploads.keys {
             cancellationFlags[key] = true
         }
@@ -182,6 +186,9 @@ class UploadManager: ObservableObject {
         fileSize: UInt64,
         to devicePath: String
     ) async throws {
+        // Early exit if batch was cancelled before this file started
+        if batchCancelled { return }
+        
         let (safeFileName, _) = FileNameHelper.getSafeFilename(fileName)
         
         let safeDevicePath: String
@@ -392,6 +399,7 @@ class UploadManager: ObservableObject {
             batchTotal = files.count
             batchCompleted = 0
             isBatchUploading = true
+            batchCancelled = false
         }
         
         print("📤 Starting parallel upload of \(files.count) files")
@@ -400,12 +408,12 @@ class UploadManager: ObservableObject {
             var runningCount = 0
             var fileIndex = 0
             
-            while fileIndex < files.count {
+            while fileIndex < files.count && !batchCancelled {
                 // Re-read limit each iteration so live slider changes take effect
                 let limit = self.maxConcurrent
                 
                 // Fill up to limit slots
-                while runningCount < limit && fileIndex < files.count {
+                while runningCount < limit && fileIndex < files.count && !batchCancelled {
                     let file = files[fileIndex]
                     fileIndex += 1
                     runningCount += 1
@@ -428,11 +436,22 @@ class UploadManager: ObservableObject {
                     }
                 }
                 
+                // If cancelled, cancel all remaining tasks and break
+                if batchCancelled {
+                    group.cancelAll()
+                    break
+                }
+                
                 // Wait for one slot to free before looping
                 if runningCount >= limit && fileIndex < files.count {
                     await group.next()
                     runningCount -= 1
                 }
+            }
+            
+            // If cancelled mid-batch, cancel remaining running tasks
+            if batchCancelled {
+                group.cancelAll()
             }
             
             await group.waitForAll()
@@ -442,6 +461,10 @@ class UploadManager: ObservableObject {
             isBatchUploading = false
         }
         
-        print("✅ All \(files.count) uploads completed")
+        if batchCancelled {
+            print("🛑 Batch upload cancelled at \(await MainActor.run { batchCompleted })/\(files.count)")
+        } else {
+            print("✅ All \(files.count) uploads completed")
+        }
     }
 }

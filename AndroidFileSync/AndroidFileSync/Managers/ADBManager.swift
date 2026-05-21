@@ -331,7 +331,7 @@ class ADBManager {
         
         // For small directories, use ls -la to get full details
         if fileNames.count <= 100 {
-            return try await listFilesWithDetails(path: path, adbPath: adbPath)
+            return try await listFilesWithDetails(path: path, adbPath: adbPath, exactNames: fileNames)
         }
         
         // For large directories, get file types using stat command
@@ -408,7 +408,7 @@ class ADBManager {
     }
     
     // Helper for small directories - uses ls -la for full details
-    private static func listFilesWithDetails(path: String, adbPath: String) async throws -> [ADBFile] {
+    private static func listFilesWithDetails(path: String, adbPath: String, exactNames: [String]) async throws -> [ADBFile] {
         let command = "ls -la '\(path)'"
         
         let (code, output, error) = await Shell.runAsyncWithTimeout(
@@ -433,10 +433,15 @@ class ADBManager {
         dateFormatter.dateFormat = "yyyy-MM-dd HH:mm"
         dateFormatter.locale = Locale(identifier: "en_US_POSIX")
         
-        for lineStr in lines {
-            if lineStr.isEmpty || lineStr.hasPrefix("total") { continue }
+        for exactName in exactNames {
+            // Find the line that ends with this exact name
+            // (Note: ls -la might have a space or symlink arrow before the name, but checking suffix is safer)
+            guard let lineStr = lines.first(where: { $0.hasSuffix(" " + exactName) || $0.hasSuffix(" " + exactName + "\r") }) else {
+                continue
+            }
             
-            let parts = lineStr.split(whereSeparator: { $0.isWhitespace })
+            let cleanLine = lineStr.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+            let parts = cleanLine.split(whereSeparator: { $0.isWhitespace })
             guard parts.count >= 8 else { continue }
             
             let perms = String(parts[0])
@@ -444,20 +449,22 @@ class ADBManager {
             let size = UInt64(parts[4]) ?? 0
             
             // Parse date - Android ls -la typically shows: YYYY-MM-DD HH:MM
-            // parts[5] = date (2025-01-05), parts[6] = time (14:30)
             var modDate: Date? = nil
-            if parts.count >= 8 {
-                let dateStr = "\(parts[5]) \(parts[6])"
-                modDate = dateFormatter.date(from: dateStr)
+            if parts.count >= 7 {
+                // Find where the date looks like YYYY-MM-DD
+                for i in 4..<(parts.count - 1) {
+                    let dateCandidate = String(parts[i])
+                    if dateCandidate.contains("-") && dateCandidate.count == 10 {
+                        let timeCandidate = String(parts[i+1])
+                        let dateStr = "\(dateCandidate) \(timeCandidate)"
+                        modDate = dateFormatter.date(from: dateStr)
+                        break
+                    }
+                }
             }
             
-            // Name starts at parts[7]
-            let name = parts[7...].joined(separator: " ")
-            
-            guard !name.isEmpty && name != "." && name != ".." else { continue }
-            
-            let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
-            files.append(ADBFile(name: name, path: fullPath, isDirectory: isDir, size: size, modificationDate: modDate))
+            let fullPath = path.hasSuffix("/") ? path + exactName : path + "/" + exactName
+            files.append(ADBFile(name: exactName, path: fullPath, isDirectory: isDir, size: size, modificationDate: modDate))
         }
         
         return files
@@ -728,40 +735,66 @@ class ADBManager {
         // Escape single quotes in the path
         let escapedPath = devicePath.replacingOccurrences(of: "'", with: "'\\''")
         
-        // Use rm -rf to delete files and folders recursively
+        // Strategy 1: Use rm -rf with single-quoted path (handles most cases)
         let command = "rm -rf '\(escapedPath)'"
-        
         let (code, _, error) = await Shell.runAsync(adbPath, args: deviceArgs(["shell", command]))
         
-        if code != 0 {
-            // Check for specific error types
-            if error.contains("Read-only file system") || error.contains("read-only") {
-                throw NSError(
-                    domain: "ADB",
-                    code: Int(code),
-                    userInfo: [NSLocalizedDescriptionKey: "Cannot delete: File system is read-only"]
-                )
-            } else if error.contains("Permission denied") || error.contains("permission denied") {
-                throw NSError(
-                    domain: "ADB",
-                    code: Int(code),
-                    userInfo: [NSLocalizedDescriptionKey: "Cannot delete: Permission denied"]
-                )
-            } else if error.contains("No such file") {
-                throw NSError(
-                    domain: "ADB",
-                    code: Int(code),
-                    userInfo: [NSLocalizedDescriptionKey: "File not found"]
-                )
-            } else {
-                throw NSError(
-                    domain: "ADB",
-                    code: Int(code),
-                    userInfo: [NSLocalizedDescriptionKey: error.isEmpty ? "Failed to delete file" : error]
-                )
-            }
+        // rm -rf with -f flag can return 0 even on failure, so verify the file is gone
+        let (_, checkOut, _) = await Shell.runAsync(
+            adbPath,
+            args: deviceArgs(["shell", "[ -e '\(escapedPath)' ] && echo EXISTS || echo GONE"])
+        )
+        let stillExists = checkOut.trimmingCharacters(in: .whitespacesAndNewlines) == "EXISTS"
+        
+        if !stillExists {
+            // Successfully deleted
+            return
         }
         
+        // Strategy 2: Pass rm and path as separate arguments (avoids shell re-parsing)
+        // This handles filenames with spaces, dots, and special characters better
+        print("⚠️ Delete: File still exists after rm -rf, retrying with separate args...")
+        let (code2, _, error2) = await Shell.runAsync(
+            adbPath,
+            args: deviceArgs(["shell", "rm", "-rf", devicePath])
+        )
+        
+        // Verify again
+        let (_, checkOut2, _) = await Shell.runAsync(
+            adbPath,
+            args: deviceArgs(["shell", "[ -e '\(escapedPath)' ] && echo EXISTS || echo GONE"])
+        )
+        let stillExists2 = checkOut2.trimmingCharacters(in: .whitespacesAndNewlines) == "EXISTS"
+        
+        if !stillExists2 {
+            return
+        }
+        
+        // Strategy 3: Try verbose rm without -f to capture the EXACT error message from Android
+        print("⚠️ Delete: Still exists, trying rm -rv without -f to capture error...")
+        let (code3, out3, err3) = await Shell.runAsync(
+            adbPath,
+            args: deviceArgs(["shell", "rm -rv '\(escapedPath)'"])
+        )
+        
+        // Final verification
+        let (_, checkOut3, _) = await Shell.runAsync(
+            adbPath,
+            args: deviceArgs(["shell", "[ -e '\(escapedPath)' ] && echo EXISTS || echo GONE"])
+        )
+        let stillExists3 = checkOut3.trimmingCharacters(in: .whitespacesAndNewlines) == "EXISTS"
+        
+        if stillExists3 {
+            // It failed. We now have the real error from rm -rv in err3 or out3.
+            let combinedOutput = "\(out3) \(err3)".trimmingCharacters(in: .whitespacesAndNewlines)
+            let finalErrorMsg = combinedOutput.isEmpty ? "Failed to delete: Unknown error or locked file" : "Failed to delete: \(combinedOutput)"
+            
+            throw NSError(
+                domain: "ADB",
+                code: Int(code3 != 0 ? code3 : -1),
+                userInfo: [NSLocalizedDescriptionKey: finalErrorMsg]
+            )
+        }
     }
     
     /// Renames or moves a file/folder on the Android device

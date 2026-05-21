@@ -104,7 +104,12 @@ struct ContentView: View {
     private var contentWithPresentations: some View {
         contentWithAlerts
             .sheet(isPresented: $showTrashView) {
-                TrashView(fileActionManager: fileActionManager)
+                TrashView(fileActionManager: fileActionManager, onStorageChanged: {
+                    Task { 
+                        await deviceManager.fetchStorageInfo() 
+                        await loadFiles()
+                    }
+                })
                     .frame(width: 450, height: 400)
             }
             .sheet(isPresented: $showWirelessConnect) {
@@ -138,18 +143,21 @@ struct ContentView: View {
                     Task {
                         try? await fileActionManager.resumePaste(resolution: .replace)
                         await loadFiles()
+                        await deviceManager.fetchStorageInfo()
                     }
                 }
                 Button("Keep Both") {
                     Task {
                         try? await fileActionManager.resumePaste(resolution: .keepBoth)
                         await loadFiles()
+                        await deviceManager.fetchStorageInfo()
                     }
                 }
                 Button("Skip", role: .cancel) {
                     Task {
                         try? await fileActionManager.resumePaste(resolution: .skip)
                         await loadFiles()
+                        await deviceManager.fetchStorageInfo()
                     }
                 }
             } message: {
@@ -412,6 +420,7 @@ struct ContentView: View {
                                 do {
                                     try await fileActionManager.createFolder(at: currentPath, name: name)
                                     await loadFiles()
+                                    await deviceManager.fetchStorageInfo()
                                 } catch { print("Failed: \(error)") }
                             }
                         }
@@ -435,6 +444,7 @@ struct ContentView: View {
                                 do {
                                     try await fileActionManager.createFile(at: currentPath, name: name)
                                     await loadFiles()
+                                    await deviceManager.fetchStorageInfo()
                                 } catch { print("Failed: \(error)") }
                             }
                         }
@@ -570,6 +580,7 @@ struct ContentView: View {
                     print("❌ Paste failed: \(error.localizedDescription)")
                 }
                 await loadFiles()
+                await deviceManager.fetchStorageInfo()
             }
         } else {
             // Finder drag-paste: read URLs from Mac pasteboard
@@ -589,6 +600,11 @@ struct ContentView: View {
             currentPath = await deviceManager.getRealStoragePath()
             await loadFiles()
         }
+    }
+    
+    /// Refreshes the sidebar storage stats (Internal Storage bar) after a file operation
+    private func refreshStorageStats() {
+        Task { await deviceManager.fetchStorageInfo() }
     }
     
     private func loadFiles() async {
@@ -806,6 +822,7 @@ struct ContentView: View {
 
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             await loadFiles()
+            await deviceManager.fetchStorageInfo()
         }
     }
 
@@ -817,6 +834,7 @@ struct ContentView: View {
                 
                 // Refresh file list after deletion
                 await loadFiles()
+                await deviceManager.fetchStorageInfo()
             } catch {
                 await MainActor.run {
                     errorMessage = error.localizedDescription
@@ -859,6 +877,7 @@ struct ContentView: View {
                 // Clear selection and refresh
                 selectedFiles.removeAll()
                 await loadFiles()
+                await deviceManager.fetchStorageInfo()
             } catch {
                 await MainActor.run {
                     errorMessage = error.localizedDescription
@@ -878,6 +897,7 @@ struct ContentView: View {
                 }
                 selectedFiles.removeAll()
                 await loadFiles()
+                await deviceManager.fetchStorageInfo()
             } catch {
                 await MainActor.run {
                     errorMessage = error.localizedDescription
