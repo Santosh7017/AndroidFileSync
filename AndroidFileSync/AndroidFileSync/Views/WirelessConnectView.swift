@@ -53,15 +53,30 @@ class ADBPairingBrowser: ObservableObject {
     
     private var pairingBrowser: NWBrowser?
     private var connectBrowser: NWBrowser?
+    private var isBrowsing = false
+    private static var isBrowsingGlobally = false
     
     private var mdnsPollTimer: Timer?
     
     private let queue = DispatchQueue(label: "com.androidfilesync.adb.mdns")
     
     func startBrowsing() {
-        // Cancel existing browsers before restarting
+        if Self.isBrowsingGlobally {
+            return
+        }
+        // Avoid tearing down and recreating browsers repeatedly from repeated onAppear events.
+        if isBrowsing, pairingBrowser != nil || connectBrowser != nil {
+            return
+        }
+        // Cancel any stale browser instances before starting.
         pairingBrowser?.cancel()
         connectBrowser?.cancel()
+        pairingBrowser = nil
+        connectBrowser = nil
+        mdnsPollTimer?.invalidate()
+        mdnsPollTimer = nil
+        isBrowsing = true
+        Self.isBrowsingGlobally = true
         
         print("📶 NWBrowser: Browsing for _adb-tls-pairing._tcp + _adb-tls-connect._tcp...")
 
@@ -165,6 +180,8 @@ class ADBPairingBrowser: ObservableObject {
         connectBrowser = nil
         mdnsPollTimer?.invalidate()
         mdnsPollTimer = nil
+        isBrowsing = false
+        Self.isBrowsingGlobally = false
         
         DispatchQueue.main.async {
             if self.status == .searching {
@@ -213,16 +230,21 @@ class ADBPairingBrowser: ObservableObject {
                     ?? s.components(separatedBy: " ").first?.trimmingCharacters(in: .whitespaces)
             }
 
-            let (code, output, _) = await Shell.runAsyncWithTimeout(
-                adbPath, args: ["mdns", "services"], timeoutSeconds: 3.0
-            )
-            guard code == 0 else { return }
+            let (code, output, _) = await ADBManager.mdnsServicesWithRecovery()
+            guard code == 0 else {
+                print("📶 NWBrowser: adb mdns services failed with code \(code)")
+                return
+            }
+            let mdnsTrimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            print("📶 NWBrowser: adb mdns services output:\n\(mdnsTrimmed.isEmpty ? "<empty>" : mdnsTrimmed)")
 
+            var discoveredCount = 0
             for line in output.split(separator: "\n") {
                 let str = String(line)
                 let isPairingService = str.contains("_adb-tls-pairing._tcp")
                 let isConnectService = str.contains("_adb-tls-connect._tcp")
                 guard isPairingService || isConnectService else { continue }
+                discoveredCount += 1
 
                 let parts = str.split(whereSeparator: { $0 == "\t" || $0 == " " }).map(String.init)
 
@@ -297,6 +319,7 @@ class ADBPairingBrowser: ObservableObject {
                     self.evaluateStatus()
                 }
             }
+            print("📶 NWBrowser: parsed \(discoveredCount) discoverable ADB service lines")
         }
     }
     
@@ -677,8 +700,6 @@ struct WirelessConnectView: View {
         }
         .onAppear {
             showRescanWhileConnected = false
-            // Start discovery unconditionally so we instantly detect if devices connect/disconnect
-            pairingBrowser.startBrowsing()
             // Re-validate connection state (catches stale wireless connections)
             Task { await deviceManager.detectDevice() }
         }
@@ -691,31 +712,25 @@ struct WirelessConnectView: View {
     private var discoveredDevicesPanel: some View {
         // Exclude devices already displayed elsewhere in this dialog:
         // 1. The active WiFi device (shown in the Connected card)
-        // 2. When USB-connected: wireless devices from availableDevices
-        //    (shown in "Also Available via WiFi" with Switch buttons)
-        //    When WiFi-connected: only the active device — other wireless
-        //    devices are NOT shown in "Also Connected via USB", so they
-        //    must remain in discovery.
+        // 2. Any wireless device already present in availableDevices
+        //    (shown in "Other available devices"), so we don't show duplicates.
+        let availableWireless = deviceManager.availableDevices.filter { $0.isWireless }
         let excludedIPs: Set<String> = {
             var ips = Set<String>()
-            guard deviceManager.isConnected else { return ips }
-
-            // Always exclude the active wireless device IP
-            let wip = deviceManager.lastWirelessIP
-            if !wip.isEmpty { ips.insert(wip) }
-            if let serial = ADBManager.activeDeviceSerial,
-               ADBManager.isWirelessSerial(serial),
-               let ip = serial.components(separatedBy: ":").first, ip.contains(".") {
-                ips.insert(ip)
+            if deviceManager.isConnected {
+                // Always exclude the active wireless device IP
+                let wip = deviceManager.lastWirelessIP
+                if !wip.isEmpty { ips.insert(wip) }
+                if let serial = ADBManager.activeDeviceSerial,
+                   ADBManager.isWirelessSerial(serial),
+                   let ip = serial.components(separatedBy: ":").first, ip.contains(".") {
+                    ips.insert(ip)
+                }
             }
-
-            // Only exclude other wireless devices when connected via USB
-            // (because they're shown in "Also Available via WiFi" section)
-            if deviceManager.connectionType == .usb {
-                for dev in deviceManager.availableDevices where dev.isWireless {
-                    if let ip = dev.serial.components(separatedBy: ":").first, ip.contains(".") {
-                        ips.insert(ip)
-                    }
+            // Exclude any discovered IP already represented in available wireless devices
+            for dev in availableWireless {
+                if let ip = dev.ipAddress, !ip.isEmpty {
+                    ips.insert(ip)
                 }
             }
             return ips
@@ -723,7 +738,15 @@ struct WirelessConnectView: View {
         let sortedKeys = pairingBrowser.discoveredDevices.keys
             .filter { key in
                 guard let device = pairingBrowser.discoveredDevices[key] else { return false }
-                return !excludedIPs.contains(device.ip)
+                if excludedIPs.contains(device.ip) { return false }
+                // For ADB 37+ mDNS serials, availableDevices may not embed IP.
+                // Match by stable service name where possible.
+                if let svc = device.serviceName, !svc.isEmpty {
+                    if availableWireless.contains(where: { $0.serial.hasPrefix(svc + "._adb-tls-connect._tcp") || $0.serial.hasPrefix(svc + "._adb-tls-pairing._tcp") }) {
+                        return false
+                    }
+                }
+                return true
             }
             .sorted()
         let activeKey: String = {
@@ -1152,6 +1175,12 @@ struct WirelessConnectView: View {
                         let devIsWireless = dev.isWireless
                         let devColor: Color = devIsWireless ? .green : .blue
                         let devIcon = devIsWireless ? "wifi" : "cable.connector"
+                        let secondaryText: String = {
+                            if let ip = dev.ipAddress, !ip.isEmpty {
+                                return ip
+                            }
+                            return devIsWireless ? "Wireless Debugging" : "USB Device"
+                        }()
                         Button(action: {
                             Task { await deviceManager.switchToDevice(serial: dev.serial); dismiss() }
                         }) {
@@ -1163,7 +1192,7 @@ struct WirelessConnectView: View {
                                 }
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(dev.displayName).font(.subheadline.weight(.medium))
-                                    Text(dev.ipAddress ?? dev.serial)
+                                    Text(secondaryText)
                                         .font(.caption).foregroundColor(.secondary).lineLimit(1)
                                 }
                                 Spacer()
@@ -1431,16 +1460,18 @@ struct WirelessConnectView: View {
                 ADBPairingBrowser.needsRepairing.remove(device.ip)
             }
             
-            // Give Android a moment to update internal state
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-            
-            // Try connecting with the discovered Connect Port, falling back to discovered Pairing Port if none
-            var targetConnectPort = device.connectPort != nil ? String(device.connectPort!) : "5555"
-            var fallbackPorts = [targetConnectPort]
-            if targetConnectPort != "5555" { fallbackPorts.append("5555") }
-            if let pPort = device.pairingPort {
-                fallbackPorts.append(String(pPort))
+            // After pairing, _adb-tls-connect may appear after a delay.
+            // Poll for the actual connect port instead of immediately jumping to 5555.
+            let resolvedConnectPort = await waitForConnectPort(ip: device.ip, hostname: device.hostname)
+            var fallbackPorts: [String] = []
+            if let resolvedConnectPort {
+                fallbackPorts.append(String(resolvedConnectPort))
             }
+            if let currentKnown = pairingBrowser.discoveredDevices[selectedDeviceIP]?.connectPort {
+                let s = String(currentKnown)
+                if !fallbackPorts.contains(s) { fallbackPorts.append(s) }
+            }
+            if !fallbackPorts.contains("5555") { fallbackPorts.append("5555") }
             
             for tryPort in fallbackPorts {
                 let (s, _) = await deviceManager.connectWirelessly(
@@ -1460,15 +1491,50 @@ struct WirelessConnectView: View {
                 }
             }
             
-            // Connected successfully but couldn't auto-connect the daemon, which is common
+            // Pairing succeeded, but connection failed on all candidate ports.
+            // Keep the dialog open and show a clear action path instead of false success.
             await MainActor.run {
-                pairingBrowser.status = .paired
-                onConnected?()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                    dismiss()
+                ADBPairingBrowser.needsRepairing.insert(device.ip)
+                if var dev = pairingBrowser.discoveredDevices[selectedDeviceIP] {
+                    dev.verifiedPaired = false
+                    pairingBrowser.discoveredDevices[selectedDeviceIP] = dev
                 }
+                pairingBrowser.status = .failed("Paired, but connection could not be established. Verify the current connect port in Wireless Debugging and tap Connect.")
             }
         }
+    }
+
+    /// Waits briefly for `_adb-tls-connect._tcp` to appear after successful pairing.
+    /// Returns discovered connect port for this device, or nil if not seen.
+    private func waitForConnectPort(ip: String, hostname: String?) async -> UInt16? {
+        let adbPath = ADBManager.getADBPath()
+        guard !adbPath.isEmpty else { return nil }
+
+        for _ in 1...20 {
+            let (code, output, _) = await ADBManager.mdnsServicesWithRecovery(allowRecovery: false)
+            if code == 0 {
+                for line in output.split(separator: "\n") {
+                    let str = String(line)
+                    guard str.contains("_adb-tls-connect._tcp") else { continue }
+                    let parts = str.split(whereSeparator: { $0 == "\t" || $0 == " " }).map(String.init)
+                    let lineHost = parts.last.flatMap { $0.hasSuffix(".local") ? $0 : nil }
+                    guard let ipPortString = parts.first(where: { part in
+                        let comps = part.split(separator: ":")
+                        return comps.count >= 2 && UInt16(comps.last ?? "") != nil
+                    }) else { continue }
+                    let comps = ipPortString.split(separator: ":")
+                    guard let last = comps.last, let port = UInt16(last) else { continue }
+                    let lineIP = comps.dropLast().joined(separator: ":")
+                    let hostMatch = (hostname != nil && lineHost == hostname)
+                    let ipMatch = lineIP == ip
+                    if hostMatch || ipMatch {
+                        return port
+                    }
+                }
+            }
+            try? await Task.sleep(nanoseconds: 750_000_000)
+        }
+        return nil
     }
     
     // MARK: - Manual Tab

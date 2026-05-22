@@ -17,6 +17,10 @@ class ADBManager {
     
     // Track if we've already attempted a server restart this session
     private static var hasRestarted = false
+    /// Cooldown for mDNS recovery restarts so we don't thrash ADB daemon.
+    private static var lastMDNSRecoveryAt: Date?
+    /// Wireless endpoints this app connected to in current session.
+    private static var appManagedWirelessTargets = Set<String>()
     
     /// Returns args with -s <serial> prepended if a device serial is set
     static func deviceArgs(_ args: [String]) -> [String] {
@@ -77,6 +81,11 @@ class ADBManager {
         activeDeviceSerial = serial
         print("📱 ADB: Switched active device to \(serial)")
     }
+
+    static func markAppManagedWirelessTarget(_ target: String) {
+        guard isWirelessSerial(target) else { return }
+        appManagedWirelessTargets.insert(target)
+    }
     
     // MARK: - ADB Server Management
     
@@ -85,8 +94,6 @@ class ADBManager {
         let lower = output.lowercased()
         return lower.contains("protocol fault") ||
                lower.contains("couldn't read status") ||
-               lower.contains("connection reset") ||
-               lower.contains("connection refused") ||
                lower.contains("cannot connect to daemon") ||
                lower.contains("adb server didn't ack") ||
                lower.contains("adb server version") ||
@@ -125,6 +132,42 @@ class ADBManager {
         
         hasRestarted = true
         return success
+    }
+
+    /// Runs `adb mdns services` with optional daemon recovery.
+    /// Returns raw command tuple (exitCode, stdout, stderr).
+    static func mdnsServicesWithRecovery(allowRecovery: Bool = true) async -> (Int32, String, String) {
+        let adbPath = getADBPath()
+        guard !adbPath.isEmpty else { return (-1, "", "ADB not found") }
+
+        func runOnce() async -> (Int32, String, String) {
+            await Shell.runAsyncWithTimeout(adbPath, args: ["mdns", "services"], timeoutSeconds: 3.0)
+        }
+
+        let first = await runOnce()
+        let combinedLower = (first.1 + first.2).lowercased()
+        // Empty mDNS output is common when no device is currently advertising.
+        // Only recover the daemon if command failed or output indicates daemon/protocol faults.
+        let shouldRecover = allowRecovery && (first.0 != 0 || isProtocolError(combinedLower))
+        if !shouldRecover {
+            return first
+        }
+
+        let now = Date()
+        let canRecover: Bool = {
+            guard let last = lastMDNSRecoveryAt else { return true }
+            return now.timeIntervalSince(last) > 8.0
+        }()
+        guard canRecover else {
+            return first
+        }
+
+        lastMDNSRecoveryAt = now
+        print("🔄 ADB: mDNS output empty/stale, restarting daemon and retrying mdns services...")
+        let restarted = await restartServer()
+        guard restarted else { return first }
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        return await runOnce()
     }
 
     static func getADBPath() -> String {
@@ -1156,20 +1199,97 @@ class ADBManager {
     ///   - port: Connection port (shown in wireless debugging settings)
     ///   - hostname: Optional mDNS hostname, e.g. "adb-XXXX.local" (ADB 37+)
     /// - Returns: Tuple of (success, message)
-    static func connectWireless(ip: String, port: String = "5555", hostname: String? = nil) async -> (Bool, String) {
+    static func connectWireless(ip: String, port: String = "5555", hostname: String? = nil) async -> (Bool, String, String?) {
         let adbPath = getADBPath()
         guard !adbPath.isEmpty else {
-            return (false, "ADB not found")
+            return (false, "ADB not found", nil)
+        }
+
+        // Build an ordered list of connect targets.
+        // Wireless debugging ports rotate frequently. After pairing, the connect
+        // service can take a few seconds to appear, so we poll mdns services
+        // briefly before falling back to the caller-provided port.
+        func buildTargets() async -> [String] {
+            var targets: [String] = []
+            var seen = Set<String>()
+
+            func appendTarget(_ value: String?) {
+                guard let value, !value.isEmpty else { return }
+                if !seen.contains(value) {
+                    seen.insert(value)
+                    targets.append(value)
+                }
+            }
+
+            // 1) Most stable on ADB 37+ is hostname + port.
+            if let host = hostname, !host.isEmpty {
+                appendTarget("\(host):\(port)")
+            }
+
+            // 2) Direct IP + provided port.
+            appendTarget("\(ip):\(port)")
+
+            // 3) Ask adb mdns services for fresh connect endpoints for this device.
+            // Poll briefly because _adb-tls-connect often appears a bit later than pairing.
+            var foundDynamicTarget = false
+            for attempt in 1...8 {
+                let (mdnsCode, mdnsOutput, _) = await mdnsServicesWithRecovery(allowRecovery: false)
+                if mdnsCode == 0 {
+                    let lines = mdnsOutput.split(separator: "\n").map(String.init)
+                    for line in lines where line.contains("_adb-tls-connect._tcp") {
+                        let parts = line.split(whereSeparator: { $0 == "\t" || $0 == " " }).map(String.init)
+
+                        let lineServiceName: String? = parts.first.flatMap { $0.hasPrefix("adb-") ? $0 : nil }
+                        let lineIPPort: String? = parts.first(where: { item in
+                            let comps = item.split(separator: ":")
+                            return comps.count >= 2 && UInt16(comps.last ?? "") != nil
+                        })
+                        let lineHost: String? = parts.last.flatMap { $0.hasSuffix(".local") ? $0 : nil }
+
+                        let serviceMatch = (hostname != nil && lineHost == hostname) || (lineServiceName != nil && lineHost == hostname)
+                        let ipMatch = lineIPPort?.hasPrefix(ip + ":") == true
+                        guard serviceMatch || ipMatch else { continue }
+
+                        foundDynamicTarget = true
+                        if let host = lineHost, let portPart = lineIPPort?.split(separator: ":").last {
+                            appendTarget("\(host):\(portPart)")
+                        }
+                        appendTarget(lineIPPort)
+                    }
+                }
+                if foundDynamicTarget { break }
+                if attempt < 8 {
+                    try? await Task.sleep(nanoseconds: 750_000_000)
+                }
+            }
+
+            // 4) Last resort legacy port.
+            appendTarget("\(ip):5555")
+            return targets
         }
 
         // Helper: attempt a single adb connect and return whether it succeeded
         func attempt(target: String) async -> (Bool, String) {
             print("📶 ADB: Connecting to \(target)...")
-            let (exitCode, output, error) = await Shell.runAsyncWithTimeout(
+            var (exitCode, output, error) = await Shell.runAsyncWithTimeout(
                 adbPath, args: ["connect", target], timeoutSeconds: 10.0
             )
-            let combined = output + error
+            var combined = output + error
             print("📶 ADB Connect result: code=\(exitCode), output=\(combined)")
+
+            // Auto-recover from stale protocol state.
+            if isProtocolError(combined) {
+                print("🔄 ADB: Protocol fault during connect, restarting server and retrying...")
+                let restarted = await restartServer()
+                if restarted {
+                    (exitCode, output, error) = await Shell.runAsyncWithTimeout(
+                        adbPath, args: ["connect", target], timeoutSeconds: 10.0
+                    )
+                    combined = output + error
+                    print("📶 ADB Connect retry result: code=\(exitCode), output=\(combined)")
+                }
+            }
+
             let lower = combined.lowercased()
             if lower.contains("connected to") || lower.contains("already connected") {
                 return (true, combined)
@@ -1180,23 +1300,14 @@ class ADBManager {
             return (exitCode == 0, combined)
         }
 
-        // 1. Try the stable .local hostname first (ADB 37+)
-        if let host = hostname, !host.isEmpty {
-            let hostnameTarget = "\(host):\(port)"
-            let (success, msg) = await attempt(target: hostnameTarget)
+        let targets = await buildTargets()
+        for target in targets {
+            let (success, _) = await attempt(target: target)
             if success {
-                return (true, "Connected to \(hostnameTarget)")
+                return (true, "Connected to \(target)", target)
             }
-            print("📶 ADB: hostname connect failed (\(msg)), falling back to IP...")
         }
-
-        // 2. Fall back to raw IP:port
-        let ipTarget = "\(ip):\(port)"
-        let (success, msg) = await attempt(target: ipTarget)
-        if success {
-            return (true, "Connected to \(ipTarget)")
-        }
-        return (false, "Cannot connect to \(ipTarget). Make sure Wireless Debugging is enabled.")
+        return (false, "Cannot connect to \(ip). Make sure Wireless Debugging is enabled and re-open 'Pair device with pairing code'.", nil)
     }
     
     /// Disconnects from a wireless device
@@ -1236,6 +1347,38 @@ class ADBManager {
             activeDeviceSerial = nil
         }
         return result
+    }
+
+    /// Disconnect only app-managed wireless sessions so we don't disturb other ADB clients.
+    static func disconnectAppManagedWireless() async {
+        let adbPath = getADBPath()
+        guard !adbPath.isEmpty else { return }
+
+        var targets = appManagedWirelessTargets
+        if let active = activeDeviceSerial, isWirelessSerial(active) {
+            targets.insert(active)
+        }
+
+        for target in targets {
+            _ = await Shell.runAsyncWithTimeout(adbPath, args: ["disconnect", target], timeoutSeconds: 3.0)
+        }
+        appManagedWirelessTargets.removeAll()
+    }
+
+    /// Synchronous variant for app termination, so disconnect finishes before process exits.
+    static func disconnectAppManagedWirelessSync() {
+        let adbPath = getADBPath()
+        guard !adbPath.isEmpty else { return }
+
+        var targets = appManagedWirelessTargets
+        if let active = activeDeviceSerial, isWirelessSerial(active) {
+            targets.insert(active)
+        }
+
+        for target in targets {
+            _ = Shell.run(adbPath, args: ["disconnect", target])
+        }
+        appManagedWirelessTargets.removeAll()
     }
     
     /// Checks if the currently active device is via wireless (IP:port format)
@@ -1355,4 +1498,3 @@ class ADBManager {
         return info
     }
 }
-

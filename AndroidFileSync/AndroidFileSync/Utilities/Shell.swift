@@ -1,11 +1,17 @@
 import Foundation
 
 struct Shell {
+    /// Dedicated ADB server port used by this app to avoid interfering with other tools.
+    /// Any adb process started by app commands will use this private server.
+    private static let appADBServerPort = 56037
+
     /// Environment variables applied to ALL processes launched by Shell.
-    /// ADB_MDNS_AUTO_CONNECT=0 prevents ADB server from auto-connecting to
-    /// all previously paired devices on the network.
+    /// We isolate adb to a private server and disable adb's automatic mDNS auto-connect
+    /// so the app controls when connections are established.
     private static var adbEnvironment: [String: String] {
         var env = ProcessInfo.processInfo.environment
+        env["ANDROID_ADB_SERVER_PORT"] = String(appADBServerPort)
+        env["ADB_SERVER_PORT"] = String(appADBServerPort)
         env["ADB_MDNS_AUTO_CONNECT"] = "0"
         return env
     }
@@ -289,4 +295,3 @@ struct Shell {
     }
 
 }
-
