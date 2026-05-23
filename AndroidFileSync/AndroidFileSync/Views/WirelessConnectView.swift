@@ -1582,43 +1582,50 @@ struct WirelessConnectView: View {
     
     private var manualInputFields: some View {
         VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Device IP Address")
+            VStack(alignment: .leading, spacing: 6) {
+                Text("IP Address")
                     .font(.subheadline.weight(.medium))
                 TextField("e.g. 192.168.1.100", text: $ipAddress)
                     .textFieldStyle(.roundedBorder)
+                Text("Find this on your phone in Wireless Debugging.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
-            
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Connection Port")
+                    .font(.subheadline.weight(.medium))
+                TextField("e.g. 41235", text: $connectPort)
+                    .textFieldStyle(.roundedBorder)
+                Text("Use the port shown in Wireless Debugging under IP address & Port (not the pairing screen).")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
             if !showConnectOnly {
-                HStack(spacing: 12) {
-                    VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 6) {
                         Text("Pairing Port")
                             .font(.subheadline.weight(.medium))
                         TextField("e.g. 37215", text: $pairingPort)
                             .textFieldStyle(.roundedBorder)
+                        Text("Shown on 'Pair device with pairing code' screen e.g.(xxx.xxx.x.xx:37215)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
-                    
-                    VStack(alignment: .leading, spacing: 4) {
+
+                    VStack(alignment: .leading, spacing: 6) {
                         Text("Pairing Code")
                             .font(.subheadline.weight(.medium))
                         TextField("e.g. 482604", text: $pairingCode)
                             .textFieldStyle(.roundedBorder)
+                        Text("Enter the 6-digit code from 'Pair device with pairing code'.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
                 }
             }
-            
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Connection Port")
-                    .font(.subheadline.weight(.medium))
-                HStack {
-                    TextField("e.g. 41235", text: $connectPort)
-                        .textFieldStyle(.roundedBorder)
-                    Text("(shown under Wireless Debugging)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-            }
-            
+
             Toggle(isOn: $showConnectOnly) {
                 Text("Already paired — just connect")
                     .font(.subheadline)

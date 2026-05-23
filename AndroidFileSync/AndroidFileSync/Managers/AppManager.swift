@@ -5,6 +5,7 @@ import Foundation
 import AppKit
 internal import Combine
 import UniformTypeIdentifiers
+import UserNotifications
 
 @MainActor
 class AppManager: ObservableObject {
@@ -15,6 +16,11 @@ class AppManager: ObservableObject {
     @Published var isLoading = false
     @Published var errorMessage: String? = nil
     @Published var statusMessage: String = ""
+    @Published var isGlobalOperationInProgress = false
+    @Published var globalOperationMessage: String = ""
+    @Published var globalOperationShowsSpinner = false
+    @Published var globalOperationIsError = false
+    @Published var globalResultMessage: String? = nil
     /// Per-package size info — populated lazily after list loads
     @Published var appSizes: [String: AppSizeInfo] = [:]
     @Published var isFetchingSizes = false
@@ -596,6 +602,8 @@ class AppManager: ObservableObject {
     
     /// Uninstall a user-installed app completely.
     func uninstall(package: String) async -> (Bool, String) {
+        beginGlobalOperation("Uninstalling app…")
+        defer { endGlobalOperation() }
         let adbPath = ADBManager.getADBPath()
         let (_, output, _) = await Shell.runAsync(
             adbPath,
@@ -608,6 +616,8 @@ class AppManager: ObservableObject {
     /// Disable a system app for the current user (does not require root).
     /// The app is hidden/removed from launcher but not deleted from the system partition.
     func disableSystemApp(package: String) async -> (Bool, String) {
+        beginGlobalOperation("Disabling app…")
+        defer { endGlobalOperation() }
         let adbPath = ADBManager.getADBPath()
         let (_, output, _) = await Shell.runAsync(
             adbPath,
@@ -619,6 +629,8 @@ class AppManager: ObservableObject {
 
     /// Re-enable a previously disabled system app.
     func enableApp(package: String) async -> (Bool, String) {
+        beginGlobalOperation("Enabling app…")
+        defer { endGlobalOperation() }
         let adbPath = ADBManager.getADBPath()
         let (_, output, _) = await Shell.runAsync(
             adbPath,
@@ -630,8 +642,68 @@ class AppManager: ObservableObject {
 
     // MARK: - APK Backup
 
+    private func beginGlobalOperation(_ message: String) {
+        isGlobalOperationInProgress = true
+        globalOperationMessage = message
+        globalOperationShowsSpinner = true
+        globalOperationIsError = false
+    }
+
+    private func endGlobalOperation() {
+        isGlobalOperationInProgress = false
+        globalOperationMessage = ""
+        globalOperationShowsSpinner = false
+        globalOperationIsError = false
+    }
+
+    private func showGlobalOperationCompletion(_ message: String, isError: Bool = false) {
+        isGlobalOperationInProgress = true
+        globalOperationMessage = message
+        globalOperationShowsSpinner = false
+        globalOperationIsError = isError
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            if !globalOperationShowsSpinner && globalOperationMessage == message {
+                endGlobalOperation()
+            }
+        }
+    }
+
+    private func postCompletionNotification(title: String, body: String) {
+        let center = UNUserNotificationCenter.current()
+
+        let send: () -> Void = {
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            content.sound = .default
+            let request = UNNotificationRequest(
+                identifier: "androidfilesync." + UUID().uuidString,
+                content: content,
+                trigger: nil
+            )
+            center.add(request)
+        }
+
+        center.getNotificationSettings { settings in
+            switch settings.authorizationStatus {
+            case .authorized, .provisional, .ephemeral:
+                send()
+            case .notDetermined:
+                center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+                    if granted { send() }
+                }
+            default:
+                break
+            }
+        }
+    }
+
     /// Extracts the APK of a given package from the device and saves it to a Mac folder.
     func backupAPK(package: String, displayName: String) async -> (Bool, String) {
+        beginGlobalOperation("Backing up app…")
+        defer { endGlobalOperation() }
         let adbPath = ADBManager.getADBPath()
 
         // Step 1: Get the APK path on device
@@ -651,7 +723,15 @@ class AppManager: ObservableObject {
         // Step 2: Ask user where to save
         let panel = NSSavePanel()
         panel.title = "Save APK Backup"
-        panel.nameFieldStringValue = "\(displayName).apk"
+        var baseName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        while baseName.lowercased().hasSuffix(".apk") {
+            baseName = String(baseName.dropLast(4)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if baseName.isEmpty {
+            baseName = package.components(separatedBy: ".").last ?? "app-backup"
+        }
+        // Leave extension out of the typed name. SavePanel appends .apk from allowedContentTypes.
+        panel.nameFieldStringValue = baseName
         panel.allowedContentTypes = [.init(filenameExtension: "apk") ?? .data]
 
         guard await panel.beginSheetModal(for: NSApp.keyWindow ?? NSWindow()) == .OK,
@@ -660,31 +740,61 @@ class AppManager: ObservableObject {
         }
 
         // Step 3: Pull the file
-        let (_, pullOut, pullErr) = await Shell.runAsync(
+        let (code, pullOut, pullErr) = await Shell.runAsync(
             adbPath,
             args: ADBManager.deviceArgs(["pull", apkDevicePath, saveURL.path])
         )
-        let success = pullOut.contains("pulled") || pullErr.isEmpty
-        return (success, success ? "APK saved to \(saveURL.lastPathComponent)" : pullErr)
+
+        let combined = (pullOut + "\n" + pullErr).lowercased()
+        let success = code == 0 || combined.contains("1 file pulled") || combined.contains("already exists")
+        guard success else {
+            let err = pullErr.trimmingCharacters(in: .whitespacesAndNewlines)
+            let out = pullOut.trimmingCharacters(in: .whitespacesAndNewlines)
+            let message = err.isEmpty ? (out.isEmpty ? "Backup failed." : out) : err
+            postCompletionNotification(title: "Backup failed", body: message)
+            return (false, message)
+        }
+
+        let fileSizeText: String = {
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: saveURL.path),
+               let bytes = attrs[.size] as? NSNumber {
+                let formatter = ByteCountFormatter()
+                formatter.allowedUnits = [.useKB, .useMB, .useGB]
+                formatter.countStyle = .file
+                return formatter.string(fromByteCount: bytes.int64Value)
+            }
+            return ""
+        }()
+
+        let sizeSuffix = fileSizeText.isEmpty ? "" : " (\(fileSizeText))"
+        let message = "Backup completed: \(saveURL.lastPathComponent)\(sizeSuffix)."
+        postCompletionNotification(title: "APK backup complete", body: message)
+        globalResultMessage = message
+        return (true, message)
     }
 
     // MARK: - Install APK
 
     /// Install an APK from the Mac onto the device.
     func installAPK(from url: URL) async -> (Bool, String) {
+        beginGlobalOperation("Installing APK…")
         let adbPath = ADBManager.getADBPath()
         let (_, output, err) = await Shell.runAsync(
             adbPath,
             args: ADBManager.deviceArgs(["install", "-r", url.path])
         )
         let success = output.contains("Success")
-        return (success, success ? "Installed successfully." : (err.isEmpty ? output : err))
+        let message = success ? "Installed successfully." : (err.isEmpty ? output : err)
+        showGlobalOperationCompletion(success ? "Installation completed" : "Installation failed", isError: !success)
+        return (success, message)
     }
 
     // MARK: - Clear App Data
 
     /// Clears all app data AND cache (equivalent to Settings → App Info → Clear Data).
     func clearData(package: String) async -> (Bool, String) {
+        beginGlobalOperation("Clearing app data…")
+        defer { endGlobalOperation() }
         let adbPath = ADBManager.getADBPath()
         let (_, output, _) = await Shell.runAsync(
             adbPath,
@@ -698,6 +808,8 @@ class AppManager: ObservableObject {
     /// Note: internal cache (/data/data/<pkg>/cache) requires root to clear individually;
     /// use clearData() to wipe everything including internal cache.
     func clearCache(package: String) async -> (Bool, String) {
+        beginGlobalOperation("Clearing app cache…")
+        defer { endGlobalOperation() }
         let adbPath = ADBManager.getADBPath()
         // External cache is accessible without root
         let extCache = "/storage/emulated/0/Android/data/\(package)/cache"
@@ -716,6 +828,8 @@ class AppManager: ObservableObject {
     // MARK: - Force Stop
 
     func forceStop(package: String) async -> (Bool, String) {
+        beginGlobalOperation("Stopping app…")
+        defer { endGlobalOperation() }
         let adbPath = ADBManager.getADBPath()
         let (code, _, _) = await Shell.runAsync(
             adbPath,

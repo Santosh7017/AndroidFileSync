@@ -23,6 +23,7 @@ struct AppBrowserView: View {
     @State private var showActionConfirm = false
 
     @State private var batchProgress: (current: Int, total: Int)? = nil
+    @State private var progressActionLabelOverride: String? = nil
 
     enum AppSortOption: String, CaseIterable {
         case name    = "Name"
@@ -314,6 +315,8 @@ struct AppBrowserView: View {
             showResult(msg)
 
         case .backupAPK:
+            // Single-app backup uses the global progress banner from AppManager.
+            // Avoid local batchProgress here to prevent duplicate/stale banners.
             let (_, msg) = await appManager.backupAPK(package: app.packageName, displayName: app.displayName)
             showResult(msg)
 
@@ -327,29 +330,21 @@ struct AppBrowserView: View {
     private func executeAction(_ action: AppAction, app: AppInfo) async {
         switch action {
         case .uninstall:
-            batchProgress = (0, 1)
             let (ok, msg) = await appManager.uninstall(package: app.packageName)
-            batchProgress = nil
             if ok { await appManager.fetchApps(filter: selectedFilter) }
             showResult(msg)
 
         case .disable:
-            batchProgress = (0, 1)
             let (ok, msg) = await appManager.disableSystemApp(package: app.packageName)
-            batchProgress = nil
             if ok { await appManager.fetchApps(filter: selectedFilter) }
             showResult(msg)
 
         case .clearData:
-            batchProgress = (0, 1)
             let (_, msg) = await appManager.clearData(package: app.packageName)
-            batchProgress = nil
             showResult(msg)
 
         case .clearCache:
-            batchProgress = (0, 1)
             let (_, msg) = await appManager.clearCache(package: app.packageName)
-            batchProgress = nil
             showResult(msg)
 
         default:
@@ -448,6 +443,7 @@ struct AppBrowserView: View {
     private func performBatchAction() async {
         let total = selectedPackages.count
         var current = 0
+        progressActionLabelOverride = nil
         batchProgress = (current, total)
         
         switch selectedFilter {
@@ -496,9 +492,13 @@ struct AppBrowserView: View {
                 ? "All selected apps uninstalled successfully."
                 : "Some apps could not be uninstalled: \(failed.joined(separator: ", "))")
         }
+        progressActionLabelOverride = nil
     }
 
     private func batchActionStyle() -> (action: String, color: Color) {
+        if let override = progressActionLabelOverride {
+            return (override, .blue)
+        }
         switch selectedFilter {
         case .system:   return ("Disabling",    .orange)
         case .disabled: return ("Enabling",     .green)

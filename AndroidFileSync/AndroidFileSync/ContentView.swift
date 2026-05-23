@@ -35,6 +35,8 @@ struct ContentView: View {
     
     // Paste conflict alert
     @State private var showConflictAlert = false
+    @State private var showGlobalResultAlert = false
+    @State private var globalResultAlertMessage = ""
     
     // Multi-selection state
     @State private var selectedFiles: Set<UUID> = []
@@ -70,7 +72,21 @@ struct ContentView: View {
                 return sortAscending ? cmp == .orderedAscending : cmp == .orderedDescending
             }
         case .size:
-            result.sort { sortAscending ? $0.size < $1.size : $0.size > $1.size }
+            func effectiveSize(_ file: UnifiedFile) -> UInt64 {
+                if file.isDirectory {
+                    return folderSizes[file.path] ?? file.size
+                }
+                return file.size
+            }
+            result.sort {
+                let lhsSize = effectiveSize($0)
+                let rhsSize = effectiveSize($1)
+                if lhsSize != rhsSize {
+                    return sortAscending ? lhsSize < rhsSize : lhsSize > rhsSize
+                }
+                let cmp = $0.name.localizedCaseInsensitiveCompare($1.name)
+                return sortAscending ? cmp == .orderedAscending : cmp == .orderedDescending
+            }
         case .type:
             result.sort {
                 let t0 = $0.sortableType
@@ -94,6 +110,15 @@ struct ContentView: View {
     private func sortFiles(by option: ActionToolbar.SortOption, ascending: Bool = true) {
         sortOption = option
         sortAscending = ascending
+    }
+
+    private var globalOperationAccentColor: Color {
+        let message = appManager.globalOperationMessage.lowercased()
+        if message.contains("uninstall") || message.contains("delete") { return .red }
+        if message.contains("install") { return .green }
+        if message.contains("backup") || message.contains("download") { return .blue }
+        if message.contains("disable") || message.contains("clear") { return .orange }
+        return .secondary
     }
 
     var body: some View {
@@ -164,8 +189,20 @@ struct ContentView: View {
             } message: {
                 Text(pasteConflictMessage)
             }
+            .alert("Result", isPresented: $showGlobalResultAlert) {
+                Button("OK", role: .cancel) {
+                    appManager.globalResultMessage = nil
+                }
+            } message: {
+                Text(globalResultAlertMessage)
+            }
             .onChange(of: fileActionManager.pasteConflicts.count) { newCount in
                 showConflictAlert = newCount > 0
+            }
+            .onChange(of: appManager.globalResultMessage) { newValue in
+                guard let message = newValue, !message.isEmpty else { return }
+                globalResultAlertMessage = message
+                showGlobalResultAlert = true
             }
             .onChange(of: deviceManager.sdCardPath) { newPath in
                 sidebarManager.updateSDCard(path: newPath)
@@ -187,7 +224,6 @@ struct ContentView: View {
     // Level 3: layout + input modifiers
     private var layoutContent: some View {
         VStack(spacing: 0) {
-
             if deviceManager.isConnected {
                 connectedContent
             } else {
@@ -303,7 +339,32 @@ struct ContentView: View {
             )
             .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 300)
         } detail: {
-            ZStack {
+            VStack(spacing: 0) {
+                if appManager.isGlobalOperationInProgress {
+                    HStack(spacing: 8) {
+                        if appManager.globalOperationShowsSpinner {
+                            ProgressView()
+                                .tint(globalOperationAccentColor)
+                                .scaleEffect(0.65)
+                                .frame(width: 12, height: 12)
+                        } else {
+                            Image(systemName: appManager.globalOperationIsError ? "xmark.circle.fill" : "checkmark.circle.fill")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(appManager.globalOperationIsError ? .red : .green)
+                                .frame(width: 12, height: 12)
+                        }
+                        Text(appManager.globalOperationMessage)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(globalOperationAccentColor.opacity(0.08))
+                    Divider()
+                }
+
+                ZStack {
                 if let appFilter = activeAppFilter {
                     // ── App Browser ───────────────────────────────────────────
                     AppBrowserView(appManager: appManager, initialFilter: appFilter, deviceName: deviceManager.deviceName)
@@ -523,6 +584,7 @@ struct ContentView: View {
                 }
             }
             .searchable(text: $searchQuery, placement: .toolbar, prompt: "Search files...")
+            }
         }
     }
 
@@ -1137,4 +1199,3 @@ struct ContentView: View {
         }
     }
 }
-
