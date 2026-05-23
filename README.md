@@ -48,6 +48,13 @@ brew tap santosh7017/androidfilesync
 brew install --cask androidfilesync
 ```
 
+To update/upgrade to the latest version via Homebrew later, run:
+
+```bash
+brew update
+brew upgrade --cask androidfilesync
+```
+
 > **Note:** You don't need to run any `xattr` commands when installing with Homebrew. Just install and open!
 
 ### Install Manually (DMG)

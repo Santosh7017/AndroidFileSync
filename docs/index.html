@@ -170,20 +170,6 @@
             versionEl.textContent = latestVersion;
           }
         }
-
-        // Fetch stars info
-        const repoResponse = await fetch(`https://api.github.com/repos/${repo}`);
-        if (repoResponse.ok) {
-          const repoData = await repoResponse.json();
-          const stars = repoData.stargazers_count;
-          if (stars > 0) {
-            const badgeEl = document.getElementById('stars-badge');
-            if (starsEl && badgeEl) {
-              starsEl.textContent = stars.toLocaleString();
-              badgeEl.style.display = 'inline-block';
-            }
-          }
-        }
       } catch (error) {
         console.error('Error fetching GitHub stats:', error);
       }
