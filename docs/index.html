@@ -81,7 +81,8 @@
 
   <div class="badges">
     <div class="badge">macOS <span>13+</span></div>
-    <div class="badge">Version <span>2.0.0</span></div>
+    <div class="badge">Version <span id="version-span">2.3.0</span></div>
+    <div class="badge" id="download-badge" style="display: none;">Downloads: <span id="download-count">...</span>+</div>
     <div class="badge"><span>Free</span> &amp; Open Source</div>
     <div class="badge">No Cloud</div>
   </div>
@@ -130,5 +131,64 @@
     <a href="https://github.com/Santosh7017/AndroidFileSync" target="_blank">GitHub</a>
     <a href="mailto:santoshmorya400@gmail.com">Contact</a>
   </footer>
+
+  <script>
+    async function fetchGitHubStats() {
+      try {
+        const repo = 'Santosh7017/AndroidFileSync';
+        
+        // Fetch releases info
+        const releasesResponse = await fetch(`https://api.github.com/repos/${repo}/releases`);
+        if (releasesResponse.ok) {
+          const releases = await releasesResponse.json();
+          let totalDownloads = 0;
+          let latestVersion = '2.3.0';
+
+          if (releases.length > 0) {
+            latestVersion = releases[0].tag_name.replace(/^v/, '');
+          }
+
+          releases.forEach(release => {
+            if (release.assets) {
+              release.assets.forEach(asset => {
+                totalDownloads += (asset.download_count || 0);
+              });
+            }
+          });
+
+          if (totalDownloads > 0) {
+            const countEl = document.getElementById('download-count');
+            const badgeEl = document.getElementById('download-badge');
+            if (countEl && badgeEl) {
+              countEl.textContent = totalDownloads.toLocaleString();
+              badgeEl.style.display = 'inline-block';
+            }
+          }
+
+          const versionEl = document.getElementById('version-span');
+          if (versionEl) {
+            versionEl.textContent = latestVersion;
+          }
+        }
+
+        // Fetch stars info
+        const repoResponse = await fetch(`https://api.github.com/repos/${repo}`);
+        if (repoResponse.ok) {
+          const repoData = await repoResponse.json();
+          const stars = repoData.stargazers_count;
+          if (stars > 0) {
+            const badgeEl = document.getElementById('stars-badge');
+            if (starsEl && badgeEl) {
+              starsEl.textContent = stars.toLocaleString();
+              badgeEl.style.display = 'inline-block';
+            }
+          }
+        }
+      } catch (error) {
+        console.error('Error fetching GitHub stats:', error);
+      }
+    }
+    document.addEventListener('DOMContentLoaded', fetchGitHubStats);
+  </script>
 </body>
 </html>
