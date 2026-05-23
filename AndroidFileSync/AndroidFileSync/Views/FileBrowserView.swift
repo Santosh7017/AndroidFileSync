@@ -19,6 +19,8 @@ struct FileBrowserView: View, Equatable {
     let onDelete: ((UnifiedFile) -> Void)?
     let onRename: ((UnifiedFile, String) -> Void)?
     var onPreview: ((UnifiedFile) -> Void)? = nil
+    var isPerformingAction: Bool = false
+    var currentActionText: String = ""
     let onBatchDelete: (() -> Void)?
     let onBatchDownload: (() -> Void)?
     let onBatchChangeExtension: ((String) -> Void)?
@@ -44,6 +46,8 @@ struct FileBrowserView: View, Equatable {
         lhs.isLoading == rhs.isLoading &&
         lhs.canGoBack == rhs.canGoBack &&
         lhs.selectedFiles == rhs.selectedFiles &&
+        lhs.isPerformingAction == rhs.isPerformingAction &&
+        lhs.currentActionText == rhs.currentActionText &&
         lhs.sortOption == rhs.sortOption &&
         lhs.folderSizes == rhs.folderSizes
     }
@@ -148,8 +152,10 @@ struct FileBrowserView: View, Equatable {
             
             // Breadcrumb path
             breadcrumbPath
-            
-            Spacer()
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
+                .clipped()
+
+            inlineActionStatus
             
             // Item count
             if isLoading {
@@ -158,6 +164,7 @@ struct FileBrowserView: View, Equatable {
                 Text(files.count == 1 ? "1 item" : "\(files.count) items")
                     .font(.system(size: 13))
                     .foregroundColor(.secondary)
+                    .fixedSize()
             }
             
             Divider().frame(height: 16).padding(.horizontal, 10)
@@ -169,6 +176,7 @@ struct FileBrowserView: View, Equatable {
             .buttonStyle(.bordered)
             .controlSize(.small)
             .tint(.accentColor)
+            .fixedSize()
             .help("Upload files to this folder")
         }
         .padding(.horizontal, 12)
@@ -181,25 +189,41 @@ struct FileBrowserView: View, Equatable {
     
     // Breadcrumb segments built from current path
     private var breadcrumbPath: some View {
-        let segments = currentPath
-            .split(separator: "/", omittingEmptySubsequences: true)
-            .map(String.init)
+        let segments = displayPathSegments
         
         return HStack(spacing: 2) {
-            Text("/")
-                .font(.system(size: 14))
-                .foregroundColor(.secondary)
+            if segments.isEmpty {
+                Text("/")
+                    .font(.system(size: 14))
+                    .foregroundColor(.secondary)
+            }
             
             ForEach(Array(segments.enumerated()), id: \.offset) { index, segment in
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundColor(Color(NSColor.tertiaryLabelColor))
+                if index > 0 {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(Color(NSColor.tertiaryLabelColor))
+                }
                 Text(segment)
                     .font(.system(size: 14, weight: index == segments.count - 1 ? .medium : .regular))
                     .foregroundColor(index == segments.count - 1 ? .primary : .secondary)
                     .lineLimit(1)
+                    .truncationMode(index == segments.count - 1 ? .tail : .middle)
             }
         }
+    }
+
+    private var displayPathSegments: [String] {
+        let segments = currentPath
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map(String.init)
+
+        let internalStoragePrefix = ["storage", "emulated", "0"]
+        if segments.starts(with: internalStoragePrefix) {
+            return Array(segments.dropFirst(internalStoragePrefix.count))
+        }
+
+        return segments
     }
     
     @ViewBuilder
@@ -214,6 +238,46 @@ struct FileBrowserView: View, Equatable {
                 .foregroundColor(.secondary)
         }
     }
+
+    private var inlineActionAccentColor: Color {
+        let action = currentActionText.lowercased()
+        if action.contains("delete") || action.contains("deleting") || action.contains("trash") { return .red }
+        if action.contains("restore") { return .green }
+        if action.contains("rename") { return .blue }
+        if action.contains("paste") || action.contains("pasting") ||
+            action.contains("copy") || action.contains("copying") ||
+            action.contains("move") || action.contains("moving") ||
+            action.contains("cut") || action.contains("cutting") {
+            return .orange
+        }
+        return .secondary
+    }
+
+    private var inlineActionStatus: some View {
+        HStack(spacing: 6) {
+            if isPerformingAction {
+                ProgressView()
+                    .tint(inlineActionAccentColor)
+                    .scaleEffect(0.55)
+                    .frame(width: 12, height: 12)
+                Text(currentActionText)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(inlineActionAccentColor.opacity(0.85))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 176, alignment: .trailing)
+                    .padding(.vertical, 2)
+                    .padding(.horizontal, 6)
+                    .background(
+                        Capsule()
+                            .fill(inlineActionAccentColor.opacity(0.08))
+                    )
+            }
+        }
+        .frame(width: 220, alignment: .trailing)
+        .clipped()
+        .padding(.trailing, 10)
+    }
     
     @ViewBuilder
     private var fileListOrEmptyState: some View {
@@ -223,7 +287,7 @@ struct FileBrowserView: View, Equatable {
             } else {
                 fileList
             }
-            
+
             if isDraggingOver {
                 dropOverlay
             }

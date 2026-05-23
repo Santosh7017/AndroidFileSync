@@ -14,6 +14,28 @@ struct TrashView: View {
     @State private var showEmptyTrashConfirmation = false
     @State private var showPermanentDeleteConfirmation = false
     @State private var itemToDelete: TrashedItem? = nil
+
+    private var actionBanner: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .scaleEffect(0.65)
+                .frame(width: 14, height: 14)
+            Text(fileActionManager.currentAction)
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+        .background(Color.orange.opacity(0.12))
+        .overlay(
+            Rectangle()
+                .fill(Color.orange.opacity(0.25))
+                .frame(height: 1),
+            alignment: .bottom
+        )
+    }
     
     var body: some View {
         VStack(spacing: 0) {
@@ -29,6 +51,14 @@ struct TrashView: View {
                     .font(.caption)
                 
                 if !fileActionManager.trashedItems.isEmpty {
+                    Button("Restore All") {
+                        Task {
+                            try? await fileActionManager.restoreAllFromTrash()
+                            onStorageChanged?()
+                        }
+                    }
+                    .font(.caption)
+
                     Button("Empty Trash") {
                         showEmptyTrashConfirmation = true
                     }
@@ -50,6 +80,10 @@ struct TrashView: View {
             .background(.ultraThinMaterial)
             
             Divider()
+
+            if fileActionManager.isPerformingAction {
+                actionBanner
+            }
             
             // Trash content
             if fileActionManager.trashedItems.isEmpty {

@@ -105,42 +105,7 @@ class FileActionManager: ObservableObject {
         }
         
         do {
-            if permanent {
-                // Permanent deletion
-                try await ADBManager.deleteFile(devicePath: file.path)
-            } else {
-                // Move to trash
-                try await ensureTrashFolder()
-                
-                // Create unique trash path
-                let timestamp = Int(Date().timeIntervalSince1970)
-                let trashName = "\(timestamp)_\(file.name)"
-                let trashPath = "\(trashFolderPath)/\(trashName)"
-                
-                do {
-                    // Move file to trash
-                    try await ADBManager.renameFile(oldPath: file.path, newPath: trashPath)
-                    
-                    // Track the trashed item
-                    let trashedItem = TrashedItem(
-                        originalPath: file.path,
-                        trashPath: trashPath,
-                        name: file.name,
-                        isDirectory: file.isDirectory
-                    )
-                    
-                    await MainActor.run {
-                        trashedItems.insert(trashedItem, at: 0)
-                        saveTrashedItems()
-                    }
-                } catch {
-                    // Move-to-trash failed (corrupted folder, locked file, etc.)
-                    // Fall back to permanent deletion
-                    print("⚠️ Move to trash failed for '\(file.name)': \(error.localizedDescription). Falling back to permanent delete.")
-                    try await ADBManager.deleteFile(devicePath: file.path)
-                }
-            }
-            
+            try await performDelete(file, permanent: permanent)
             await MainActor.run {
                 isPerformingAction = false
                 currentAction = ""
@@ -152,6 +117,69 @@ class FileActionManager: ObservableObject {
                 lastError = error.localizedDescription
             }
             throw error
+        }
+    }
+
+    func deleteFiles(_ files: [UnifiedFile], permanent: Bool = false) async throws {
+        guard !files.isEmpty else { return }
+        let action = permanent ? "Permanently deleting" : "Moving to Trash"
+
+        await MainActor.run {
+            isPerformingAction = true
+            currentAction = "\(action) \(files.count) item\(files.count == 1 ? "" : "s")..."
+            lastError = nil
+        }
+
+        do {
+            for (index, file) in files.enumerated() {
+                await MainActor.run {
+                    currentAction = "\(action) \(index + 1) of \(files.count): \(file.name)"
+                }
+                try await performDelete(file, permanent: permanent)
+            }
+
+            await MainActor.run {
+                isPerformingAction = false
+                currentAction = ""
+            }
+        } catch {
+            await MainActor.run {
+                isPerformingAction = false
+                currentAction = ""
+                lastError = error.localizedDescription
+            }
+            throw error
+        }
+    }
+
+    private func performDelete(_ file: UnifiedFile, permanent: Bool) async throws {
+        if permanent {
+            try await ADBManager.deleteFile(devicePath: file.path)
+            return
+        }
+
+        try await ensureTrashFolder()
+
+        let timestamp = Int(Date().timeIntervalSince1970)
+        let trashName = "\(timestamp)_\(file.id.uuidString)_\(file.name)"
+        let trashPath = "\(trashFolderPath)/\(trashName)"
+
+        do {
+            try await ADBManager.renameFile(oldPath: file.path, newPath: trashPath)
+            let trashedItem = TrashedItem(
+                originalPath: file.path,
+                trashPath: trashPath,
+                name: file.name,
+                isDirectory: file.isDirectory
+            )
+
+            await MainActor.run {
+                trashedItems.insert(trashedItem, at: 0)
+                saveTrashedItems()
+            }
+        } catch {
+            print("⚠️ Move to trash failed for '\(file.name)': \(error.localizedDescription). Falling back to permanent delete.")
+            try await ADBManager.deleteFile(devicePath: file.path)
         }
     }
     
@@ -185,6 +213,40 @@ class FileActionManager: ObservableObject {
                 lastError = "Failed to restore: \(error.localizedDescription)"
             }
             throw error
+        }
+    }
+
+    /// Restores all items currently in trash.
+    /// Continues on per-item failures and reports a combined error at the end.
+    func restoreAllFromTrash() async throws {
+        let items = await MainActor.run { trashedItems }
+        guard !items.isEmpty else { return }
+
+        await MainActor.run {
+            isPerformingAction = true
+            currentAction = "Restoring \(items.count) item(s)..."
+            lastError = nil
+        }
+
+        var failed: [String] = []
+        for item in items {
+            do {
+                try await ADBManager.renameFile(oldPath: item.trashPath, newPath: item.originalPath)
+                await MainActor.run {
+                    trashedItems.removeAll { $0.id == item.id }
+                    saveTrashedItems()
+                }
+            } catch {
+                failed.append(item.name)
+            }
+        }
+
+        await MainActor.run {
+            isPerformingAction = false
+            currentAction = ""
+            if !failed.isEmpty {
+                lastError = "Failed to restore: \(failed.joined(separator: ", "))"
+            }
         }
     }
     

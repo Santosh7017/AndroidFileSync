@@ -373,20 +373,7 @@ struct ContentView: View {
                     // ── File Browser ──────────────────────────────────────────
                     VStack(spacing: 0) {
                         // Clipboard indicator (inline, above file list)
-                        if fileActionManager.isPerformingAction {
-                            HStack(spacing: 8) {
-                                ProgressView().scaleEffect(0.65).frame(width: 14, height: 14)
-                                Text(fileActionManager.currentAction)
-                                    .font(.system(size: 12))
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(1)
-                                Spacer()
-                            }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 6)
-                            .background(Color.orange.opacity(0.12))
-                            Divider()
-                        } else if !fileActionManager.clipboard.isEmpty {
+                        if !fileActionManager.isPerformingAction && !fileActionManager.clipboard.isEmpty {
                             HStack(spacing: 8) {
                                 Image(systemName: fileActionManager.clipboardOperation == .cut ? "scissors" : "doc.on.clipboard")
                                     .font(.system(size: 11))
@@ -430,6 +417,8 @@ struct ContentView: View {
                             onDelete: handleDelete,
                             onRename: handleRename,
                             onPreview: { file in filePreviewManager.previewFile(file) },
+                            isPerformingAction: fileActionManager.isPerformingAction,
+                            currentActionText: fileActionManager.currentAction,
                             onBatchDelete: handleBatchDelete,
                             onBatchDownload: handleBatchDownload,
                             onBatchChangeExtension: { ext in handleBatchChangeExtension(ext) },
@@ -467,7 +456,7 @@ struct ContentView: View {
             .navigationSubtitle(deviceManager.statusMessage)
             .toolbar {
                 // ── Left side: New Folder + New File ─────────────────────────
-                ToolbarItemGroup(placement: .navigation) {
+                ToolbarItemGroup(placement: .automatic) {
                     Button {
                         if activeAppFilter == nil,
                            let name = TextInputDialog.show(
@@ -996,10 +985,7 @@ struct ContentView: View {
         
         Task {
             do {
-                // Delete files one by one
-                for file in filesToDelete {
-                    try await fileActionManager.deleteFile(file)
-                }
+                try await fileActionManager.deleteFiles(filesToDelete)
                 
                 // Clear selection and refresh
                 selectedFiles.removeAll()
@@ -1020,9 +1006,7 @@ struct ContentView: View {
         guard !filesToDelete.isEmpty else { return }
         Task {
             do {
-                for file in filesToDelete {
-                    try await fileActionManager.deleteFile(file, permanent: true)
-                }
+                try await fileActionManager.deleteFiles(filesToDelete, permanent: true)
                 selectedFiles.removeAll()
                 await loadFiles()
                 await deviceManager.fetchStorageInfo()
