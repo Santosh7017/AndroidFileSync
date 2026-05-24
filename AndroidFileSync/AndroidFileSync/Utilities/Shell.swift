@@ -8,10 +8,20 @@ struct Shell {
     /// Environment variables applied to ALL processes launched by Shell.
     /// We isolate adb to a private server and disable adb's automatic mDNS auto-connect
     /// so the app controls when connections are established.
-    private static var adbEnvironment: [String: String] {
+    static var adbEnvironment: [String: String] {
         var env = ProcessInfo.processInfo.environment
         env["ANDROID_ADB_SERVER_PORT"] = String(appADBServerPort)
         env["ADB_SERVER_PORT"] = String(appADBServerPort)
+        env["ADB_MDNS_AUTO_CONNECT"] = "0"
+        return env
+    }
+
+    /// Environment for talking to the default adb server. This is used only for
+    /// targeted USB transport recovery when another adb server is holding USB.
+    static var defaultADBEnvironment: [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        env.removeValue(forKey: "ANDROID_ADB_SERVER_PORT")
+        env.removeValue(forKey: "ADB_SERVER_PORT")
         env["ADB_MDNS_AUTO_CONNECT"] = "0"
         return env
     }
@@ -74,7 +84,12 @@ struct Shell {
     }
     
     // Async run with timeout - kills process if it takes too long
-    static func runAsyncWithTimeout(_ command: String, args: [String], timeoutSeconds: Double) async -> (Int32, String, String) {
+    static func runAsyncWithTimeout(
+        _ command: String,
+        args: [String],
+        timeoutSeconds: Double,
+        environment: [String: String]? = nil
+    ) async -> (Int32, String, String) {
         return await withCheckedContinuation { continuation in
             let process = Process()
             let stdout = Pipe()
@@ -82,7 +97,7 @@ struct Shell {
             
             process.executableURL = URL(fileURLWithPath: command)
             process.arguments = args
-            process.environment = adbEnvironment
+            process.environment = environment ?? adbEnvironment
             process.standardOutput = stdout
             process.standardError = stderr
             

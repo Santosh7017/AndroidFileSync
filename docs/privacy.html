@@ -4,122 +4,75 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Privacy Policy — AndroidFileSync</title>
+  <meta name="description" content="AndroidFileSync privacy policy — we collect zero personal data. This free macOS Android file manager runs entirely locally. No cloud, no accounts, no telemetry." />
+  <meta name="robots" content="index, follow" />
+  <link rel="canonical" href="https://santosh7017.github.io/AndroidFileSync/privacy.html" />
+  <link rel="icon" type="image/png" href="og-image.png" />
+  <meta property="og:title" content="Privacy Policy — AndroidFileSync" />
+  <meta property="og:description" content="AndroidFileSync collects zero personal data. Fully local, no cloud, no telemetry." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://santosh7017.github.io/AndroidFileSync/privacy.html" />
   <style>
+    :root { --bg: #0d1117; --bg2: #161b22; --border: #30363d; --border-sub: #21262d; --text: #f0f6fc; --text2: #e6edf3; --muted: #8b949e; --blue: #58a6ff; --green: #3fb950; --r-sm: 8px; --r-md: 12px; }
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: #0d1117;
-      color: #e6edf3;
-      line-height: 1.7;
-      padding: 40px 20px;
-    }
-    .container { max-width: 760px; margin: 0 auto; }
-    header { margin-bottom: 48px; }
-    header a { color: #58a6ff; text-decoration: none; font-size: 14px; }
-    header a:hover { text-decoration: underline; }
-    h1 { font-size: 32px; font-weight: 700; margin: 16px 0 8px; color: #f0f6fc; }
-    .meta { font-size: 13px; color: #8b949e; }
-    .badge {
-      display: inline-block;
-      background: #1f6feb22;
-      border: 1px solid #1f6feb;
-      color: #58a6ff;
-      font-size: 12px;
-      font-weight: 600;
-      padding: 3px 10px;
-      border-radius: 20px;
-      margin-bottom: 12px;
-    }
-    .highlight {
-      background: #161b22;
-      border: 1px solid #30363d;
-      border-left: 4px solid #3fb950;
-      border-radius: 8px;
-      padding: 20px 24px;
-      margin: 32px 0;
-    }
-    .highlight p { color: #3fb950; font-weight: 600; font-size: 15px; margin-bottom: 6px; }
-    .highlight span { color: #8b949e; font-size: 14px; }
-    h2 {
-      font-size: 20px;
-      font-weight: 600;
-      color: #f0f6fc;
-      margin: 40px 0 12px;
-      padding-bottom: 8px;
-      border-bottom: 1px solid #21262d;
-    }
-    p { color: #c9d1d9; margin-bottom: 14px; font-size: 15px; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: var(--bg); color: var(--text2); line-height: 1.7; -webkit-font-smoothing: antialiased; padding: 40px 20px; }
+    .container { max-width: 780px; margin: 0 auto; }
+    .back-link { color: var(--blue); text-decoration: none; font-size: 14px; display: inline-block; margin-bottom: 24px; }
+    .back-link:hover { text-decoration: underline; }
+    .badge { display: inline-block; background: rgba(31,111,235,0.12); border: 1px solid var(--blue); color: var(--blue); font-size: 12px; font-weight: 600; padding: 4px 12px; border-radius: 20px; margin-bottom: 12px; }
+    h1 { font-size: 32px; font-weight: 800; color: var(--text); margin: 16px 0 8px; letter-spacing: -0.5px; }
+    .meta { font-size: 13px; color: var(--muted); margin-bottom: 32px; }
+    .highlight { background: var(--bg2); border: 1px solid var(--border); border-left: 4px solid var(--green); border-radius: var(--r-md); padding: 20px 24px; margin: 32px 0; }
+    .highlight-title { color: var(--green); font-weight: 700; font-size: 15px; margin-bottom: 6px; }
+    .highlight-desc { color: var(--muted); font-size: 14px; }
+    h2 { font-size: 20px; font-weight: 700; color: var(--text); margin: 40px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border-sub); }
+    p { color: var(--text2); margin-bottom: 14px; font-size: 15px; }
     ul { padding-left: 20px; margin-bottom: 14px; }
-    li { color: #c9d1d9; font-size: 15px; margin-bottom: 6px; }
-    a { color: #58a6ff; text-decoration: none; }
+    li { color: var(--text2); font-size: 15px; margin-bottom: 6px; }
+    code { background: var(--bg2); border: 1px solid var(--border-sub); padding: 2px 8px; border-radius: 4px; font-size: 13px; color: var(--green); }
+    a { color: var(--blue); text-decoration: none; }
     a:hover { text-decoration: underline; }
-    footer {
-      margin-top: 64px;
-      padding-top: 24px;
-      border-top: 1px solid #21262d;
-      font-size: 13px;
-      color: #8b949e;
-      display: flex;
-      justify-content: space-between;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
+    footer { margin-top: 64px; padding-top: 24px; border-top: 1px solid var(--border-sub); font-size: 13px; color: var(--muted); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
   </style>
 </head>
 <body>
   <div class="container">
-    <header>
-      <a href="index.html">← Back to AndroidFileSync</a>
-    </header>
-
+    <a href="index.html" class="back-link">← Back to AndroidFileSync</a>
     <div class="badge">Legal</div>
     <h1>Privacy Policy</h1>
     <p class="meta">Effective date: May 15, 2025 &nbsp;·&nbsp; Last updated: May 15, 2025</p>
-
     <div class="highlight">
-      <p>AndroidFileSync collects zero personal data.</p>
-      <span>This app runs entirely on your Mac and communicates only with your own Android device. No data is sent to any server, cloud service, or third party — ever.</span>
+      <div class="highlight-title">AndroidFileSync collects zero personal data.</div>
+      <div class="highlight-desc">This app runs entirely on your Mac and communicates only with your own Android device. No data is ever sent to any server, cloud service, or third party.</div>
     </div>
-
     <h2>1. What AndroidFileSync Does</h2>
-    <p>AndroidFileSync is a free, open-source macOS application that allows you to browse, transfer, and manage files and apps on your Android device over USB or WiFi using the Android Debug Bridge (ADB) protocol.</p>
-
+    <p>AndroidFileSync is a free, open-source macOS application that allows you to browse, transfer, and manage files and apps on your Android device over USB or WiFi using the Android Debug Bridge (ADB) protocol. It is a <strong>local utility tool</strong> — all operations happen directly between your Mac and your phone.</p>
     <h2>2. Data We Collect</h2>
-    <p><strong>None.</strong> AndroidFileSync does not collect, store, transmit, or share any personal information. Specifically:</p>
+    <p><strong>None. Zero.</strong> AndroidFileSync does not collect, store, transmit, or share any personal information. There is no analytics SDK, no crash reporter, no telemetry. Specifically:</p>
     <ul>
       <li>No account or sign-in is required</li>
       <li>No analytics or telemetry is embedded in the app</li>
       <li>No crash reports are sent anywhere</li>
       <li>No usage data is tracked</li>
-      <li>No files or file metadata leave your local network</li>
+      <li>No files or file metadata ever leave your local network</li>
     </ul>
-
     <h2>3. Local Storage</h2>
-    <p>The app stores minimal preferences locally on your Mac using standard macOS mechanisms (UserDefaults / plist files). This includes things like sidebar shortcuts and your last-used settings. This data never leaves your device.</p>
-    <p>A local "Trash" folder is maintained on your Android device at <code>/sdcard/.AndroidFileSyncTrash/</code> to support soft deletes and restore. This is entirely under your control and can be deleted at any time.</p>
-
+    <p>The app stores minimal preferences locally on your Mac using standard macOS mechanisms (UserDefaults / plist files). This includes sidebar shortcuts and last-used settings. This data never leaves your device.</p>
+    <p>A local Trash folder is maintained on your Android device at <code>/sdcard/.AndroidFileSyncTrash/</code> to support soft deletes and restore. This is entirely under your control.</p>
     <h2>4. ADB and Device Communication</h2>
-    <p>Communication with your Android device happens directly over USB or your local WiFi network using ADB. No data passes through any intermediate server. Your files go directly from your Mac to your phone and vice versa.</p>
-    <p>ADB tools are bundled inside the app — nothing is downloaded from the internet at runtime.</p>
-
+    <p>All communication happens directly over USB or your local WiFi network using ADB. No data passes through any intermediate server. ADB tools are bundled inside the app — nothing is downloaded from the internet at runtime.</p>
     <h2>5. Third-Party Services</h2>
-    <p>AndroidFileSync uses no third-party SDKs, analytics libraries, advertising networks, or cloud services of any kind.</p>
-
+    <p>AndroidFileSync uses no third-party SDKs, analytics libraries, advertising networks, or cloud services. It is a fully self-contained native macOS application.</p>
     <h2>6. Children's Privacy</h2>
-    <p>This app does not collect data from anyone, including children under 13. It is a local utility tool with no network services.</p>
-
-    <h2>7. Open Source</h2>
+    <p>This app does not collect data from anyone, including children under 13. It is a local utility tool with no network services of any kind.</p>
+    <h2>7. Open Source Verification</h2>
     <p>AndroidFileSync is fully open source. You can inspect every line of code at <a href="https://github.com/Santosh7017/AndroidFileSync" target="_blank">github.com/Santosh7017/AndroidFileSync</a> to verify these claims yourself.</p>
-
     <h2>8. Changes to This Policy</h2>
-    <p>If this policy is ever updated, the new version will be published at this URL with an updated date. Changes will also be noted in the release notes.</p>
-
+    <p>If this policy is updated, the new version will be published at this URL with an updated date. Changes will also be noted in the release notes on GitHub.</p>
     <h2>9. Contact</h2>
-    <p>If you have any questions about this privacy policy, you can reach the developer at:<br>
-    <a href="mailto:santoshmorya400@gmail.com">santoshmorya400@gmail.com</a></p>
-
+    <p>Questions about this privacy policy? Reach the developer at:<br><a href="mailto:santoshmorya400@gmail.com">santoshmorya400@gmail.com</a></p>
     <footer>
-      <span>AndroidFileSync &copy; 2025 Santosh Morya</span>
+      <span>&copy; 2025 Santosh Morya</span>
       <span><a href="terms.html">Terms of Service</a> &nbsp;·&nbsp; <a href="https://github.com/Santosh7017/AndroidFileSync" target="_blank">GitHub</a></span>
     </footer>
   </div>

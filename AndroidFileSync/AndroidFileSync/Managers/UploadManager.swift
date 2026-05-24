@@ -98,6 +98,18 @@ class UploadManager: ObservableObject {
     deinit {
         updateTimer?.invalidate()
     }
+
+    @MainActor
+    private func markUploadFailed(localPath: String, error: Error) {
+        if var upload = activeUploads[localPath] {
+            upload.error = error.localizedDescription
+            upload.transferSpeed = 0
+            activeUploads[localPath] = upload
+        }
+        progressLock.lock()
+        backgroundProgress.removeValue(forKey: localPath)
+        progressLock.unlock()
+    }
     
     // MARK: - Cancellation
     
@@ -226,16 +238,21 @@ class UploadManager: ObservableObject {
         )
         
         // Consume stream and update background storage
-        for await (bytesTransferred, speed) in progressStream {
-            // Check for cancellation
-            if isCancelled(localPath: localPath) {
-                print("🛑 Upload cancelled: \(safeFileName)")
-                return
+        do {
+            for try await (bytesTransferred, speed) in progressStream {
+                // Check for cancellation
+                if isCancelled(localPath: localPath) {
+                    print("🛑 Upload cancelled: \(safeFileName)")
+                    return
+                }
+                
+                progressLock.lock()
+                backgroundProgress[localPath] = (bytesTransferred, speed)
+                progressLock.unlock()
             }
-            
-            progressLock.lock()
-            backgroundProgress[localPath] = (bytesTransferred, speed)
-            progressLock.unlock()
+        } catch {
+            await markUploadFailed(localPath: localPath, error: error)
+            throw error
         }
         
         // Check for cancellation
@@ -326,15 +343,20 @@ class UploadManager: ObservableObject {
             )
             
             // Consume stream and update background storage
-            for await (bytesTransferred, speed) in progressStream {
-                if self.isCancelled(localPath: localPath) {
-                    print("🛑 Upload cancelled: \(safeFileName)")
-                    return
+            do {
+                for try await (bytesTransferred, speed) in progressStream {
+                    if self.isCancelled(localPath: localPath) {
+                        print("🛑 Upload cancelled: \(safeFileName)")
+                        return
+                    }
+                    
+                    self.progressLock.lock()
+                    self.backgroundProgress[localPath] = (bytesTransferred, speed)
+                    self.progressLock.unlock()
                 }
-                
-                self.progressLock.lock()
-                self.backgroundProgress[localPath] = (bytesTransferred, speed)
-                self.progressLock.unlock()
+            } catch {
+                await self.markUploadFailed(localPath: localPath, error: error)
+                return
             }
             
             // Check for cancellation

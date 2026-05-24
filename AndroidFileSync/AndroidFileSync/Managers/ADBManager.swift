@@ -21,6 +21,13 @@ class ADBManager {
     private static var lastMDNSRecoveryAt: Date?
     /// Wireless endpoints this app connected to in current session.
     private static var appManagedWirelessTargets = Set<String>()
+    /// ADB mDNS can be empty while Bonjour works. Cache the fallback briefly so UI actions
+    /// don't spawn multiple dns-sd browse/lookup/resolve commands per second.
+    private static var bonjourServicesCache: (output: String, timestamp: Date)?
+    private static var bonjourServicesTask: Task<String, Never>?
+    private static var lastBonjourFallbackLogAt: Date?
+    private static var restartServerTask: Task<Bool, Never>?
+    private static var lastServerRestartAttemptAt: Date?
     
     /// Returns args with -s <serial> prepended if a device serial is set
     static func deviceArgs(_ args: [String]) -> [String] {
@@ -60,13 +67,8 @@ class ADBManager {
         return await withTaskGroup(of: ConnectedDevice.self) { group in
             for serial in serials {
                 group.addTask {
-                    let (_, raw, _) = await Shell.runAsyncWithTimeout(
-                        path,
-                        args: ["-s", serial, "shell", "getprop", "ro.product.model"],
-                        timeoutSeconds: 1.0
-                    )
-                    let name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                    return ConnectedDevice(serial: serial, displayName: name.isEmpty ? serial : name)
+                    let displayName = await deviceDisplayName(for: serial, adbPath: path)
+                    return ConnectedDevice(serial: serial, displayName: displayName)
                 }
             }
             var result: [ConnectedDevice] = []
@@ -74,6 +76,34 @@ class ADBManager {
             // Keep original order (group results arrive out of order)
             return result.sorted { serials.firstIndex(of: $0.serial) ?? 0 < serials.firstIndex(of: $1.serial) ?? 0 }
         }
+    }
+
+    private static func deviceDisplayName(for serial: String, adbPath: String) async -> String {
+        let properties = ["ro.product.model", "ro.product.marketname", "ro.product.name"]
+        for property in properties {
+            let (_, raw, _) = await Shell.runAsyncWithTimeout(
+                adbPath,
+                args: ["-s", serial, "shell", "getprop", property],
+                timeoutSeconds: 2.5
+            )
+            let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty { return value }
+        }
+
+        let (_, brandRaw, _) = await Shell.runAsyncWithTimeout(
+            adbPath,
+            args: ["-s", serial, "shell", "getprop", "ro.product.brand"],
+            timeoutSeconds: 2.0
+        )
+        let (_, modelRaw, _) = await Shell.runAsyncWithTimeout(
+            adbPath,
+            args: ["-s", serial, "shell", "getprop", "ro.product.model"],
+            timeoutSeconds: 2.0
+        )
+        let brand = brandRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = modelRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let combined = [brand, model].filter { !$0.isEmpty }.joined(separator: " ")
+        return combined.isEmpty ? serial : combined
     }
 
     /// Switch the active target device. Triggers a DeviceManager re-detect to update all state.
@@ -100,38 +130,124 @@ class ADBManager {
                lower.contains("kill-server")
     }
     
-    /// Kills and restarts the ADB server to clear stale state
-    /// Returns true if server restarted successfully
+    /// Kills and restarts the ADB server to clear stale state.
+    /// Serialized and rate-limited so concurrent discovery/pair/connect failures do not
+    /// fight over the same private ADB daemon.
     @discardableResult
     static func restartServer() async -> Bool {
+        if let task = restartServerTask {
+            print("🔄 ADB: Restart already in progress; waiting for it...")
+            return await task.value
+        }
+
+        let now = Date()
+        if let last = lastServerRestartAttemptAt, now.timeIntervalSince(last) < 6.0 {
+            print("🔄 ADB: Restart skipped; last attempt was too recent.")
+            return false
+        }
+        lastServerRestartAttemptAt = now
+
+        let task = Task { () -> Bool in
+            let path = getADBPath()
+            guard !path.isEmpty else { return false }
+
+            print("🔄 ADB: Restarting ADB server...")
+
+            let (killCode, _, killError) = await Shell.runAsyncWithTimeout(
+                path, args: ["kill-server"], timeoutSeconds: 4.0
+            )
+            print("🔄 ADB: kill-server result: code=\(killCode), error=\(killError)")
+
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+
+            let (startCode, startOutput, startError) = await Shell.runAsyncWithTimeout(
+                path, args: ["start-server"], timeoutSeconds: 8.0
+            )
+            print("🔄 ADB: start-server result: code=\(startCode), output=\(startOutput), error=\(startError)")
+
+            try? await Task.sleep(nanoseconds: 600_000_000)
+
+            let success = startCode == 0 || startError.lowercased().contains("started successfully")
+            print("🔄 ADB: Server restart \(success ? "✅ succeeded" : "❌ failed")")
+            hasRestarted = true
+            return success
+        }
+
+        restartServerTask = task
+        let success = await task.value
+        restartServerTask = nil
+        return success
+    }
+
+    /// If the app's private adb server does not see USB, but the default adb
+    /// server does, the default server is holding the physical USB transport.
+    /// Release it and restart the private server so the app can own USB again.
+    @discardableResult
+    static func recoverPrivateUSBTransportIfNeeded() async -> Bool {
         let path = getADBPath()
         guard !path.isEmpty else { return false }
-        
-        print("🔄 ADB: Restarting ADB server...")
-        
-        // Kill the server
-        let (killCode, _, killError) = await Shell.runAsyncWithTimeout(
-            path, args: ["kill-server"], timeoutSeconds: 5.0
+
+        func restartPrivateServer(reason: String) async -> Bool {
+            print("🔄 ADB: \(reason)")
+
+            let _ = await Shell.runAsyncWithTimeout(
+                path,
+                args: ["kill-server"],
+                timeoutSeconds: 3.0
+            )
+
+            try? await Task.sleep(nanoseconds: 700_000_000)
+
+            let (startCode, startOutput, startError) = await Shell.runAsyncWithTimeout(
+                path,
+                args: ["start-server"],
+                timeoutSeconds: 6.0
+            )
+            let startText = (startOutput + startError).lowercased()
+            let started = startCode == 0 || startText.contains("started successfully") || startText.contains("daemon started")
+
+            if started {
+                try? await Task.sleep(nanoseconds: 700_000_000)
+                print("🔄 ADB: Private server restarted for USB transport recovery.")
+            } else {
+                print("🔄 ADB: Private server USB recovery failed: \((startOutput + startError).trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
+
+            return started
+        }
+
+        let (_, privateOutput, _) = await Shell.runAsyncWithTimeout(
+            path,
+            args: ["devices", "-l"],
+            timeoutSeconds: 3.0
         )
-        print("🔄 ADB: kill-server result: code=\(killCode), error=\(killError)")
-        
-        // Wait for the server to fully shut down
-        try? await Task.sleep(nanoseconds: 1_500_000_000) // 1.5s
-        
-        // Start the server
-        let (startCode, startOutput, startError) = await Shell.runAsyncWithTimeout(
-            path, args: ["start-server"], timeoutSeconds: 10.0
+        if privateOutput.contains(" usb:") {
+            return false
+        }
+
+        let (_, defaultOutput, _) = await Shell.runAsyncWithTimeout(
+            path,
+            args: ["devices", "-l"],
+            timeoutSeconds: 3.0,
+            environment: Shell.defaultADBEnvironment
         )
-        print("🔄 ADB: start-server result: code=\(startCode), output=\(startOutput), error=\(startError)")
-        
-        // Wait a moment for the server to be fully ready
-        try? await Task.sleep(nanoseconds: 1_000_000_000) // 1s
-        
-        let success = startCode == 0 || startError.lowercased().contains("started successfully")
-        print("🔄 ADB: Server restart \(success ? "✅ succeeded" : "❌ failed")")
-        
-        hasRestarted = true
-        return success
+        guard defaultOutput.contains(" usb:") else {
+            return await restartPrivateServer(
+                reason: "Private server is running but has no USB; restarting private server to rescan USB."
+            )
+        }
+
+        print("🔄 ADB: Default server is holding a USB device; moving USB transport to private server.")
+        let _ = await Shell.runAsyncWithTimeout(
+            path,
+            args: ["kill-server"],
+            timeoutSeconds: 3.0,
+            environment: Shell.defaultADBEnvironment
+        )
+
+        try? await Task.sleep(nanoseconds: 700_000_000)
+
+        return await restartPrivateServer(reason: "Starting private server after releasing default USB owner.")
     }
 
     /// Runs `adb mdns services` with optional daemon recovery.
@@ -141,16 +257,27 @@ class ADBManager {
         guard !adbPath.isEmpty else { return (-1, "", "ADB not found") }
 
         func runOnce() async -> (Int32, String, String) {
-            await Shell.runAsyncWithTimeout(adbPath, args: ["mdns", "services"], timeoutSeconds: 3.0)
+            await Shell.runAsyncWithTimeout(adbPath, args: ["mdns", "services"], timeoutSeconds: 1.5)
+        }
+
+        func withBonjourFallback(_ result: (Int32, String, String)) async -> (Int32, String, String) {
+            guard result.0 == 0, !containsADBMDNSService(result.1) else { return result }
+            let fallback = await cachedBonjourADBServices()
+            guard !fallback.isEmpty else { return result }
+
+            let now = Date()
+            if lastBonjourFallbackLogAt.map({ now.timeIntervalSince($0) > 8.0 }) ?? true {
+                print("📶 ADB: adb mdns was empty; using macOS Bonjour fallback:\n\(fallback)")
+                lastBonjourFallbackLogAt = now
+            }
+            return (0, fallback, result.2)
         }
 
         let first = await runOnce()
         let combinedLower = (first.1 + first.2).lowercased()
-        // Empty mDNS output is common when no device is currently advertising.
-        // Only recover the daemon if command failed or output indicates daemon/protocol faults.
         let shouldRecover = allowRecovery && (first.0 != 0 || isProtocolError(combinedLower))
         if !shouldRecover {
-            return first
+            return await withBonjourFallback(first)
         }
 
         let now = Date()
@@ -159,15 +286,114 @@ class ADBManager {
             return now.timeIntervalSince(last) > 8.0
         }()
         guard canRecover else {
-            return first
+            return await withBonjourFallback(first)
         }
 
         lastMDNSRecoveryAt = now
         print("🔄 ADB: mDNS output empty/stale, restarting daemon and retrying mdns services...")
         let restarted = await restartServer()
-        guard restarted else { return first }
+        guard restarted else { return await withBonjourFallback(first) }
         try? await Task.sleep(nanoseconds: 800_000_000)
-        return await runOnce()
+        return await withBonjourFallback(await runOnce())
+    }
+
+    private static func containsADBMDNSService(_ output: String) -> Bool {
+        output.contains("_adb-tls-connect._tcp") || output.contains("_adb-tls-pairing._tcp")
+    }
+
+    private static func cachedBonjourADBServices() async -> String {
+        let now = Date()
+        if let cache = bonjourServicesCache, now.timeIntervalSince(cache.timestamp) < 4.0 {
+            return cache.output
+        }
+        if let task = bonjourServicesTask {
+            return await task.value
+        }
+
+        let task = Task { await bonjourADBServicesUncached() }
+        bonjourServicesTask = task
+        let output = await task.value
+        bonjourServicesCache = (output, Date())
+        bonjourServicesTask = nil
+        return output
+    }
+
+    private static func bonjourADBServicesUncached() async -> String {
+        let serviceTypes = ["_adb-tls-connect._tcp", "_adb-tls-pairing._tcp"]
+        var lines: [String] = []
+
+        for serviceType in serviceTypes {
+            let browseOutput = await runDNSService(["-B", serviceType, "local"], seconds: 0.7)
+            let instances = parseDNSServiceBrowseInstances(from: browseOutput, serviceType: serviceType)
+
+            for instance in instances {
+                let lookupOutput = await runDNSService(["-L", instance, serviceType, "local"], seconds: 0.7)
+                if let resolved = parseDNSServiceLookup(lookupOutput) {
+                    let ipAddress = await resolveBonjourHost(resolved.host) ?? resolved.host
+                    lines.append("\(instance)\t\(serviceType)\t\(ipAddress):\(resolved.port)\t\(resolved.host)")
+                }
+            }
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private static func runDNSService(_ args: [String], seconds: TimeInterval) async -> String {
+        func shellQuote(_ value: String) -> String {
+            "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }
+
+        let command = "/usr/bin/dns-sd " + args.map(shellQuote).joined(separator: " ")
+        let script = "\(command) & pid=$!; sleep \(seconds); kill $pid >/dev/null 2>&1; wait $pid 2>/dev/null; true"
+        let (_, output, error) = await Shell.runAsyncWithTimeout(
+            "/bin/bash",
+            args: ["-lc", script],
+            timeoutSeconds: seconds + 2.0
+        )
+        return output + error
+    }
+
+    private static func parseDNSServiceBrowseInstances(from output: String, serviceType: String) -> [String] {
+        var instances = Set<String>()
+        let marker = serviceType + "."
+
+        for line in output.components(separatedBy: .newlines) where line.contains(marker) && line.contains(" Add ") {
+            guard let range = line.range(of: marker) else { continue }
+            let instance = String(line[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !instance.isEmpty { instances.insert(instance) }
+        }
+
+        return Array(instances).sorted()
+    }
+
+    private static func parseDNSServiceLookup(_ output: String) -> (host: String, port: String)? {
+        for line in output.components(separatedBy: .newlines) where line.contains(" can be reached at ") {
+            guard let range = line.range(of: " can be reached at ") else { continue }
+            let remainder = String(line[range.upperBound...])
+            guard let hostPort = remainder.split(separator: " ").first else { continue }
+            let parts = hostPort.split(separator: ":")
+            guard parts.count >= 2, let port = parts.last else { continue }
+            let host = parts.dropLast().joined(separator: ":").trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            guard !host.isEmpty else { continue }
+            return (host, String(port))
+        }
+        return nil
+    }
+
+    private static func isIPv4Address(_ value: String) -> Bool {
+        value.range(of: #"^\d{1,3}(\.\d{1,3}){3}$"#, options: .regularExpression) != nil
+    }
+
+    private static func resolveBonjourHost(_ host: String) async -> String? {
+        let output = await runDNSService(["-G", "v4", host], seconds: 0.7)
+        for line in output.components(separatedBy: .newlines) where line.contains(" Add ") {
+            let parts = line.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+            guard let address = parts.last, isIPv4Address(address) else {
+                continue
+            }
+            return address
+        }
+        return nil
     }
 
     static func getADBPath() -> String {
@@ -693,17 +919,20 @@ class ADBManager {
         devicePath: String,
         totalBytes: UInt64,
         cancellationCheck: @escaping () -> Bool = { false }
-    ) -> AsyncStream<(UInt64, Double)> {
-        return AsyncStream { continuation in
+    ) -> AsyncThrowingStream<(UInt64, Double), Error> {
+        return AsyncThrowingStream { continuation in
             let adbPath = getADBPath()
             
             DispatchQueue.global(qos: .userInitiated).async {
                 // Create and manage the process directly for cancellation support
                 let process = Process()
+                let stdout = Pipe()
+                let stderr = Pipe()
                 process.executableURL = URL(fileURLWithPath: adbPath)
                 process.arguments = deviceArgs(["push", localPath, devicePath])
-                process.standardOutput = Pipe()
-                process.standardError = Pipe()
+                process.environment = Shell.adbEnvironment
+                process.standardOutput = stdout
+                process.standardError = stderr
                 
                 do {
                     try process.run()
@@ -757,21 +986,31 @@ class ADBManager {
                     
                     // Wait for process to complete
                     process.waitUntilExit()
-                    
+
+                    let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
+                    let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
+                    let output = String(data: outputData, encoding: .utf8) ?? ""
+                    let error = String(data: errorData, encoding: .utf8) ?? ""
+
                     if process.terminationStatus == 0 {
+                        if !cancellationCheck() {
+                            continuation.yield((totalBytes, 0))
+                        }
+                        continuation.finish()
                     } else {
-                        print("❌ ADB Push exited with code \(process.terminationStatus)")
+                        let message = (error.isEmpty ? output : error).trimmingCharacters(in: .whitespacesAndNewlines)
+                        print("❌ ADB Push exited with code \(process.terminationStatus): \(message)")
+                        continuation.finish(throwing: NSError(
+                            domain: "ADBPush",
+                            code: Int(process.terminationStatus),
+                            userInfo: [NSLocalizedDescriptionKey: message.isEmpty ? "Upload failed" : message]
+                        ))
                     }
                     
                 } catch {
                     print("❌ ADB Push Error: \(error)")
+                    continuation.finish(throwing: error)
                 }
-                
-                // Send final update only if not cancelled
-                if !cancellationCheck() {
-                    continuation.yield((totalBytes, 0))
-                }
-                continuation.finish()
             }
         }
     }
@@ -1263,8 +1502,11 @@ class ADBManager {
                 }
             }
 
-            // 4) Last resort legacy port.
-            appendTarget("\(ip):5555")
+            // 4) Last resort legacy port. Only use this for manual IP flows; mDNS hostnames
+            // already gave us the current Android 11+ wireless debugging port.
+            if hostname == nil && port != "5555" {
+                appendTarget("\(ip):5555")
+            }
             return targets
         }
 
@@ -1400,9 +1642,11 @@ class ADBManager {
     /// Returns the IP of the wirelessly connected device, or nil.
     static func getWirelessIP() async -> String? {
         guard let active = activeDeviceSerial, isWirelessSerial(active) else { return nil }
-        // Traditional serial: extract IP before the colon
-        if active.contains(":") && active.contains(".") {
-            return active.components(separatedBy: ":").first
+        // Traditional serial: extract IP before the colon. ADB 37 Bonjour
+        // targets can look like Android.local:45545, so only accept numeric IPv4 here.
+        if active.contains(":"), let first = active.components(separatedBy: ":").first,
+           isIPv4Address(first) {
+            return first
         }
         // ADB 37+ mDNS serial: resolve IP via `ip addr show wlan0`
         // This is more reliable than `ip route` which may pick USB/VPN interfaces

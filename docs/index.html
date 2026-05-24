@@ -1,180 +1,1054 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <script>
+    (function() {
+      const theme = localStorage.getItem('theme') || 'light';
+      if (theme === 'dark') {
+        document.documentElement.setAttribute('data-theme', 'dark');
+      }
+    })();
+  </script>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AndroidFileSync — Free macOS Android File Manager</title>
-  <meta name="description" content="Browse, transfer, and manage files on your Android device from your Mac. Free, open-source, no cloud, no account needed." />
+  <title>AndroidFileSync — Free macOS Android File Manager | USB & WiFi Transfer</title>
+  <meta name="description" content="AndroidFileSync is the best free macOS app to transfer files between Mac and Android over USB or WiFi. Browse files, manage apps, drag & drop. Open source, no cloud, no account needed." />
+  <meta name="keywords" content="Android file transfer Mac, macOS Android file manager, ADB file browser, wireless Android transfer, free Android sync Mac, open source Android manager, USB file transfer Android macOS" />
+  <meta name="author" content="Santosh Morya" />
+  <meta name="robots" content="index, follow, max-image-preview:large" />
+  <link rel="icon" type="image/png" href="og-image.png" />
+  <link rel="canonical" href="https://santosh7017.github.io/AndroidFileSync/" />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://santosh7017.github.io/AndroidFileSync/" />
+  <meta property="og:title" content="AndroidFileSync — Free macOS Android File Manager" />
+  <meta property="og:description" content="Browse, transfer, and manage files on Android from your Mac. USB or WiFi. Free, open-source, no cloud." />
+  <meta property="og:image" content="https://santosh7017.github.io/AndroidFileSync/og-image.png" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="AndroidFileSync — Free macOS Android File Manager" />
+  <meta name="twitter:description" content="Browse, transfer, and manage files on Android from your Mac. USB or WiFi. Free, open-source, no cloud." />
+  <meta name="twitter:image" content="https://santosh7017.github.io/AndroidFileSync/og-image.png" />
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "AndroidFileSync",
+    "operatingSystem": "macOS",
+    "applicationCategory": "UtilitiesApplication",
+    "description": "Free, open-source macOS app to browse, transfer, and manage files on Android devices over USB or WiFi.",
+    "url": "https://santosh7017.github.io/AndroidFileSync/",
+    "author": { "@type": "Person", "name": "Santosh Morya" },
+    "license": "https://opensource.org/licenses/GPL-3.0",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "softwareVersion": "2.4.0",
+    "downloadUrl": "https://github.com/Santosh7017/AndroidFileSync/releases/latest"
+  }
+  </script>
   <style>
+    :root {
+      /* Light Mode (Default) */
+      --bg: #f6f8fa;
+      --bg2: #ffffff;
+      --border: #d0d7de;
+      --border-sub: #d8dee4;
+      --text: #1f2328;
+      --text2: #24292f;
+      --muted: #57606a;
+      --green: #1f883d;
+      --blue: #0969da;
+      --btn: #1f883d;
+      --btn-h: #1a7f37;
+      --btn-sec-hover: #f3f4f6;
+      --btn-shadow: rgba(31, 136, 61, 0.15);
+      --btn-shadow-h: rgba(31, 136, 61, 0.25);
+      --grad: linear-gradient(135deg, #f6f8fa 0%, #ffffff 30%, #eef3f9 60%, #f6f8fa 100%);
+      --nav-bg: rgba(246, 248, 250, 0.85);
+      --hero-spotlight-1: rgba(31, 136, 61, 0.04);
+      --hero-spotlight-2: rgba(9, 105, 218, 0.03);
+      --badge-bg: rgba(31, 136, 61, 0.08);
+      --badge-border: rgba(31, 136, 61, 0.2);
+      --trust-bg: rgba(255, 255, 255, 0.5);
+      --faq-hover: rgba(0, 0, 0, 0.02);
+      --cta-glow: rgba(31, 136, 61, 0.03);
+      --how-num-bg: rgba(9, 105, 218, 0.08);
+      
+      --r-sm: 8px; --r-md: 12px; --r-lg: 16px; --r-xl: 24px;
+    }
+
+    [data-theme="dark"] {
+      /* Dark Mode */
+      --bg: #0d1117;
+      --bg2: #161b22;
+      --border: #30363d;
+      --border-sub: #21262d;
+      --text: #f0f6fc;
+      --text2: #e6edf3;
+      --muted: #8b949e;
+      --green: #3fb950;
+      --blue: #58a6ff;
+      --btn: #238636;
+      --btn-h: #2ea043;
+      --btn-sec-hover: #1c2533;
+      --btn-shadow: rgba(35, 134, 54, 0.35);
+      --btn-shadow-h: rgba(35, 134, 54, 0.45);
+      --grad: linear-gradient(135deg, #0d1117 0%, #161b22 30%, #0a1a2e 60%, #0d1117 100%);
+      --nav-bg: rgba(13, 17, 23, 0.85);
+      --hero-spotlight-1: rgba(35, 134, 54, 0.08);
+      --hero-spotlight-2: rgba(88, 166, 255, 0.06);
+      --badge-bg: rgba(63, 185, 80, 0.1);
+      --badge-border: rgba(63, 185, 80, 0.25);
+      --trust-bg: rgba(22, 27, 34, 0.5);
+      --faq-hover: rgba(255, 255, 255, 0.02);
+      --cta-glow: rgba(35, 134, 54, 0.04);
+      --how-num-bg: rgba(88, 166, 255, 0.15);
+    }
+
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: #0d1117;
-      color: #e6edf3;
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
+    html { scroll-behavior: smooth; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; background: var(--bg); color: var(--text2); line-height: 1.6; -webkit-font-smoothing: antialiased; transition: background-color 0.3s, color 0.3s; }
+    .nav { position: sticky; top: 0; z-index: 100; background: var(--nav-bg); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border-bottom: 1px solid var(--border-sub); transition: background-color 0.3s, border-color 0.3s; }
+    .nav-inner { max-width: 1200px; margin: 0 auto; padding: 0 24px; display: flex; align-items: center; justify-content: space-between; height: 56px; }
+    .nav-brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; color: var(--text); text-decoration: none; }
+    .nav-brand-logo { width: 28px; height: 28px; border-radius: 6px; }
+    .nav-links { display: flex; gap: 24px; align-items: center; }
+    .nav-links a { color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; transition: color 0.2s; }
+    .nav-links a:hover { color: var(--text); }
+    .nav-cta { background: var(--btn); color: #fff !important; padding: 8px 18px; border-radius: var(--r-sm); font-weight: 600 !important; box-shadow: 0 2px 8px var(--btn-shadow); transition: all 0.2s; }
+    .nav-cta:hover { background: var(--btn-h); box-shadow: 0 4px 12px var(--btn-shadow-h); }
+    
+    /* Theme Toggle Button Styling */
+    .theme-toggle-btn {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      cursor: pointer;
+      display: inline-flex;
       align-items: center;
       justify-content: center;
-      padding: 40px 20px;
-      text-align: center;
+      width: 34px;
+      height: 34px;
+      border-radius: var(--r-sm);
+      transition: all 0.2s;
     }
-    .icon { font-size: 64px; margin-bottom: 24px; }
-    h1 { font-size: 36px; font-weight: 700; color: #f0f6fc; margin-bottom: 12px; }
-    .tagline { font-size: 18px; color: #8b949e; max-width: 480px; margin-bottom: 40px; line-height: 1.6; }
-    .badges { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin-bottom: 40px; }
-    .badge {
-      background: #161b22;
-      border: 1px solid #30363d;
-      border-radius: 20px;
-      padding: 6px 14px;
-      font-size: 13px;
-      color: #8b949e;
+    .theme-toggle-btn:hover {
+      color: var(--text);
+      border-color: var(--blue);
+      background: var(--faq-hover);
     }
-    .badge span { color: #3fb950; font-weight: 600; }
-    .buttons { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-bottom: 48px; }
-    .btn {
-      padding: 12px 24px;
-      border-radius: 8px;
+    [data-theme="dark"] .sun-icon { display: block; }
+    [data-theme="dark"] .moon-icon { display: none; }
+    html:not([data-theme="dark"]) .sun-icon { display: none; }
+    html:not([data-theme="dark"]) .moon-icon { display: block; }
+
+    .hero { position: relative; overflow: hidden; background: var(--grad); padding: 80px 24px 100px; text-align: center; }
+    .hero::before { content: ""; position: absolute; top: -50%; left: -20%; width: 140%; height: 200%; background: radial-gradient(ellipse at 30% 20%, var(--hero-spotlight-1) 0%, transparent 60%), radial-gradient(ellipse at 70% 60%, var(--hero-spotlight-2) 0%, transparent 60%); pointer-events: none; }
+    .hero-badge { display: inline-flex; align-items: center; gap: 8px; background: var(--badge-bg); border: 1px solid var(--badge-border); border-radius: 20px; padding: 6px 16px; font-size: 13px; color: var(--green); margin-bottom: 32px; position: relative; }
+    .hero-badge-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse-dot 2s infinite; }
+    @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .hero h1 { font-size: clamp(40px, 8vw, 64px); font-weight: 800; color: var(--text); line-height: 1.1; margin-bottom: 20px; position: relative; letter-spacing: -1px; }
+    .hero h1 .hl { background: linear-gradient(135deg, var(--green) 0%, #7ee787 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+    .hero-subtitle { font-size: clamp(16px, 2.5vw, 20px); color: var(--muted); max-width: 640px; margin: 0 auto 40px; position: relative; line-height: 1.7; }
+    .hero-stats { display: flex; gap: 32px; justify-content: center; flex-wrap: wrap; margin-bottom: 40px; position: relative; }
+    .hero-stat { text-align: center; }
+    .hero-stat-value { font-size: 28px; font-weight: 800; color: var(--text); }
+    .hero-stat-label { font-size: 13px; color: var(--muted); margin-top: 2px; }
+    .hero-stat-divider { width: 1px; background: var(--border-sub); align-self: stretch; }
+    .hero-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; position: relative; }
+    .btn { display: inline-flex; align-items: center; gap: 8px; padding: 14px 28px; border-radius: var(--r-md); font-size: 16px; font-weight: 600; text-decoration: none; transition: all 0.2s; cursor: pointer; border: none; }
+    .btn-lg { padding: 16px 36px; font-size: 17px; border-radius: var(--r-lg); }
+    .btn-primary { background: var(--btn); color: #fff; box-shadow: 0 4px 14px var(--btn-shadow); }
+    .btn-primary:hover { background: var(--btn-h); transform: translateY(-1px); box-shadow: 0 6px 20px var(--btn-shadow-h); }
+    .btn-secondary { background: var(--bg2); border: 1px solid var(--border); color: var(--text); }
+    .btn-secondary:hover { border-color: var(--blue); background: var(--btn-sec-hover); }
+    .trust-bar { border-top: 1px solid var(--border-sub); border-bottom: 1px solid var(--border-sub); padding: 16px 24px; display: flex; justify-content: center; gap: 40px; flex-wrap: wrap; background: var(--trust-bg); transition: all 0.3s; }
+    .trust-item { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+    .trust-icon { font-size: 18px; }
+    .section { max-width: 1200px; margin: 0 auto; padding: 80px 24px; }
+    .section-header { text-align: center; margin-bottom: 56px; }
+    .section-label { display: inline-block; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; color: var(--blue); margin-bottom: 12px; }
+    .section-title { font-size: clamp(28px, 5vw, 40px); font-weight: 800; color: var(--text); margin-bottom: 16px; letter-spacing: -0.5px; }
+    .section-desc { font-size: 16px; color: var(--muted); max-width: 560px; margin: 0 auto; line-height: 1.7; }
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 24px;
+    }
+    .feature-card {
+      position: relative;
+      background: var(--bg2);
+      border: 1px solid var(--border-sub);
+      border-radius: var(--r-lg);
+      padding: 32px;
+      transition: border-color 0.3s, transform 0.3s, box-shadow 0.3s;
+      overflow: hidden;
+      --glow-color: rgba(88, 166, 255, 0.12);
+    }
+    .feature-card::before {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: radial-gradient(350px circle at var(--mouse-x, 0) var(--mouse-y, 0), var(--glow-color), transparent 80%);
+      opacity: 0;
+      transition: opacity 0.5s;
+      pointer-events: none;
+      z-index: 1;
+    }
+    .feature-card:hover::before {
+      opacity: 1;
+    }
+    .feature-card:hover {
+      border-color: var(--blue);
+      transform: translateY(-5px);
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    }
+    .feature-card-icon-wrapper {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 54px;
+      height: 54px;
+      border-radius: 12px;
+      background: rgba(88, 166, 255, 0.08);
+      border: 1px solid rgba(88, 166, 255, 0.15);
+      color: var(--blue);
+      margin-bottom: 24px;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      z-index: 2;
+    }
+    .feature-card:hover .feature-card-icon-wrapper {
+      background: var(--blue);
+      color: var(--bg);
+      transform: scale(1.08) rotate(3deg);
+      box-shadow: 0 0 20px rgba(88, 166, 255, 0.4);
+    }
+    .feature-card:nth-child(2n) {
+      --glow-color: rgba(63, 185, 80, 0.12);
+    }
+    .feature-card:nth-child(2n) .feature-card-icon-wrapper {
+      color: var(--green);
+      background: rgba(63, 185, 80, 0.08);
+      border-color: rgba(63, 185, 80, 0.15);
+    }
+    .feature-card:nth-child(2n):hover .feature-card-icon-wrapper {
+      background: var(--green);
+      color: var(--bg);
+      box-shadow: 0 0 20px rgba(63, 185, 80, 0.4);
+    }
+    .feature-card:nth-child(3n) {
+      --glow-color: rgba(171, 127, 255, 0.12);
+    }
+    .feature-card:nth-child(3n) .feature-card-icon-wrapper {
+      color: #ab7fff;
+      background: rgba(171, 127, 255, 0.08);
+      border-color: rgba(171, 127, 255, 0.15);
+    }
+    .feature-card:nth-child(3n):hover .feature-card-icon-wrapper {
+      background: #ab7fff;
+      color: var(--bg);
+      box-shadow: 0 0 20px rgba(171, 127, 255, 0.4);
+    }
+    .feature-card:nth-child(4n) {
+      --glow-color: rgba(255, 158, 100, 0.12);
+    }
+    .feature-card:nth-child(4n) .feature-card-icon-wrapper {
+      color: #ff9e64;
+      background: rgba(255, 158, 100, 0.08);
+      border-color: rgba(255, 158, 100, 0.15);
+    }
+    .feature-card:nth-child(4n):hover .feature-card-icon-wrapper {
+      background: #ff9e64;
+      color: var(--bg);
+      box-shadow: 0 0 20px rgba(255, 158, 100, 0.4);
+    }
+    .feature-card h3 {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 10px;
+      position: relative;
+      z-index: 2;
+    }
+    .feature-card p {
+      font-size: 14px;
+      color: var(--muted);
+      line-height: 1.6;
+      position: relative;
+      z-index: 2;
+    }
+    
+    /* Expandable Features classes */
+    .hidden-feature {
+      display: none !important;
+    }
+    .hidden-feature.show {
+      display: block !important;
+      animation: fadeInUp 0.6s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+    }
+    @keyframes fadeInUp {
+      from {
+        opacity: 0;
+        transform: translateY(24px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+    .hidden-feature.show:nth-child(7) { animation-delay: 0s; }
+    .hidden-feature.show:nth-child(8) { animation-delay: 0.05s; }
+    .hidden-feature.show:nth-child(9) { animation-delay: 0.1s; }
+    .hidden-feature.show:nth-child(10) { animation-delay: 0.15s; }
+    .hidden-feature.show:nth-child(11) { animation-delay: 0.20s; }
+    .hidden-feature.show:nth-child(12) { animation-delay: 0.25s; }
+
+    .expand-btn-container {
+      display: flex;
+      justify-content: center;
+      margin-top: 48px;
+    }
+    #expand-features-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
       font-size: 15px;
       font-weight: 600;
-      text-decoration: none;
-      transition: opacity 0.15s;
+      padding: 12px 28px;
+      border-radius: var(--r-md);
+      transition: all 0.3s;
     }
-    .btn:hover { opacity: 0.85; }
-    .btn-primary { background: #238636; color: #fff; }
-    .btn-secondary { background: #161b22; border: 1px solid #30363d; color: #c9d1d9; }
-    .features {
+    #expand-features-btn .chevron-icon {
+      transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    #expand-features-btn.expanded .chevron-icon {
+      transform: rotate(180deg);
+    }
+
+    .how-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 20px; }
+    .how-card { background: var(--bg2); border: 1px solid var(--border-sub); border-radius: var(--r-lg); padding: 32px 24px; text-align: center; position: relative; }
+    .how-card-num { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 50%; background: var(--how-num-bg); color: var(--blue); font-weight: 800; font-size: 18px; margin-bottom: 16px; }
+    .how-card h3 { font-size: 16px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
+    .how-card p { font-size: 14px; color: var(--muted); line-height: 1.6; }
+    .faq-section { max-width: 800px; }
+    .faq-item { background: var(--bg2); border: 1px solid var(--border-sub); border-radius: var(--r-md); margin-bottom: 12px; overflow: hidden; }
+    .faq-q { width: 100%; text-align: left; padding: 20px 24px; background: none; border: none; color: var(--text); font-size: 16px; font-weight: 600; cursor: pointer; display: flex; justify-content: space-between; align-items: center; font-family: inherit; }
+    .faq-q:hover { background: var(--faq-hover); }
+    .faq-arrow { font-size: 12px; color: var(--muted); transition: transform 0.3s; }
+    .faq-item.open .faq-arrow { transform: rotate(180deg); }
+    .faq-a { padding: 0 24px 20px; color: var(--muted); font-size: 15px; line-height: 1.7; display: none; }
+    .faq-item.open .faq-a { display: block; }
+    .cta-section { text-align: center; padding: 80px 24px; background: linear-gradient(180deg, transparent 0%, var(--cta-glow) 40%, transparent 100%); border-top: 1px solid var(--border-sub); border-bottom: 1px solid var(--border-sub); }
+    .cta-title { font-size: clamp(24px, 4vw, 36px); font-weight: 800; color: var(--text); margin-bottom: 16px; }
+    .cta-desc { font-size: 16px; color: var(--muted); max-width: 480px; margin: 0 auto 32px; }
+    .footer { border-top: 1px solid var(--border-sub); background: var(--bg2); padding: 48px 24px 32px; }
+    .footer-inner { max-width: 1200px; margin: 0 auto; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 32px; }
+    .footer-brand { max-width: 300px; }
+    .footer-brand h3 { font-size: 18px; font-weight: 700; color: var(--text); margin-bottom: 8px; }
+    .footer-brand p { font-size: 13px; color: var(--muted); line-height: 1.6; }
+    .footer-links { display: flex; gap: 48px; flex-wrap: wrap; }
+    .footer-col h4 { font-size: 13px; font-weight: 700; color: var(--text); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 16px; }
+    .footer-col a { display: block; color: var(--muted); text-decoration: none; font-size: 14px; margin-bottom: 8px; transition: color 0.2s; }
+    .footer-col a:hover { color: var(--blue); }
+    .footer-bottom { max-width: 1200px; margin: 32px auto 0; padding-top: 24px; border-top: 1px solid var(--border-sub); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; font-size: 13px; color: var(--muted); }
+    @media (max-width: 768px) { .hero-stats { gap: 16px; } .hero-stat-value { font-size: 22px; } .footer-inner { flex-direction: column; } .nav-links .hide-mobile { display: none; } }
+
+    /* Showcase Section Styling */
+    .showcase-header {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-      gap: 16px;
-      max-width: 700px;
-      width: 100%;
+      grid-template-columns: 1fr 1fr;
+      gap: 40px;
       margin-bottom: 48px;
+      align-items: end;
     }
-    .feature {
-      background: #161b22;
-      border: 1px solid #21262d;
-      border-radius: 10px;
-      padding: 20px;
-      text-align: left;
+    .showcase-header-left h2 {
+      font-size: clamp(28px, 4vw, 44px);
+      font-weight: 800;
+      line-height: 1.1;
+      color: var(--text);
+      letter-spacing: -1px;
     }
-    .feature .emoji { font-size: 24px; margin-bottom: 10px; display: block; }
-    .feature strong { color: #f0f6fc; font-size: 14px; display: block; margin-bottom: 4px; }
-    .feature p { color: #8b949e; font-size: 13px; line-height: 1.5; }
-    footer {
-      font-size: 13px;
-      color: #8b949e;
+    .showcase-header-left h2 .hl {
+      background: linear-gradient(135deg, var(--blue) 0%, #a5dbff 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .showcase-header-right p {
+      font-size: 16px;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+    
+    .showcase-container {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 40px;
+      align-items: start;
+    }
+    
+    .showcase-nav {
       display: flex;
-      gap: 16px;
-      flex-wrap: wrap;
-      justify-content: center;
+      flex-direction: column;
+      gap: 12px;
     }
-    footer a { color: #58a6ff; text-decoration: none; }
-    footer a:hover { text-decoration: underline; }
+    
+    .showcase-tab {
+      display: flex;
+      align-items: flex-start;
+      gap: 16px;
+      padding: 16px 20px;
+      background: none;
+      border: 1px solid transparent;
+      border-radius: var(--r-md);
+      text-align: left;
+      cursor: pointer;
+      color: var(--muted);
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    
+    .showcase-tab:hover {
+      background: var(--faq-hover);
+      color: var(--text);
+    }
+    
+    .showcase-tab.active {
+      background: var(--bg2);
+      border-color: var(--border);
+      color: var(--text);
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    }
+    
+    [data-theme="dark"] .showcase-tab.active {
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+    }
+    
+    .tab-num {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--blue);
+      margin-top: 4px;
+      font-family: monospace;
+    }
+    
+    .tab-content h4 {
+      font-size: 16px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+    
+    .tab-content p {
+      font-size: 13px;
+      line-height: 1.4;
+      color: var(--muted);
+    }
+    
+    .showcase-display {
+      position: relative;
+      background: rgba(0, 0, 0, 0.02);
+      border-radius: var(--r-lg);
+      padding: 24px;
+      border: 1px solid var(--border-sub);
+      overflow: hidden;
+    }
+    
+    [data-theme="dark"] .showcase-display {
+      background: rgba(0, 0, 0, 0.1);
+    }
+    
+    .showcase-glow {
+      position: absolute;
+      top: -30%;
+      left: -30%;
+      width: 160%;
+      height: 160%;
+      background: radial-gradient(circle, rgba(9, 105, 218, 0.08) 0%, transparent 60%);
+      pointer-events: none;
+      z-index: 1;
+      transition: background 0.5s;
+    }
+    
+    [data-theme="dark"] .showcase-glow {
+      background: radial-gradient(circle, rgba(88, 166, 255, 0.15) 0%, transparent 60%);
+    }
+    
+    .showcase-window {
+      position: relative;
+      z-index: 2;
+      background: #1e1e1e;
+      border-radius: var(--r-md);
+      box-shadow: 0 20px 50px rgba(0,0,0,0.15);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    
+    [data-theme="dark"] .showcase-window {
+      box-shadow: 0 20px 50px rgba(0,0,0,0.4);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+    }
+    
+    .window-header {
+      display: flex;
+      align-items: center;
+      padding: 10px 16px;
+      background: #161b22;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    
+    .window-dots {
+      display: flex;
+      gap: 6px;
+    }
+    
+    .window-dots .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+    
+    .dot.red { background: #ff5f56; }
+    .dot.yellow { background: #ffbd2e; }
+    .dot.green { background: #27c93f; }
+    
+    .window-title {
+      flex: 1;
+      text-align: center;
+      font-size: 11px;
+      color: #8b949e;
+      font-weight: 500;
+      margin-right: 36px;
+    }
+    
+    .window-body {
+      background: #0d1117;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+    
+    .window-body img {
+      width: 100%;
+      height: auto;
+      display: block;
+      transition: opacity 0.3s;
+    }
+    
+    @media (max-width: 992px) {
+      .showcase-container {
+        grid-template-columns: 1fr;
+      }
+      .showcase-nav {
+        flex-direction: row;
+        overflow-x: auto;
+        padding-bottom: 8px;
+      }
+      .showcase-tab {
+        flex-shrink: 0;
+        width: 240px;
+      }
+    }
+    @media (max-width: 768px) {
+      .showcase-header {
+        grid-template-columns: 1fr;
+        gap: 16px;
+      }
+    }
   </style>
 </head>
 <body>
-  <div class="icon">📱</div>
-  <h1>AndroidFileSync</h1>
-  <p class="tagline">Browse, transfer, and manage files on your Android device from your Mac. Over USB or WiFi. No cloud. No account. Free.</p>
-
-  <div class="badges">
-    <div class="badge">macOS <span>13+</span></div>
-    <div class="badge">Version <span id="version-span">2.3.0</span></div>
-    <div class="badge" id="download-badge" style="display: none;">Downloads: <span id="download-count">...</span>+</div>
-    <div class="badge"><span>Free</span> &amp; Open Source</div>
-    <div class="badge">No Cloud</div>
-  </div>
-
-  <div class="buttons">
-    <a href="https://github.com/Santosh7017/AndroidFileSync/releases/latest" class="btn btn-primary">Download for Mac</a>
-    <a href="https://github.com/Santosh7017/AndroidFileSync" class="btn btn-secondary">View on GitHub</a>
-  </div>
-
-  <div class="features">
-    <div class="feature">
-      <span class="emoji">📁</span>
-      <strong>File Browser</strong>
-      <p>Navigate your phone's storage like Finder. Search, sort, preview.</p>
-    </div>
-    <div class="feature">
-      <span class="emoji">📱</span>
-      <strong>App Manager</strong>
-      <p>Install, uninstall, disable, and manage apps from your Mac.</p>
-    </div>
-    <div class="feature">
-      <span class="emoji">💾</span>
-      <strong>SD Card Support</strong>
-      <p>Access and manage files on your external SD card.</p>
-    </div>
-    <div class="feature">
-      <span class="emoji">📶</span>
-      <strong>WiFi or USB</strong>
-      <p>Connect wirelessly or with a cable. Works on your local network.</p>
-    </div>
-    <div class="feature">
-      <span class="emoji">🗑️</span>
-      <strong>Trash &amp; Restore</strong>
-      <p>Soft delete with restore support, just like macOS.</p>
-    </div>
-    <div class="feature">
-      <span class="emoji">🛡️</span>
-      <strong>Safe by Default</strong>
-      <p>Confirmation dialogs before every destructive action.</p>
+<nav class="nav">
+  <div class="nav-inner">
+    <a href="#" class="nav-brand"><img src="og-image.png" alt="AndroidFileSync Logo" class="nav-brand-logo" width="28" height="28" />AndroidFileSync</a>
+    <div class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#how">How It Works</a>
+      <a href="#faq">FAQ</a>
+      <a href="https://github.com/Santosh7017/AndroidFileSync" target="_blank" class="hide-mobile">GitHub</a>
+      <!-- Sun/Moon Theme Toggle -->
+      <button id="theme-toggle" class="theme-toggle-btn" aria-label="Toggle Theme">
+        <svg class="sun-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="4"></circle>
+          <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path>
+        </svg>
+        <svg class="moon-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"></path>
+        </svg>
+      </button>
+      <a href="https://github.com/Santosh7017/AndroidFileSync/releases/latest" class="nav-cta">Download Free</a>
     </div>
   </div>
+</nav>
 
-  <footer>
-    <a href="privacy.html">Privacy Policy</a>
-    <a href="terms.html">Terms of Service</a>
-    <a href="https://github.com/Santosh7017/AndroidFileSync" target="_blank">GitHub</a>
-    <a href="mailto:santoshmorya400@gmail.com">Contact</a>
-  </footer>
+<section class="hero">
+  <div class="hero-badge"><span class="hero-badge-dot"></span> Free &amp; Open Source — No cloud, no account needed</div>
+  <h1>Manage Your Android <span class="hl">Like Finder</span></h1>
+  <p class="hero-subtitle">The best free macOS app to browse, transfer, and manage files on your Android device. Connect over USB or WiFi — fast, private, and open source.</p>
+  <div class="hero-stats">
+    <div class="hero-stat"><div class="hero-stat-value" id="stars-count">82</div><div class="hero-stat-label">GitHub Stars</div></div>
+    <div class="hero-stat-divider"></div>
+    <div class="hero-stat"><div class="hero-stat-value" id="dl-count">278</div><div class="hero-stat-label">Downloads</div></div>
+    <div class="hero-stat-divider"></div>
+    <div class="hero-stat"><div class="hero-stat-value">macOS 13+</div><div class="hero-stat-label">Native Support</div></div>
+  </div>
+  <div class="hero-actions">
+    <a href="https://github.com/Santosh7017/AndroidFileSync/releases/latest" class="btn btn-primary btn-lg">⬇ Download for Mac — Free</a>
+    <a href="https://github.com/Santosh7017/AndroidFileSync" target="_blank" class="btn btn-secondary btn-lg">⭐ Star on GitHub</a>
+  </div>
+</section>
 
-  <script>
-    async function fetchGitHubStats() {
-      try {
-        const repo = 'Santosh7017/AndroidFileSync';
-        
-        // Fetch releases info
-        const releasesResponse = await fetch(`https://api.github.com/repos/${repo}/releases`);
-        if (releasesResponse.ok) {
-          const releases = await releasesResponse.json();
-          let totalDownloads = 0;
-          let latestVersion = '2.3.0';
+<div class="trust-bar">
+  <div class="trust-item"><span class="trust-icon">🔒</span> No cloud storage</div>
+  <div class="trust-item"><span class="trust-icon">📁</span> Direct file transfer</div>
+  <div class="trust-item"><span class="trust-icon">🆓</span> Completely free</div>
+  <div class="trust-item"><span class="trust-icon">📖</span> Open source (GPL 3.0)</div>
+  <div class="trust-item"><span class="trust-icon">🍎</span> Native macOS app</div>
+</div>
 
-          if (releases.length > 0) {
-            latestVersion = releases[0].tag_name.replace(/^v/, '');
-          }
+<section class="section showcase-section" id="showcase">
+  <div class="showcase-header">
+    <div class="showcase-header-left">
+      <h2>Desktop-class UI.<br><span class="hl">Built for macOS.</span></h2>
+    </div>
+    <div class="showcase-header-right">
+      <p>AndroidFileSync delivers a native macOS interface tailored for fast browsing and secure direct transfers. No heavy Electron wrappers or unnecessary lag—just direct integration over ADB.</p>
+    </div>
+  </div>
+  
+  <div class="showcase-container">
+    <div class="showcase-nav">
+      <button class="showcase-tab active" data-screenshot="2026-05-19_00-21-26.png">
+        <span class="tab-num">01</span>
+        <div class="tab-content">
+          <h4>File Browser</h4>
+          <p>Browse internal storage and external SD cards in a sidebar-equipped view.</p>
+        </div>
+      </button>
+      <button class="showcase-tab" data-screenshot="2026-05-19_00-22-37.png">
+        <span class="tab-num">02</span>
+        <div class="tab-content">
+          <h4>App Manager</h4>
+          <p>Install APKs, uninstall user apps, or disable bloatware in bulk.</p>
+        </div>
+      </button>
+      <button class="showcase-tab" data-screenshot="2026-05-19_00-24-41.png">
+        <span class="tab-num">03</span>
+        <div class="tab-content">
+          <h4>Wireless Connection</h4>
+          <p>Pair wirelessly in seconds using local network auto-discovery.</p>
+        </div>
+      </button>
+      <button class="showcase-tab" data-screenshot="2026-05-19_00-23-59.png">
+        <span class="tab-num">04</span>
+        <div class="tab-content">
+          <h4>Trash Box</h4>
+          <p>Delete files permanently or restore them.</p>
+        </div>
+      </button>
+      <button class="showcase-tab" data-screenshot="2026-05-19_03-25-19.png">
+        <span class="tab-num">05</span>
+        <div class="tab-content">
+          <h4>Transfer Progress</h4>
+          <p>Track uploads and downloads simultaneously with parallel progress.</p>
+        </div>
+      </button>
+    </div>
+    
+    <div class="showcase-display">
+      <div class="showcase-glow"></div>
+      <div class="showcase-window">
+        <div class="window-body">
+          <img id="showcase-img" src="2026-05-19_00-21-26.png" alt="AndroidFileSync Screenshot" />
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
 
-          releases.forEach(release => {
-            if (release.assets) {
-              release.assets.forEach(asset => {
-                totalDownloads += (asset.download_count || 0);
-              });
-            }
-          });
+<section class="section" id="features">
+  <div class="section-header">
+    <span class="section-label">Features</span>
+    <h2 class="section-title">Everything You Need to Manage Your Phone</h2>
+    <p class="section-desc">AndroidFileSync gives you full control over your Android device — file management, app control, and seamless connectivity.</p>
+  </div>
+  <div class="feature-grid">
+    <div class="feature-card">
+      <div class="feature-card-icon-wrapper">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+          <circle cx="12" cy="13" r="2"></circle>
+          <path d="m18 17-2.4-2.4"></path>
+        </svg>
+      </div>
+      <h3>File Browser</h3>
+      <p>Navigate your phone storage like macOS Finder. Search, sort by name/size/type, and preview files instantly.</p>
+    </div>
+    
+    <div class="feature-card">
+      <div class="feature-card-icon-wrapper">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M10 14L19 5M19 5H14M19 5V10"></path>
+          <path d="M4 16V4a2 2 0 0 1 2-2h6l4 4v2"></path>
+          <path d="M2 18v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"></path>
+        </svg>
+      </div>
+      <h3>Drag &amp; Drop</h3>
+      <p>Drag files from your Mac straight to your phone. The most natural way to transfer files — just like between Finder windows.</p>
+    </div>
 
-          if (totalDownloads > 0) {
-            const countEl = document.getElementById('download-count');
-            const badgeEl = document.getElementById('download-badge');
-            if (countEl && badgeEl) {
-              countEl.textContent = totalDownloads.toLocaleString();
-              badgeEl.style.display = 'inline-block';
-            }
-          }
+    <div class="feature-card">
+      <div class="feature-card-icon-wrapper">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 22v-8"></path>
+          <path d="M9 14h6v-3a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v3Z"></path>
+          <path d="M12 7V3.5"></path>
+          <path d="M5 12.5a10 10 0 0 1 14 0"></path>
+          <path d="M7.5 15a6 6 0 0 1 9 0"></path>
+        </svg>
+      </div>
+      <h3>USB &amp; WiFi</h3>
+      <p>Connect with a USB cable for maximum speed, or go wireless over your home network. Auto-discovery finds your phone instantly.</p>
+    </div>
 
-          const versionEl = document.getElementById('version-span');
-          if (versionEl) {
-            versionEl.textContent = latestVersion;
-          }
-        }
-      } catch (error) {
-        console.error('Error fetching GitHub stats:', error);
+    <div class="feature-card">
+      <div class="feature-card-icon-wrapper">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect>
+          <path d="M12 18h.01"></path>
+          <rect x="8" y="6" width="3" height="3" rx="0.5"></rect>
+          <rect x="13" y="6" width="3" height="3" rx="0.5"></rect>
+          <rect x="8" y="11" width="3" height="3" rx="0.5"></rect>
+          <rect x="13" y="11" width="3" height="3" rx="0.5"></rect>
+        </svg>
+      </div>
+      <h3>App Manager</h3>
+      <p>Install APKs, uninstall apps, disable system bloatware, force-stop misbehaving apps, and backup APKs — all from your Mac.</p>
+    </div>
+
+    <div class="feature-card">
+      <div class="feature-card-icon-wrapper">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"></path>
+          <circle cx="12" cy="12" r="3"></circle>
+        </svg>
+      </div>
+      <h3>File Preview</h3>
+      <p>Double-click any file to preview images, videos, PDFs, and documents without downloading them first. Powered by macOS Quick Look.</p>
+    </div>
+
+    <div class="feature-card">
+      <div class="feature-card-icon-wrapper">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M17 3v18M17 21l-4-4M17 21l4-4"></path>
+          <path d="M7 21V3M7 3L3 7M7 3l4 4"></path>
+        </svg>
+      </div>
+      <h3>Parallel Transfers</h3>
+      <p>Upload and download multiple files simultaneously with live progress tracking. Collapsible transfer panel for clutter-free workflow.</p>
+    </div>
+
+    <div class="feature-card hidden-feature">
+      <div class="feature-card-icon-wrapper">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 6h18"></path>
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"></path>
+          <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+          <path d="M12 10a3 3 0 1 0 3 3"></path>
+          <path d="M15 10h-3v3"></path>
+        </svg>
+      </div>
+      <h3>Trash &amp; Restore</h3>
+      <p>Soft-delete files with a dedicated Trash folder on your device. Restore accidentally deleted files with one click — just like macOS.</p>
+    </div>
+
+    <div class="feature-card hidden-feature">
+      <div class="feature-card-icon-wrapper">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M6 2h9l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z"></path>
+          <path d="M16 8h2M16 11h2M16 14h2"></path>
+        </svg>
+      </div>
+      <h3>SD Card Support</h3>
+      <p>Browse and manage files on your external SD card. Full read/write access, just like internal storage.</p>
+    </div>
+
+    <div class="feature-card hidden-feature">
+      <div class="feature-card-icon-wrapper">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+        </svg>
+      </div>
+      <h3>Copy, Cut &amp; Paste</h3>
+      <p>Clipboard operations across folders on your device. Move files between directories without downloading to your Mac first.</p>
+    </div>
+
+    <div class="feature-card hidden-feature">
+      <div class="feature-card-icon-wrapper">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 2h10a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H8a2 2 0 0 1-2 2V4a2 2 0 0 1 2-2z"></path>
+          <path d="M4 6h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z"></path>
+        </svg>
+      </div>
+      <h3>Batch Operations</h3>
+      <p>Rename multiple files, change extensions in bulk, or delete several items at once. Save time with batch actions.</p>
+    </div>
+
+    <div class="feature-card hidden-feature">
+      <div class="feature-card-icon-wrapper">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M16 3H4v18h12V3z"></path>
+          <path d="M20 7h-4v14h4V7z"></path>
+          <path d="M8 8h4M8 12h4M8 16h4"></path>
+        </svg>
+      </div>
+      <h3>Duplicate Detection</h3>
+      <p>Automatically detects duplicate files during uploads. Choose to skip or replace — never accidentally overwrite important data.</p>
+    </div>
+
+    <div class="feature-card hidden-feature">
+      <div class="feature-card-icon-wrapper">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+          <path d="m9 11 2 2 4-4"></path>
+        </svg>
+      </div>
+      <h3>Safe by Default</h3>
+      <p>Confirmation dialogs before every destructive action. Context-aware buttons — you always know what will happen next.</p>
+    </div>
+  </div>
+  <div class="expand-btn-container">
+    <button id="expand-features-btn" class="btn btn-secondary">
+      <span>Show More Features</span>
+      <svg class="chevron-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="m6 9 6 6 6-6"></path>
+      </svg>
+    </button>
+  </div>
+</section>
+</section>
+
+<section class="section" id="how">
+  <div class="section-header">
+    <span class="section-label">How It Works</span>
+    <h2 class="section-title">Set Up in Under 2 Minutes</h2>
+    <p class="section-desc">Get connected and start transferring files faster than any other Android file manager for Mac.</p>
+  </div>
+  <div class="how-grid">
+    <div class="how-card"><div class="how-card-num">1</div><h3>Enable Developer Options</h3><p>Tap Build Number 7 times in Settings → About Phone. One-time setup, takes 30 seconds.</p></div>
+    <div class="how-card"><div class="how-card-num">2</div><h3>Turn On USB Debugging</h3><p>Enable USB Debugging in Developer Options. Plug in your cable or connect wirelessly with Android 11+.</p></div>
+    <div class="how-card"><div class="how-card-num">3</div><h3>Launch &amp; Connect</h3><p>Open AndroidFileSync — your device appears automatically. For WiFi, use the one-click pairing flow.</p></div>
+    <div class="how-card"><div class="how-card-num">4</div><h3>Start Managing</h3><p>Browse files, drag &amp; drop, manage apps, preview media. Everything works exactly like you expect on a Mac.</p></div>
+  </div>
+  <div style="text-align:center; margin-top:40px;">
+    <p style="color:var(--muted); font-size:14px; margin-bottom:16px;">Install in seconds with Homebrew:</p>
+    <code style="background:var(--bg2); border:1px solid var(--border); border-radius:var(--r-sm); padding:12px 24px; font-size:14px; color:var(--green); display:inline-block;">brew tap santosh7017/androidfilesync && brew install --cask androidfilesync</code>
+  </div>
+</section>
+
+<section class="section faq-section" id="faq">
+  <div class="section-header">
+    <span class="section-label">FAQ</span>
+    <h2 class="section-title">Frequently Asked Questions</h2>
+  </div>
+  <div class="faq-item"><button class="faq-q" onclick="this.parentElement.classList.toggle('open')">Is AndroidFileSync really free? <span class="faq-arrow">▼</span></button><div class="faq-a">Yes, 100% free and open source. No trials, no premium version, no in-app purchases. Licensed under GPL 3.0 — you can inspect every line of code on GitHub.</div></div>
+  <div class="faq-item"><button class="faq-q" onclick="this.parentElement.classList.toggle('open')">Do I need to install anything on my phone? <span class="faq-arrow">▼</span></button><div class="faq-a">No. AndroidFileSync uses ADB (Android Debug Bridge), which is built into Android. You just need to enable Developer Options and USB Debugging — a one-time 30-second setup.</div></div>
+  <div class="faq-item"><button class="faq-q" onclick="this.parentElement.classList.toggle('open')">Does this work over WiFi? <span class="faq-arrow">▼</span></button><div class="faq-a">Yes! Android 11+ supports Wireless Debugging. The app has auto-discovery that finds your phone on the network automatically. Both your Mac and phone need to be on the same WiFi network.</div></div>
+  <div class="faq-item"><button class="faq-q" onclick="this.parentElement.classList.toggle('open')">Is my data safe? Does anything go to the cloud? <span class="faq-arrow">▼</span></button><div class="faq-a">Your data never leaves your local network. AndroidFileSync communicates directly with your phone over USB or WiFi — no cloud servers, no accounts, no telemetry. Your files stay between your Mac and your phone, period.</div></div>
+  <div class="faq-item"><button class="faq-q" onclick="this.parentElement.classList.toggle('open')">Can I transfer files between multiple Android devices? <span class="faq-arrow">▼</span></button><div class="faq-a">Yes! The multi-device selector lets you switch between USB and wireless devices with one click. Connect multiple phones and switch seamlessly.</div></div>
+  <div class="faq-item"><button class="faq-q" onclick="this.parentElement.classList.toggle('open')">What macOS versions are supported? <span class="faq-arrow">▼</span></button><div class="faq-a">macOS 13 (Ventura) and later. Both Apple Silicon (M1/M2/M3/M4) and Intel Macs are fully supported.</div></div>
+</section>
+
+<section class="cta-section">
+  <h2 class="cta-title">Ready to Ditch the Cable Chaos?</h2>
+  <p class="cta-desc">Join thousands of Mac users who manage their Android files the easy way. Free, open source, no strings attached.</p>
+  <div class="hero-actions">
+    <a href="https://github.com/Santosh7017/AndroidFileSync/releases/latest" class="btn btn-primary btn-lg">⬇ Download for Mac — It's Free</a>
+    <a href="https://github.com/Santosh7017/AndroidFileSync" target="_blank" class="btn btn-secondary btn-lg">⭐ Star on GitHub</a>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <div class="footer-brand">
+      <h3><img src="og-image.png" alt="AndroidFileSync Logo" width="24" height="24" style="vertical-align:middle;border-radius:5px;margin-right:6px;" />AndroidFileSync</h3>
+      <p>Free, open-source macOS app for Android file management. USB &amp; WiFi. No cloud. No account. Just works.</p>
+    </div>
+    <div class="footer-links">
+      <div class="footer-col"><h4>Product</h4><a href="#features">Features</a><a href="#how">How It Works</a><a href="#faq">FAQ</a><a href="https://github.com/Santosh7017/AndroidFileSync/releases/latest">Download</a></div>
+      <div class="footer-col"><h4>Resources</h4><a href="https://github.com/Santosh7017/AndroidFileSync" target="_blank">GitHub</a><a href="https://github.com/Santosh7017/AndroidFileSync/issues" target="_blank">Report Bug</a><a href="https://github.com/Santosh7017/AndroidFileSync/blob/main/README.md" target="_blank">Documentation</a></div>
+      <div class="footer-col"><h4>Legal</h4><a href="privacy.html">Privacy Policy</a><a href="terms.html">Terms of Service</a></div>
+    </div>
+  </div>
+  <div class="footer-bottom">
+    <span>&copy; 2025 Santosh Morya. Licensed under GPL 3.0.</span>
+    <span><a href="mailto:santoshmorya400@gmail.com" style="color:var(--blue);text-decoration:none;">santoshmorya400@gmail.com</a></span>
+  </div>
+</footer>
+
+<script>
+async function fetchGHStats() {
+  try {
+    const repo = 'Santosh7017/AndroidFileSync';
+    const [repoResp, relResp] = await Promise.all([
+      fetch('https://api.github.com/repos/' + repo),
+      fetch('https://api.github.com/repos/' + repo + '/releases?per_page=20')
+    ]);
+    if (repoResp.ok) {
+      const data = await repoResp.json();
+      const el = document.getElementById('stars-count');
+      if (el && data.stargazers_count) el.textContent = data.stargazers_count;
+    }
+    if (relResp.ok) {
+      const releases = await relResp.json();
+      let total = 0;
+      releases.forEach(r => { if (r.assets) r.assets.forEach(a => { total += (a.download_count || 0); }); });
+      const el = document.getElementById('dl-count');
+      if (el && total > 0) el.textContent = total.toLocaleString();
+    }
+  } catch(e) { console.error(e); }
+}
+
+function initFeatureGlows() {
+  const cards = document.querySelectorAll('.feature-card');
+  cards.forEach(card => {
+    card.addEventListener('mousemove', e => {
+      const rect = card.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      card.style.setProperty('--mouse-x', `${x}px`);
+      card.style.setProperty('--mouse-y', `${y}px`);
+    });
+  });
+}
+
+function initExpandableFeatures() {
+  const btn = document.getElementById('expand-features-btn');
+  const hiddenCards = document.querySelectorAll('.hidden-feature');
+  if (!btn) return;
+  
+  btn.addEventListener('click', () => {
+    const isExpanded = btn.classList.toggle('expanded');
+    const btnText = btn.querySelector('span');
+    
+    if (isExpanded) {
+      btnText.textContent = 'Show Less';
+      hiddenCards.forEach(card => {
+        card.classList.add('show');
+      });
+    } else {
+      btnText.textContent = 'Show More Features';
+      hiddenCards.forEach(card => {
+        card.classList.remove('show');
+      });
+      // Scroll smoothly back to features header so user doesn't lose context
+      document.getElementById('features').scrollIntoView({ behavior: 'smooth' });
+    }
+  });
+}
+
+function initThemeToggle() {
+  const toggleBtn = document.getElementById('theme-toggle');
+  if (!toggleBtn) return;
+  
+  toggleBtn.addEventListener('click', () => {
+    const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    if (isDark) {
+      document.documentElement.removeAttribute('data-theme');
+      localStorage.setItem('theme', 'light');
+    } else {
+      document.documentElement.setAttribute('data-theme', 'dark');
+      localStorage.setItem('theme', 'dark');
+    }
+    
+    // Sync showcase glow background if a tab is active
+    const activeTab = document.querySelector('.showcase-tab.active');
+    if (activeTab) {
+      const tabs = document.querySelectorAll('.showcase-tab');
+      const glow = document.querySelector('.showcase-glow');
+      const index = Array.from(tabs).indexOf(activeTab);
+      
+      const colors = [
+        'rgba(9, 105, 218, 0.08)',
+        'rgba(31, 136, 61, 0.08)',
+        'rgba(171, 127, 255, 0.08)',
+        'rgba(255, 158, 100, 0.08)',
+        'rgba(235, 71, 114, 0.08)'
+      ];
+      const darkColors = [
+        'rgba(88, 166, 255, 0.15)',
+        'rgba(63, 185, 80, 0.15)',
+        'rgba(171, 127, 255, 0.15)',
+        'rgba(255, 158, 100, 0.15)',
+        'rgba(235, 71, 114, 0.15)'
+      ];
+      
+      const newIsDark = document.documentElement.getAttribute('data-theme') === 'dark';
+      const color = newIsDark ? darkColors[index] : colors[index];
+      if (glow) {
+        glow.style.background = `radial-gradient(circle, ${color} 0%, transparent 60%)`;
       }
     }
-    document.addEventListener('DOMContentLoaded', fetchGitHubStats);
-  </script>
+  });
+}
+
+function initShowcase() {
+  const tabs = document.querySelectorAll('.showcase-tab');
+  const img = document.getElementById('showcase-img');
+  const glow = document.querySelector('.showcase-glow');
+  const windowTitle = document.querySelector('.window-title');
+  if (!tabs || !img) return;
+  
+  const colors = [
+    'rgba(9, 105, 218, 0.08)',
+    'rgba(31, 136, 61, 0.08)',
+    'rgba(171, 127, 255, 0.08)',
+    'rgba(255, 158, 100, 0.08)',
+    'rgba(235, 71, 114, 0.08)'
+  ];
+  const darkColors = [
+    'rgba(88, 166, 255, 0.15)',
+    'rgba(63, 185, 80, 0.15)',
+    'rgba(171, 127, 255, 0.15)',
+    'rgba(255, 158, 100, 0.15)',
+    'rgba(235, 71, 114, 0.15)'
+  ];
+  
+  tabs.forEach((tab, index) => {
+    tab.addEventListener('click', () => {
+      tabs.forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      
+      if (windowTitle) {
+        const titleText = tab.querySelector('h4').textContent;
+        windowTitle.textContent = `AndroidFileSync — ${titleText}`;
+      }
+      
+      img.style.opacity = '0';
+      setTimeout(() => {
+        img.src = tab.getAttribute('data-screenshot');
+        img.style.opacity = '1';
+        
+        const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+        const color = isDark ? darkColors[index] : colors[index];
+        if (glow) {
+          glow.style.background = `radial-gradient(circle, ${color} 0%, transparent 60%)`;
+        }
+      }, 150);
+    });
+  });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  fetchGHStats();
+  initFeatureGlows();
+  initExpandableFeatures();
+  initThemeToggle();
+  initShowcase();
+});
+</script>
 </body>
 </html>
