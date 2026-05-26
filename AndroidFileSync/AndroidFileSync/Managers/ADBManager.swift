@@ -39,36 +39,80 @@ class ADBManager {
 
     // MARK: - Multi-device
 
-    struct ConnectedDevice {
+    struct ConnectedDevice: Equatable {
         let serial: String
         var displayName: String  // "Redmi Note 8" or the raw serial as fallback
+        var status: String = "device" // "device", "unauthorized", "offline"
+        var hardwareSerial: String? = nil
         var isWireless: Bool { ADBManager.isWirelessSerial(serial) }
         /// IP for wireless devices (nil for mDNS serials without embedded IP)
         var ipAddress: String? {
             guard isWireless, serial.contains(":") else { return nil }
             return serial.components(separatedBy: ":").first
         }
+        
+        var derivedHardwareSerial: String? {
+            if let hw = hardwareSerial, !hw.isEmpty { return hw }
+            if isWireless {
+                if serial.contains("._adb-tls-") {
+                    let serviceName = serial.components(separatedBy: ".").first ?? ""
+                    return ADBManager.extractHardwareSerial(from: serviceName)
+                }
+            } else {
+                return serial
+            }
+            return nil
+        }
     }
 
-    /// Returns all devices currently listed as 'device' in `adb devices`,
+    /// Returns all devices currently listed as 'device', 'unauthorized', or 'offline' in `adb devices`,
     /// enriched with real model names fetched in parallel.
     static func listAllConnectedDevices() async -> [ConnectedDevice] {
         let path = getADBPath()
         guard !path.isEmpty else { return [] }
         let (_, output, _) = await Shell.runAsyncWithTimeout(path, args: ["devices"], timeoutSeconds: 5.0)
-        let serials: [String] = output.split(separator: "\n").compactMap { line -> String? in
-            let s = String(line)
-            guard !s.starts(with: "List"),
-                  s.contains("\tdevice") || s.hasSuffix(" device") else { return nil }
-            let serial = String(s.split(separator: "\t").first ?? s.split(separator: " ").first ?? Substring(s))
-            return serial.isEmpty ? nil : serial
+        let parsed: [(serial: String, status: String)] = output.split(separator: "\n").compactMap { line -> (String, String)? in
+            let s = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !s.starts(with: "List"), !s.isEmpty else { return nil }
+            let parts = s.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+            guard parts.count >= 2 else { return nil }
+            let serial = parts[0]
+            let status = parts[1]
+            guard status == "device" || status == "unauthorized" || status == "offline" else { return nil }
+            return (serial, status)
         }
-        // Fetch model names in parallel
+        let serials = parsed.map { $0.serial }
+        
+        // Fetch model names and hardware serials in parallel
         return await withTaskGroup(of: ConnectedDevice.self) { group in
-            for serial in serials {
+            for item in parsed {
                 group.addTask {
-                    let displayName = await deviceDisplayName(for: serial, adbPath: path)
-                    return ConnectedDevice(serial: serial, displayName: displayName)
+                    let displayName: String
+                    let hwSerial: String?
+                    if item.status == "device" {
+                        displayName = await deviceDisplayName(for: item.serial, adbPath: path)
+                        hwSerial = await getHardwareSerial(for: item.serial)
+                    } else {
+                        if item.status == "unauthorized" {
+                            displayName = "\(item.serial) (Unauthorized)"
+                        } else {
+                            displayName = "\(item.serial) (Offline)"
+                        }
+                        
+                        // For unauthorized/offline devices, try to extract from Bonjour serial if possible
+                        if isWirelessSerial(item.serial) && item.serial.contains("._adb-tls-") {
+                            let serviceName = item.serial.components(separatedBy: ".").first ?? ""
+                            hwSerial = extractHardwareSerial(from: serviceName)
+                        } else {
+                            hwSerial = nil
+                        }
+                    }
+                    return ConnectedDevice(
+                        serial: item.serial,
+                        displayName: displayName,
+                        status: item.status,
+                        hardwareSerial: hwSerial
+                    )
                 }
             }
             var result: [ConnectedDevice] = []
@@ -183,7 +227,7 @@ class ADBManager {
     /// server does, the default server is holding the physical USB transport.
     /// Release it and restart the private server so the app can own USB again.
     @discardableResult
-    static func recoverPrivateUSBTransportIfNeeded() async -> Bool {
+    static func recoverPrivateUSBTransportIfNeeded(forceRestart: Bool = false) async -> Bool {
         let path = getADBPath()
         guard !path.isEmpty else { return false }
 
@@ -232,9 +276,9 @@ class ADBManager {
             environment: Shell.defaultADBEnvironment
         )
         guard defaultOutput.contains(" usb:") else {
-            return await restartPrivateServer(
-                reason: "Private server is running but has no USB; restarting private server to rescan USB."
-            )
+            // Neither the private nor the default server has a USB device.
+            // Do NOT restart the private server, as that will kill any active WiFi/mDNS connections.
+            return false
         }
 
         print("🔄 ADB: Default server is holding a USB device; moving USB transport to private server.")
@@ -245,7 +289,32 @@ class ADBManager {
             environment: Shell.defaultADBEnvironment
         )
 
-        try? await Task.sleep(nanoseconds: 700_000_000)
+        // Poll the private server to give it time to auto-detect and claim the released USB device.
+        // Auto-detecting the USB interface after releasing the port-5037 server can take 1-3 seconds.
+        var claimed = false
+        for attempt in 1...8 {
+            try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
+            let (_, postKillOutput, _) = await Shell.runAsyncWithTimeout(
+                path,
+                args: ["devices", "-l"],
+                timeoutSeconds: 2.0
+            )
+            if postKillOutput.contains(" usb:") {
+                print("🔄 ADB: Private server automatically claimed the USB transport after \(Double(attempt) * 0.5)s.")
+                claimed = true
+                break
+            }
+        }
+        
+        if claimed {
+            return true
+        }
+
+        // Fallback: If it didn't auto-detect, restart the private server, BUT only if there's no active wireless connection or if we are forcing it.
+        if !forceRestart, let activeSerial = activeDeviceSerial, isWirelessSerial(activeSerial) {
+            print("🔄 ADB: Private server did not auto-claim USB after polling, but wireless connection is active. Skipping private server restart to prevent disconnect.")
+            return false
+        }
 
         return await restartPrivateServer(reason: "Starting private server after releasing default USB owner.")
     }
@@ -261,16 +330,51 @@ class ADBManager {
         }
 
         func withBonjourFallback(_ result: (Int32, String, String)) async -> (Int32, String, String) {
-            guard result.0 == 0, !containsADBMDNSService(result.1) else { return result }
-            let fallback = await cachedBonjourADBServices()
-            guard !fallback.isEmpty else { return result }
-
+            guard result.0 == 0 else { return result }
+            
+            // Get macOS Bonjour fallback services (highly stable)
+            let bonjourOutput = await cachedBonjourADBServices()
+            
+            // If Bonjour is empty and ADB output is empty, return the original empty result
+            if bonjourOutput.isEmpty && result.1.isEmpty {
+                return result
+            }
+            
+            // Merge lines from both adb mdns output and Bonjour output
+            var mergedLines = [String]()
+            var seenServiceNames = Set<String>()
+            
+            func addLines(_ rawOutput: String) {
+                for line in rawOutput.split(separator: "\n") {
+                    let str = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !str.isEmpty, !str.lowercased().hasPrefix("list of") else { continue }
+                    
+                    let parts = str.split(whereSeparator: { $0 == "\t" || $0 == " " }).map(String.init)
+                    guard let serviceName = parts.first else { continue }
+                    
+                    // We key by serviceName if it starts with "adb-", or by the ip address if not
+                    let key = serviceName.hasPrefix("adb-") ? serviceName : (parts.count >= 3 ? parts[2] : serviceName)
+                    
+                    if !seenServiceNames.contains(key) {
+                        seenServiceNames.insert(key)
+                        mergedLines.append(str)
+                    }
+                }
+            }
+            
+            // Prioritize ADB's own results if they exist, then add Bonjour fallbacks
+            addLines(result.1)
+            addLines(bonjourOutput)
+            
+            let mergedOutput = "List of discovered mdns services\n" + mergedLines.joined(separator: "\n")
+            
             let now = Date()
-            if lastBonjourFallbackLogAt.map({ now.timeIntervalSince($0) > 8.0 }) ?? true {
-                print("📶 ADB: adb mdns was empty; using macOS Bonjour fallback:\n\(fallback)")
+            if lastBonjourFallbackLogAt.map({ now.timeIntervalSince($0) > 10.0 }) ?? true {
+                print("📶 ADB: Merged adb mdns services (\(result.1.split(separator: "\n").count - 1) lines) with macOS Bonjour fallback (\(bonjourOutput.split(separator: "\n").count) lines). Total unique: \(mergedLines.count)")
                 lastBonjourFallbackLogAt = now
             }
-            return (0, fallback, result.2)
+            
+            return (0, mergedOutput, result.2)
         }
 
         let first = await runOnce()
@@ -320,22 +424,42 @@ class ADBManager {
 
     private static func bonjourADBServicesUncached() async -> String {
         let serviceTypes = ["_adb-tls-connect._tcp", "_adb-tls-pairing._tcp"]
-        var lines: [String] = []
-
-        for serviceType in serviceTypes {
-            let browseOutput = await runDNSService(["-B", serviceType, "local"], seconds: 0.7)
-            let instances = parseDNSServiceBrowseInstances(from: browseOutput, serviceType: serviceType)
-
-            for instance in instances {
-                let lookupOutput = await runDNSService(["-L", instance, serviceType, "local"], seconds: 0.7)
-                if let resolved = parseDNSServiceLookup(lookupOutput) {
-                    let ipAddress = await resolveBonjourHost(resolved.host) ?? resolved.host
-                    lines.append("\(instance)\t\(serviceType)\t\(ipAddress):\(resolved.port)\t\(resolved.host)")
+        
+        return await withTaskGroup(of: [String].self) { group in
+            for serviceType in serviceTypes {
+                group.addTask {
+                    var serviceLines = [String]()
+                    let browseOutput = await runDNSService(["-B", serviceType, "local"], seconds: 0.7)
+                    let instances = parseDNSServiceBrowseInstances(from: browseOutput, serviceType: serviceType)
+                    
+                    // Resolve instances in parallel using a nested task group
+                    await withTaskGroup(of: String?.self) { resolveGroup in
+                        for instance in instances {
+                            resolveGroup.addTask {
+                                let lookupOutput = await runDNSService(["-L", instance, serviceType, "local"], seconds: 0.7)
+                                if let resolved = parseDNSServiceLookup(lookupOutput) {
+                                    let ipAddress = await resolveBonjourHost(resolved.host) ?? resolved.host
+                                    return "\(instance)\t\(serviceType)\t\(ipAddress):\(resolved.port)\t\(resolved.host)"
+                                }
+                                return nil
+                            }
+                        }
+                        for await line in resolveGroup {
+                            if let line = line {
+                                serviceLines.append(line)
+                            }
+                        }
+                    }
+                    return serviceLines
                 }
             }
+            
+            var allLines = [String]()
+            for await lines in group {
+                allLines.append(contentsOf: lines)
+            }
+            return allLines.joined(separator: "\n")
         }
-
-        return lines.joined(separator: "\n")
     }
 
     private static func runDNSService(_ args: [String], seconds: TimeInterval) async -> String {
@@ -384,8 +508,34 @@ class ADBManager {
         value.range(of: #"^\d{1,3}(\.\d{1,3}){3}$"#, options: .regularExpression) != nil
     }
 
+    private static func resolveBonjourHostNative(_ host: String) -> String? {
+        var hints = addrinfo()
+        hints.ai_family = AF_INET
+        hints.ai_socktype = SOCK_STREAM
+        
+        var res: UnsafeMutablePointer<addrinfo>?
+        let status = getaddrinfo(host, nil, &hints, &res)
+        guard status == 0, let firstAddr = res else {
+            return nil
+        }
+        defer { freeaddrinfo(res) }
+        
+        var ipAddress = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        let sockaddr = firstAddr.pointee.ai_addr
+        let socklen = firstAddr.pointee.ai_addrlen
+        
+        let getnameStatus = getnameinfo(sockaddr, socklen, &ipAddress, socklen_t(ipAddress.count), nil, 0, NI_NUMERICHOST)
+        guard getnameStatus == 0 else {
+            return nil
+        }
+        return String(cString: ipAddress)
+    }
+
     private static func resolveBonjourHost(_ host: String) async -> String? {
-        let output = await runDNSService(["-G", "v4", host], seconds: 0.7)
+        if let nativeIP = resolveBonjourHostNative(host) {
+            return nativeIP
+        }
+        let output = await runDNSService(["-G", "v4", host], seconds: 1.0)
         for line in output.components(separatedBy: .newlines) where line.contains(" Add ") {
             let parts = line.split(whereSeparator: { $0.isWhitespace }).map(String.init)
             guard let address = parts.last, isIPv4Address(address) else {
@@ -1577,13 +1727,32 @@ class ADBManager {
             return (false, "ADB not found")
         }
         
+        // 1. Explicitly disconnect each wireless device in the active devices list.
+        // Some adb versions fail to clean up Bonjour/mDNS serials on a bare "disconnect" command.
+        let connectedDevices = await listAllConnectedDevices()
+        var explicitDisconnectResults = [String]()
+        for dev in connectedDevices {
+            if dev.isWireless {
+                print("📱 ADB: Explicitly disconnecting wireless serial: \(dev.serial)")
+                let (_, out, err) = await Shell.runAsyncWithTimeout(
+                    adbPath,
+                    args: ["disconnect", dev.serial],
+                    timeoutSeconds: 3.0
+                )
+                explicitDisconnectResults.append(out + err)
+            }
+        }
+        
+        // 2. Perform the general sweep disconnect
         let (exitCode, output, error) = await Shell.runAsyncWithTimeout(
             adbPath,
             args: ["disconnect"],
             timeoutSeconds: 5.0
         )
         
-        let result = (exitCode == 0, output + error)
+        let combinedOutput = output + error + "\n" + explicitDisconnectResults.joined(separator: "\n")
+        let result = (exitCode == 0, combinedOutput)
+        
         // Clear the active serial if it was a wireless device
         if let serial = activeDeviceSerial, isWirelessSerial(serial) {
             activeDeviceSerial = nil
@@ -1637,6 +1806,42 @@ class ADBManager {
         // ADB 37+: "adb-XXXX._adb-tls-connect._tcp"
         if serial.contains("._adb-tls-") { return true }
         return false
+    }
+
+    /// Extract hardware serial from an ADB 37+ mDNS service name (e.g. "adb-ZF622373WS-K6agbq" -> "ZF622373WS")
+    static func extractHardwareSerial(from serviceName: String) -> String? {
+        guard serviceName.hasPrefix("adb-") else { return nil }
+        let components = serviceName.split(separator: "-")
+        guard components.count >= 3 else { return nil }
+        // Drop the first ("adb") and last (random suffix) parts
+        let serialComponents = components.dropFirst().dropLast()
+        let serial = serialComponents.joined(separator: "-")
+        return serial.isEmpty ? nil : serial
+    }
+
+    /// Query the unique hardware serial of a connected device (USB or wireless)
+    static func getHardwareSerial(for target: String) async -> String? {
+        let adbPath = getADBPath()
+        guard !adbPath.isEmpty else { return nil }
+        let (_, out, _) = await Shell.runAsyncWithTimeout(
+            adbPath,
+            args: ["-s", target, "get-serialno"],
+            timeoutSeconds: 2.0
+        )
+        let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed.lowercased().contains("error") || trimmed.lowercased().contains("unknown") {
+            let (_, getpropOut, _) = await Shell.runAsyncWithTimeout(
+                adbPath,
+                args: ["-s", target, "shell", "getprop", "ro.serialno"],
+                timeoutSeconds: 2.0
+            )
+            let getpropTrimmed = getpropOut.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !getpropTrimmed.isEmpty && !getpropTrimmed.lowercased().contains("error") && !getpropTrimmed.lowercased().contains("unknown") {
+                return getpropTrimmed
+            }
+            return nil
+        }
+        return trimmed
     }
 
     /// Returns the IP of the wirelessly connected device, or nil.

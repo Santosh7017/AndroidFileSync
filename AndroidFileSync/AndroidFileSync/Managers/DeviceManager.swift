@@ -57,7 +57,13 @@ class DeviceManager: ObservableObject {
     private var wirelessHuntTask: Task<Void, Never>? = nil
     private var lastWirelessReconnectAttemptAt: Date? = nil
     private static let wirelessReconnectCooldown: TimeInterval = 8.0
+    /// Cache last liveness check timestamp per wireless serial to prevent spamming adb shell commands.
+    private var lastLivenessCheckAt: [String: Date] = [:]
     private static let savedWirelessPortByIPKey = "wirelessLastKnownPortByIP"
+    
+    private var autoClaimUSB: Bool {
+        UserDefaults.standard.bool(forKey: "autoClaimUSB")
+    }
     private static let savedWirelessTargetByIPKey = "wirelessLastKnownTargetByIP"
 
     private static func clearSavedWirelessEndpoint(for ip: String) {
@@ -118,7 +124,7 @@ class DeviceManager: ObservableObject {
         // Cold-start case: USB may already be plugged in before IOKit monitoring
         // starts. In that path, no attach callback fires, so recover private ADB
         // ownership here before falling back to Wi-Fi-only state.
-        if !allDevices.contains(where: { !$0.isWireless }), canAttemptUSBTransportRecovery() {
+        if !allDevices.contains(where: { !$0.isWireless }), autoClaimUSB, canAttemptUSBTransportRecovery() {
             lastUSBTransportRecoveryAt = Date()
             if await ADBManager.recoverPrivateUSBTransportIfNeeded() {
                 allDevices = await ADBManager.listAllConnectedDevices()
@@ -132,6 +138,7 @@ class DeviceManager: ObservableObject {
         // Wireless debugging ports rotate, so a one-shot launch guard misses phones that
         // start advertising after the app's first scan.
         let canAttemptWirelessReconnect: Bool = {
+            guard !userDisconnected else { return false }
             guard wirelessHuntTask == nil || wirelessHuntTask?.isCancelled == true else { return false }
             guard let lastAttempt = lastWirelessReconnectAttemptAt else { return true }
             return Date().timeIntervalSince(lastAttempt) >= Self.wirelessReconnectCooldown
@@ -142,8 +149,9 @@ class DeviceManager: ObservableObject {
             Self.hasAttemptedWirelessReconnectThisLaunch = true
             lastWirelessReconnectAttemptAt = Date()
             let savedIPs = UserDefaults.standard.stringArray(forKey: "connectedWirelessDevices") ?? []
+            let savedSerials = UserDefaults.standard.stringArray(forKey: "connectedWirelessSerials") ?? []
             
-            if !savedIPs.isEmpty {
+            if !savedIPs.isEmpty || !savedSerials.isEmpty {
                 if wirelessHuntTask == nil || wirelessHuntTask?.isCancelled == true {
                     wirelessHuntTask = Task { [weak self] in
                     let adbPath = ADBManager.getADBPath()
@@ -152,6 +160,7 @@ class DeviceManager: ObservableObject {
                         
                         // Reconnect saved wireless devices using mDNS
                         var connectedIPs = Set<String>()
+                        var connectedSerials = Set<String>()
                         for attempt in 1...10 {
                             if Task.isCancelled { break }
                             try? await Task.sleep(nanoseconds: 1_000_000_000) // 1.0s
@@ -204,6 +213,37 @@ class DeviceManager: ObservableObject {
                             
                             print("📱 DeviceManager: mDNS poll attempt \(attempt)/10")
                             
+                            // 1. First attempt to match by serial number (ADB 37+ mDNS)
+                            for line in mdnsOut.split(separator: "\n") {
+                                let str = String(line)
+                                guard str.contains("_adb-tls-connect._tcp") else { continue }
+                                
+                                let parts = str.split(whereSeparator: { $0 == "\t" || $0 == " " }).map(String.init)
+                                guard let serviceName = parts.first else { continue }
+                                guard let ipPort = parts.first(where: { part in
+                                    let comps = part.split(separator: ":")
+                                    return comps.count >= 2 && UInt16(comps.last ?? "") != nil
+                                }) else { continue }
+                                
+                                guard let hwSerial = ADBManager.extractHardwareSerial(from: serviceName) else { continue }
+                                if savedSerials.contains(hwSerial) && !connectedSerials.contains(hwSerial) {
+                                    print("📱 DeviceManager: Reconnecting to serial \(hwSerial) at: \(ipPort)")
+                                    let (_, out, _) = await Shell.runAsyncWithTimeout(
+                                        adbPath, args: ["connect", ipPort], timeoutSeconds: 3.0
+                                    )
+                                    if out.lowercased().contains("connected") {
+                                        connectedSerials.insert(hwSerial)
+                                        if let ip = ipPort.components(separatedBy: ":").first {
+                                            connectedIPs.insert(ip)
+                                        }
+                                        print("📱 DeviceManager: ✅ Connected serial \(hwSerial) to \(ipPort)")
+                                    } else {
+                                        print("📱 DeviceManager: ❌ Failed serial reconnect: \(out.trimmingCharacters(in: .whitespacesAndNewlines))")
+                                    }
+                                }
+                            }
+                            
+                            // 2. Fallback to matching by raw IP (for legacy networks/backwards compatibility)
                             for savedIP in savedIPs where !connectedIPs.contains(savedIP) {
                                 for line in mdnsOut.split(separator: "\n") {
                                     let str = String(line)
@@ -212,26 +252,30 @@ class DeviceManager: ObservableObject {
                                     let parts = str.split(whereSeparator: { $0 == "\t" || $0 == " " }).map(String.init)
                                     guard let ipPort = parts.first(where: { $0.hasPrefix(savedIP + ":") }) else { break }
                                     
-                                    print("📱 DeviceManager: Reconnecting to: \(ipPort)")
+                                    print("📱 DeviceManager: Reconnecting to IP: \(ipPort)")
                                     let (_, out, _) = await Shell.runAsyncWithTimeout(
                                         adbPath, args: ["connect", ipPort], timeoutSeconds: 3.0
                                     )
                                     if out.lowercased().contains("connected") {
                                         connectedIPs.insert(savedIP)
-                                        print("📱 DeviceManager: ✅ Connected to \(ipPort)")
+                                        print("📱 DeviceManager: ✅ Connected IP to \(ipPort)")
                                     } else {
-                                        print("📱 DeviceManager: ❌ Failed: \(out.trimmingCharacters(in: .whitespacesAndNewlines))")
+                                        print("📱 DeviceManager: ❌ Failed IP reconnect: \(out.trimmingCharacters(in: .whitespacesAndNewlines))")
                                     }
                                     break
                                 }
                             }
                             
-                            if connectedIPs.count >= savedIPs.count { break }
+                            let targetSerialCount = savedSerials.count
+                            let targetIPCount = savedIPs.count
+                            let serialReached = targetSerialCount > 0 && connectedSerials.count >= targetSerialCount
+                            let ipReached = targetIPCount > 0 && connectedIPs.count >= targetIPCount
+                            if serialReached || ipReached { break }
                         }
-                        print("📱 DeviceManager: Reconnected \(connectedIPs.count)/\(savedIPs.count) devices")
+                        print("📱 DeviceManager: Reconnected \(connectedSerials.count) serial-based and \(connectedIPs.count) IP-based devices")
                         
                         // If we successfully reconnected in the background, refresh the UI!
-                        if !connectedIPs.isEmpty {
+                        if !connectedIPs.isEmpty || !connectedSerials.isEmpty {
                             await self?.detectDevice()
                         } else {
                             // Hunt failed, explicitly update UI to disconnected ONLY if a USB device
@@ -354,20 +398,28 @@ class DeviceManager: ObservableObject {
                 let adbPath = ADBManager.getADBPath()
                 for dev in allDevices {
                     if dev.isWireless {
-                        // Quick liveness check — 1.5s timeout
-                        let (code, out, _) = await Shell.runAsyncWithTimeout(
-                            adbPath,
-                            args: ["-s", dev.serial, "shell", "echo", "ok"],
-                            timeoutSeconds: 1.5
-                        )
-                        if code == 0 && out.trimmingCharacters(in: .whitespacesAndNewlines) == "ok" {
+                        // Rate-limit the expensive getprop/shell query: only query if last check was > 15s ago
+                        let now = Date()
+                        if let lastCheck = lastLivenessCheckAt[dev.serial], now.timeIntervalSince(lastCheck) < 15.0 {
                             validDevices.append(dev)
                         } else {
-                            print("📱 DeviceManager: Stale wireless device removed: \(dev.serial)")
-                            // Disconnect the stale entry so ADB stops listing it
-                            let _ = await Shell.runAsyncWithTimeout(
-                                adbPath, args: ["disconnect", dev.serial], timeoutSeconds: 2.0
+                            // Quick liveness check — 3.0s timeout to allow sleeping devices to respond
+                            let (code, out, _) = await Shell.runAsyncWithTimeout(
+                                adbPath,
+                                args: ["-s", dev.serial, "shell", "echo", "ok"],
+                                timeoutSeconds: 3.0
                             )
+                            if code == 0 && out.trimmingCharacters(in: .whitespacesAndNewlines) == "ok" {
+                                validDevices.append(dev)
+                                lastLivenessCheckAt[dev.serial] = now
+                            } else {
+                                print("📱 DeviceManager: Stale wireless device removed: \(dev.serial)")
+                                // Disconnect the stale entry so ADB stops listing it
+                                let _ = await Shell.runAsyncWithTimeout(
+                                    adbPath, args: ["disconnect", dev.serial], timeoutSeconds: 2.0
+                                )
+                                lastLivenessCheckAt.removeValue(forKey: dev.serial)
+                            }
                         }
                     } else {
                         validDevices.append(dev)
@@ -380,7 +432,9 @@ class DeviceManager: ObservableObject {
             let updatedSerials = allDevices.map { $0.serial }
             let usbSerial = updatedSerials.first(where: { !ADBManager.isWirelessSerial($0) })
             let wirelessSerial = updatedSerials.first(where: { ADBManager.isWirelessSerial($0) })
-            let shouldPreferUSB = preferUSBUntil.map { Date() <= $0 } ?? false
+            
+            let isWirelessActive = isConnected && connectionType == .wireless
+            let shouldPreferUSB = (preferUSBUntil.map { Date() <= $0 } ?? false) && !isWirelessActive
 
             if shouldPreferUSB, let usbSerial {
                 ADBManager.activeDeviceSerial = usbSerial
@@ -408,6 +462,7 @@ class DeviceManager: ObservableObject {
         // If user explicitly disconnected, don't auto-pick wireless devices
         if userDisconnected, let serial = ADBManager.activeDeviceSerial, ADBManager.isWirelessSerial(serial) {
             adbAvailable = false
+            ADBManager.activeDeviceSerial = nil
         }
         print("📱 DeviceManager: ADB available = \(adbAvailable), active = \(ADBManager.activeDeviceSerial ?? "nil")")
         
@@ -417,33 +472,38 @@ class DeviceManager: ObservableObject {
         
         // Update the state on the main thread
         await MainActor.run {
-            if adbAvailable {
-                // Set device name instantly from the allDevices list without extra adb calls
-                if let active = allDevices.first(where: { $0.serial == ADBManager.activeDeviceSerial }) {
-                    self.deviceName = active.displayName
-                }
+            if adbAvailable, let active = allDevices.first(where: { $0.serial == ADBManager.activeDeviceSerial }) {
+                self.deviceName = active.displayName
                 
-                if isWireless {
-                    self.connectionType = .wireless
-                    self.statusMessage = "Connected via WiFi"
-                    // Traditional serials embed numeric IPs. Bonjour targets such as
-                    // Android.local:45545 are resolved below via ADBManager.getWirelessIP().
-                    if let serial = activeSerial,
-                       serial.contains(":"),
-                       let ip = serial.components(separatedBy: ":").first,
-                       ip.range(of: #"^\d{1,3}(\.\d{1,3}){3}$"#, options: .regularExpression) != nil {
-                        self.lastWirelessIP = ip
-                    } else {
-                        self.lastWirelessIP = ""
-                    }
+                if active.status == "unauthorized" {
+                    self.connectionType = isWireless ? .wireless : .usb
+                    self.statusMessage = "Device unauthorized. Please check your phone screen to allow debugging."
+                    self.isConnected = false
+                } else if active.status == "offline" {
+                    self.connectionType = isWireless ? .wireless : .usb
+                    self.statusMessage = "Device is offline. Please reconnect your device."
+                    self.isConnected = false
                 } else {
-                    self.connectionType = .usb
-                    self.statusMessage = "Connected via USB"
-                    // Do NOT clear lastWirelessIP here — we may have a WiFi device in
-                    // availableDevices that the user can still switch back to.
+                    if isWireless {
+                        self.connectionType = .wireless
+                        self.statusMessage = "Connected via WiFi"
+                        // Traditional serials embed numeric IPs. Bonjour targets such as
+                        // Android.local:45545 are resolved below via ADBManager.getWirelessIP().
+                        if let serial = activeSerial,
+                           serial.contains(":"),
+                           let ip = serial.components(separatedBy: ":").first,
+                           ip.range(of: #"^\d{1,3}(\.\d{1,3}){3}$"#, options: .regularExpression) != nil {
+                            self.lastWirelessIP = ip
+                        } else {
+                            self.lastWirelessIP = ""
+                        }
+                    } else {
+                        self.connectionType = .usb
+                        self.statusMessage = "Connected via USB"
+                    }
+                    self.isConnected = true
+                    print("📱 DeviceManager: Device connected (\(self.connectionType.rawValue))!")
                 }
-                self.isConnected = true
-                print("📱 DeviceManager: Device connected (\(self.connectionType.rawValue))!")
             } else {
                 self.connectionType = .none
                 self.deviceName = "No Device"
@@ -462,16 +522,33 @@ class DeviceManager: ObservableObject {
             self.isDetecting = false
         }
 
-        // If connected, fetch non-critical metadata concurrently so we don't block the UI
-        if adbAvailable {
+        // If connected and authorized, fetch non-critical metadata concurrently so we don't block the UI
+        let isAuthorized = allDevices.first(where: { $0.serial == ADBManager.activeDeviceSerial })?.status == "device"
+        if adbAvailable && isAuthorized {
             Self.hasAttemptedWirelessReconnectThisLaunch = false
             lastWirelessReconnectAttemptAt = nil
             Task {
-                // ADB 37+ mDNS serial: resolve IP since it's not in the serial
                 if isWireless {
                     let currentIP = await MainActor.run { self.lastWirelessIP }
                     if currentIP.isEmpty, let resolvedIP = await ADBManager.getWirelessIP() {
                         await MainActor.run { self.lastWirelessIP = resolvedIP }
+                    }
+                    
+                    if let target = ADBManager.activeDeviceSerial {
+                        if let hwSerial = await ADBManager.getHardwareSerial(for: target) {
+                            var savedSerials = UserDefaults.standard.stringArray(forKey: "connectedWirelessSerials") ?? []
+                            if !savedSerials.contains(hwSerial) {
+                                savedSerials.append(hwSerial)
+                                UserDefaults.standard.set(savedSerials, forKey: "connectedWirelessSerials")
+                            }
+                            
+                            let displayName = await MainActor.run { self.deviceName }
+                            if !displayName.isEmpty && displayName != "No Device" {
+                                var serialNames = UserDefaults.standard.dictionary(forKey: "wirelessDisplayNameBySerial") as? [String: String] ?? [:]
+                                serialNames[hwSerial] = displayName
+                                UserDefaults.standard.set(serialNames, forKey: "wirelessDisplayNameBySerial")
+                            }
+                        }
                     }
                 }
             }
@@ -544,16 +621,12 @@ class DeviceManager: ObservableObject {
                     let hasUSB = await MainActor.run {
                         self.availableDevices.contains(where: { !$0.isWireless })
                     }
-                    // Stop if: we're connected AND have a USB device, OR if we were
-                    // already connected (WiFi) and the device list updated
+                    // Stop if we're connected and have a USB device, OR if any device count change has already been processed
                     let currentCount = await MainActor.run { self.availableDevices.count }
                     if connected && hasUSB { break }
-                    if connected && currentCount != previousDeviceCount { break }
-                    if !connected && currentCount == 0 {
-                        // Disconnect detected and reflected
-                    }
+                    if currentCount != previousDeviceCount { break }
 
-                    if !hasUSB && !attemptedUSBTransportRecovery {
+                    if !hasUSB && self.autoClaimUSB && !attemptedUSBTransportRecovery {
                         attemptedUSBTransportRecovery = true
                         if await ADBManager.recoverPrivateUSBTransportIfNeeded() {
                             await self.detectDevice()
@@ -808,9 +881,14 @@ class DeviceManager: ObservableObject {
     /// Disconnect wireless device
     func disconnectWireless() async {
         ADBPairingBrowser.suppressAutoConnect = true
+        await MainActor.run {
+            self.userDisconnected = true
+        }
         let _ = await ADBManager.disconnectAllWireless()
         // Clear all saved wireless devices
         UserDefaults.standard.removeObject(forKey: "connectedWirelessDevices")
+        UserDefaults.standard.removeObject(forKey: "connectedWirelessSerials")
+        UserDefaults.standard.removeObject(forKey: "wirelessDisplayNameBySerial")
         UserDefaults.standard.removeObject(forKey: Self.savedWirelessPortByIPKey)
         UserDefaults.standard.removeObject(forKey: Self.savedWirelessTargetByIPKey)
         await MainActor.run {
@@ -821,7 +899,6 @@ class DeviceManager: ObservableObject {
             self.statusMessage = "Disconnected. Connect a device to continue."
             self.sdCardPath = nil
             self.storageStats = [:]
-            self.userDisconnected = true
         }
         // All cached sizes are stale after disconnect
         ADBManager.invalidateFolderSizeCache()
@@ -849,5 +926,18 @@ class DeviceManager: ObservableObject {
     
     func getRealStoragePath() async -> String {
         return "/storage/emulated/0" // Default fallback
+    }
+    
+    /// Queries default port 5037 to check if there is an occupied physical USB device
+    func isUSBDeviceOccupiedByDefaultServer() async -> Bool {
+        let adbPath = ADBManager.getADBPath()
+        guard !adbPath.isEmpty else { return false }
+        let (_, defaultOutput, _) = await Shell.runAsyncWithTimeout(
+            adbPath,
+            args: ["devices", "-l"],
+            timeoutSeconds: 2.0,
+            environment: Shell.defaultADBEnvironment
+        )
+        return defaultOutput.contains(" usb:")
     }
 }

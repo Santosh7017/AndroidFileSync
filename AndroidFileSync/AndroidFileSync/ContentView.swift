@@ -227,8 +227,10 @@ struct ContentView: View {
             if deviceManager.isConnected {
                 connectedContent
             } else {
+                let showCustomMessage = !deviceManager.availableDevices.isEmpty
                 EmptyStateView(
                     isDetecting: deviceManager.isDetecting,
+                    customMessage: showCustomMessage ? deviceManager.statusMessage : nil,
                     onRetry: { Task { await initializeDevice() } },
                     onConnectWiFi: { showWirelessConnect = true }
                 )

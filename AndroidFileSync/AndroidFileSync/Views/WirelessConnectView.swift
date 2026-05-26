@@ -60,6 +60,9 @@ class ADBPairingBrowser: ObservableObject {
     
     private let queue = DispatchQueue(label: "com.androidfilesync.adb.mdns")
     
+    /// Tracks pending removal tasks for each service name to debounce transient network drops
+    private var pendingRemovals: [String: Task<Void, Never>] = [:]
+    
     func startBrowsing() {
         if Self.isBrowsingGlobally {
             return
@@ -122,32 +125,44 @@ class ADBPairingBrowser: ObservableObject {
             for change in changes {
                 switch change {
                 case .removed(let result):
-                    // Device turned off wireless debugging — remove from list instantly
+                    // Device turned off wireless debugging — remove from list with debounce
                     if case let .service(name, _, _, _) = result.endpoint, name.hasPrefix("adb-") {
                         let ipToDisconnect = self?.discoveredDevices[name]?.ip
                         DispatchQueue.main.async {
-                            // Don't remove devices that need re-pairing — keep them visible
-                            // so the user can still see the pairing form
-                            let keepForRepairing = ipToDisconnect.map { ADBPairingBrowser.needsRepairing.contains($0) } ?? false
-                            if !keepForRepairing {
-                                self?.discoveredDevices.removeValue(forKey: name)
-                            }
-                            self?.evaluateStatus()
+                            // Cancel any existing removal task for this device
+                            self?.pendingRemovals[name]?.cancel()
                             
-                            // Force adb disconnect, but NOT for devices needing re-pair
-                            // (those are expected to be in a flaky connect state)
-                            if let ip = ipToDisconnect,
-                               !ADBPairingBrowser.needsRepairing.contains(ip) {
-                                Task {
-                                    let adbPath = ADBManager.getADBPath()
-                                    if !adbPath.isEmpty {
-                                        print("📡 NWBrowser: Device \(name) removed, forcing adb disconnect \(ip)")
-                                        _ = await Shell.runAsyncWithTimeout(adbPath, args: ["disconnect", ip], timeoutSeconds: 3.0)
+                            // Schedule removal with a 5.0-second delay to filter out transient drops
+                            let task = Task { [weak self] in
+                                try? await Task.sleep(nanoseconds: 5_000_000_000) // 5.0s
+                                guard !Task.isCancelled else { return }
+                                
+                                await MainActor.run {
+                                    guard let self = self else { return }
+                                    self.pendingRemovals.removeValue(forKey: name)
+                                    let keepForRepairing = ipToDisconnect.map { ADBPairingBrowser.needsRepairing.contains($0) } ?? false
+                                    if !keepForRepairing {
+                                        self.discoveredDevices.removeValue(forKey: name)
                                     }
-                                    self?.onDeviceListChanged?()
+                                    self.evaluateStatus()
+                                    
+                                    // Force adb disconnect, but NOT for devices needing re-pair
+                                    if let ip = ipToDisconnect,
+                                       !ADBPairingBrowser.needsRepairing.contains(ip) {
+                                        Task {
+                                            let adbPath = ADBManager.getADBPath()
+                                            if !adbPath.isEmpty {
+                                                print("📡 NWBrowser: Device \(name) removed, forcing adb disconnect \(ip)")
+                                                _ = await Shell.runAsyncWithTimeout(adbPath, args: ["disconnect", ip], timeoutSeconds: 3.0)
+                                            }
+                                            self.onDeviceListChanged?()
+                                        }
+                                    }
                                 }
                             }
+                            self?.pendingRemovals[name] = task
                         }
+
                     }
                 default:
                     break
@@ -183,6 +198,12 @@ class ADBPairingBrowser: ObservableObject {
         isBrowsing = false
         Self.isBrowsingGlobally = false
         
+        // Cancel all pending removals
+        for task in pendingRemovals.values {
+            task.cancel()
+        }
+        pendingRemovals.removeAll()
+
         DispatchQueue.main.async {
             if self.status == .searching {
                 self.status = .idle
@@ -269,10 +290,21 @@ class ADBPairingBrowser: ObservableObject {
 
                 // Check if this endpoint is already connected by matching against adb devices.
                 let connectAddr = "\(ip):\(port)"
-                let isActiveTarget = ADBManager.activeDeviceSerial == connectAddr
-                    || ADBManager.activeDeviceSerial == "\(hostname ?? ip):\(port)"
+                let isActiveTarget: Bool = {
+                    if let active = ADBManager.activeDeviceSerial {
+                        if active == connectAddr || active == "\(hostname ?? ip):\(port)" { return true }
+                        if let service = serviceName, !service.isEmpty {
+                            return active.hasPrefix(service + ".") || active == service
+                        }
+                    }
+                    return false
+                }()
                 let isPaired = isConnectService && (isActiveTarget || connectedSerials.contains(where: { serial in
-                    serial == connectAddr || serial == "\(hostname ?? ip):\(port)" || serial.contains(ip)
+                    if serial == connectAddr || serial == "\(hostname ?? ip):\(port)" || serial.contains(ip) { return true }
+                    if let service = serviceName, !service.isEmpty {
+                        return serial.hasPrefix(service + ".") || serial == service
+                    }
+                    return false
                 }))
                 
                 // Auto-reconnect to previously known devices that just reappeared on mDNS
@@ -308,6 +340,10 @@ class ADBPairingBrowser: ObservableObject {
                 }
 
                 await MainActor.run {
+                    // Cancel any pending removal since the device is rediscovered/active
+                    self.pendingRemovals[dictKey]?.cancel()
+                    self.pendingRemovals.removeValue(forKey: dictKey)
+
                     let existing = self.discoveredDevices[dictKey]
                     // Don't mark as paired if this IP needs re-pairing
                     let blocked = ADBPairingBrowser.needsRepairing.contains(ip)
@@ -397,6 +433,10 @@ struct WirelessConnectView: View {
     @AppStorage("hasSeenWifiSetup") private var hasSeenWifiSetup = false
     @State private var showSetupPopup = false
     
+    // USB Occupied State
+    @State private var isUSBOccupied = false
+    @State private var isClaimingUSB = false
+    
     // Manual pairing fields
     @State private var ipAddress = ""
     @State private var pairingPort = ""
@@ -482,6 +522,16 @@ struct WirelessConnectView: View {
             if !hasSeenWifiSetup {
                 showSetupPopup = true
             }
+            
+            // Check if USB device is occupied
+            Task {
+                isUSBOccupied = await deviceManager.isUSBDeviceOccupiedByDefaultServer()
+            }
+        }
+        .onChange(of: deviceManager.availableDevices) { _ in
+            Task {
+                isUSBOccupied = await deviceManager.isUSBDeviceOccupiedByDefaultServer()
+            }
         }
         .onDisappear {
             pairingBrowser.stopBrowsing()
@@ -537,6 +587,11 @@ struct WirelessConnectView: View {
 
         return ScrollView {
             VStack(spacing: 0) {
+                if isUSBOccupied {
+                    usbOccupiedWarningBanner
+                        .padding(.horizontal, 20)
+                        .padding(.top, 20)
+                }
 
                 // ╔══════════════════════════════════════════════════════╗
                 // ║  STATE 1 — Already connected                         ║
@@ -725,6 +780,68 @@ struct WirelessConnectView: View {
             // Re-validate connection state (catches stale wireless connections)
             Task { await deviceManager.detectDevice() }
         }
+    }
+
+    // MARK: - USB Occupied Warning Banner View
+    
+    @ViewBuilder
+    private var usbOccupiedWarningBanner: some View {
+        VStack(spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.title3)
+                    .foregroundColor(.orange)
+                    .padding(.top, 2)
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("USB Device Occupied")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(.primary)
+                    Text("A USB device is connected but claimed by another app (like Android Studio). Release it to use USB connection here.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+            }
+            
+            Button(action: {
+                isClaimingUSB = true
+                Task {
+                    _ = await ADBManager.recoverPrivateUSBTransportIfNeeded(forceRestart: true)
+                    await deviceManager.detectDevice()
+                    isUSBOccupied = await deviceManager.isUSBDeviceOccupiedByDefaultServer()
+                    isClaimingUSB = false
+                }
+            }) {
+                HStack {
+                    if isClaimingUSB {
+                        ProgressView().controlSize(.small)
+                            .padding(.trailing, 4)
+                    } else {
+                        Image(systemName: "cable.connector")
+                    }
+                    Text(isClaimingUSB ? "Claiming USB..." : "Claim USB Connection")
+                }
+                .font(.subheadline.weight(.medium))
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(isClaimingUSB ? Color.blue.opacity(0.6) : Color.blue)
+                .cornerRadius(8)
+            }
+            .buttonStyle(.plain)
+            .disabled(isClaimingUSB)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.orange.opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.orange.opacity(0.2), lineWidth: 1)
+                )
+        )
     }
 
     // MARK: - Discovered Devices Panel
@@ -1195,19 +1312,62 @@ struct WirelessConnectView: View {
                 }
                 return nil
             }()
-            let otherDevices = deviceManager.availableDevices.filter { dev in
-                guard dev.serial != ADBManager.activeDeviceSerial else { return false }
-                // Exclude wireless devices that are the same as the active wireless device
-                if let activeIP = activeIP, dev.isWireless {
-                    // IP:port serial — compare IP directly
-                    if let devIP = dev.ipAddress, devIP == activeIP { return false }
-                    // mDNS serial (no embedded IP) — match by device name
-                    if dev.ipAddress == nil && dev.displayName == deviceManager.deviceName {
-                        return false
+            let otherDevices: [ADBManager.ConnectedDevice] = {
+                let filtered = deviceManager.availableDevices.filter { dev in
+                    guard dev.serial != ADBManager.activeDeviceSerial else { return false }
+                    
+                    // Exclude wireless devices that are the same as the active device
+                    if dev.isWireless {
+                        // Check if active device has the same hardware serial
+                        let activeIsWireless = deviceManager.availableDevices.first(where: { $0.serial == ADBManager.activeDeviceSerial })?.isWireless == true
+                        if activeIsWireless,
+                           let activeHw = deviceManager.availableDevices.first(where: { $0.serial == ADBManager.activeDeviceSerial })?.derivedHardwareSerial,
+                           let devHw = dev.derivedHardwareSerial,
+                           activeHw == devHw {
+                            return false
+                        }
+                        
+                        // Fallback IP matching if hardware serial is missing
+                        if let activeIP = activeIP {
+                            if let devIP = dev.ipAddress, devIP == activeIP { return false }
+                            if dev.ipAddress == nil && dev.displayName == deviceManager.deviceName {
+                                return false
+                            }
+                        }
                     }
+                    return true
                 }
-                return true
-            }
+                
+                // Deduplicate remaining other devices:
+                // If same device (same non-nil derivedHardwareSerial OR same wireless displayName)
+                // has multiple wireless connections, we only keep one wireless entry in this UI section.
+                var seenWirelessSerials = Set<String>()
+                var seenWirelessNames = Set<String>()
+                var unique = [ADBManager.ConnectedDevice]()
+                for dev in filtered {
+                    if dev.isWireless {
+                        // 1. Try matching by derived hardware serial
+                        let hw = dev.derivedHardwareSerial
+                        if let hw = hw, !hw.isEmpty {
+                            if seenWirelessSerials.contains(hw) {
+                                continue
+                            }
+                            seenWirelessSerials.insert(hw)
+                        }
+                        
+                        // 2. Also match by displayName to catch cases where hardware serial resolution flaked
+                        let cleanName = dev.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !cleanName.isEmpty && cleanName != "No Device" && !cleanName.contains("Unauthorized") && !cleanName.contains("Offline") {
+                            if seenWirelessNames.contains(cleanName) {
+                                continue
+                            }
+                            seenWirelessNames.insert(cleanName)
+                        }
+                    }
+                    unique.append(dev)
+                }
+                return unique
+            }()
             if !otherDevices.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 6) {

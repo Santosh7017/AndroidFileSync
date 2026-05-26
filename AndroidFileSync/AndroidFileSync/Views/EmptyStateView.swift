@@ -9,6 +9,7 @@ import SwiftUI
 
 struct EmptyStateView: View {
     var isDetecting: Bool = false
+    var customMessage: String? = nil
     var onRetry: (() -> Void)? = nil
     var onConnectWiFi: (() -> Void)? = nil
     
@@ -24,20 +25,22 @@ struct EmptyStateView: View {
                     ProgressView()
                         .scaleEffect(1.5)
                 } else {
-                    Image(systemName: "cable.connector.slash")
+                    Image(systemName: customMessage != nil ? "lock.shield.fill" : "cable.connector.slash")
                         .font(.system(size: 48))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(customMessage != nil ? .orange : .secondary)
                 }
             }
             
             // Status text
             VStack(spacing: 8) {
-                Text(isDetecting ? "Scanning for Device..." : "No Device Connected")
+                Text(isDetecting ? "Scanning for Device..." : (customMessage != nil ? "Connection Blocked" : "No Device Connected"))
                     .font(.system(.title2, design: .rounded, weight: .semibold))
                 
-                Text(isDetecting ? "Please wait while we detect your device" : "Connect your Android device via USB or WiFi")
+                Text(isDetecting ? "Please wait while we detect your device" : (customMessage ?? "Connect your Android device via USB or WiFi"))
                     .font(.body)
                     .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
             }
             
             // Instructions
