@@ -168,8 +168,7 @@ If Auto-Discovery doesn't find your phone (for example, on a corporate network o
   <img src="docs/2026-05-19_00-21-26.png" width="800" alt="AndroidFileSync Main Window">
   <br><br>
   <img src="docs/2026-05-19_00-22-37.png" width="800" alt="AndroidFileSync App Manager  Screenshot">
-  <br><br>
-   <img src="docs/2026-05-19_03-25-19.png" width="800" alt="AndroidFileSync File Transfer Screenshot">
+  
   <br><br>
   <img src="docs/2026-05-19_00-23-59.png" width="800" alt="AndroidFileSync Trash view Screenshot">
   <br><br>
