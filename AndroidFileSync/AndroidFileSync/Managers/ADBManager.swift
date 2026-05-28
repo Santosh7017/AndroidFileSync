@@ -672,9 +672,11 @@ class ADBManager {
         let basePath = path.hasSuffix("/") ? path : path + "/"
         
         output.enumerateLines { line, _ in
-            guard !line.isEmpty else { return }
+            // Strip \r — Samsung/modern devices send \r\n over ADB shell
+            let cleanLine = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+            guard !cleanLine.isEmpty else { return }
             // Format: "<size> <relative/path/to/file>"
-            let parts = line.split(separator: " ", maxSplits: 1)
+            let parts = cleanLine.split(separator: " ", maxSplits: 1)
             guard parts.count == 2 else { return }
             let size = UInt64(parts[0]) ?? 0
             let relativePath = String(parts[1])
@@ -741,8 +743,9 @@ class ADBManager {
         let startTime = Date()
         
         // FAST APPROACH: Use ls -1 for names only (very fast even for 1000+ files)
-        // Then use a single stat command to get file types
-        let listCommand = "ls -1a '\(path)'"
+        // Redirect stderr to stdout (2>&1) so we can detect Samsung/Android 15 silent
+        // permission-denied responses that return exit code 0 with no output.
+        let listCommand = "ls -1a '\(path)' 2>&1"
         
         let (code, output, error) = await Shell.runAsyncWithTimeout(
             adbPath,
@@ -766,15 +769,35 @@ class ADBManager {
         }
         
         // Parse file names
+        // Strip \r from each name — Samsung devices (Android 12+) send \r\n over ADB shell.
+        // Without this, filenames become "photo.jpg\r" and stat/find can't locate them,
+        // causing the folder to appear empty even when files exist.
         var fileNames: [String] = []
         output.enumerateLines { name, _ in
+            let cleanName = name.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
             // Skip . and .. and empty lines
-            guard !name.isEmpty && name != "." && name != ".." else { return }
-            fileNames.append(name)
+            guard !cleanName.isEmpty && cleanName != "." && cleanName != ".." else { return }
+            // Skip permission-denied lines that ended up in stdout (from 2>&1)
+            guard !cleanName.hasPrefix("ls:") && !cleanName.contains("Permission denied") else { return }
+            fileNames.append(cleanName)
         }
         
-        
         if fileNames.isEmpty {
+            // Detect Android 12+ / Samsung One UI scoped-storage silent permission denial:
+            // `ls` returns exit 0 but the output contains a permission error or is truly empty.
+            // Try the content:// media provider as a fallback for DCIM paths.
+            let isDCIM = path.contains("/DCIM") || path.contains("/Pictures") || path.contains("/Movies")
+            if isDCIM {
+                let permissionError = output.contains("Permission denied") || output.contains("Operation not permitted")
+                if permissionError {
+                    print("⚠️ ADB: Permission denied for \(path) — trying content:// media fallback")
+                }
+                let mediaFiles = await listMediaFiles(dcimPath: path, adbPath: adbPath)
+                if !mediaFiles.isEmpty {
+                    print("📷 ADB: content:// fallback returned \(mediaFiles.count) files for \(path)")
+                    return mediaFiles
+                }
+            }
             return []
         }
         
@@ -783,77 +806,109 @@ class ADBManager {
             return try await listFilesWithDetails(path: path, adbPath: adbPath, exactNames: fileNames)
         }
         
-        // For large directories, get file types using stat command
-        // Build a command that checks each file's type
+        // For large directories, use stat in batches.
+        // NOTE: Samsung toybox `find` does NOT support -printf, so the previous
+        // `find -printf` approach silently returned empty output on Samsung devices.
+        // Stat-based batching is universally supported (Android 7+ toybox & busybox).
         var files: [ADBFile] = []
         files.reserveCapacity(fileNames.count)
         
-        // Use find to get file types and modification times efficiently in a single command
-        // Format: type timestamp size filename (timestamp is Unix epoch)
-        let findCommand = "find '\(path)' -maxdepth 1 -mindepth 1 \\( -type d -printf 'd %T@ %f\\n' -o -type f -printf 'f %T@ %s %f\\n' -o -printf '? %T@ %f\\n' \\) 2>/dev/null"
+        let statFiles = await listFilesViaStat(path: path, adbPath: adbPath, exactNames: fileNames)
+        if statFiles.count == fileNames.count {
+            return statFiles
+        }
         
-        let (findCode, findOutput, _) = await Shell.runAsyncWithTimeout(
-            adbPath,
-            args: deviceArgs(["shell", findCommand]),
-            timeoutSeconds: 60.0
-        )
+        // stat missed some files — supplement with ls -la
+        let lsFiles = await listFilesViaLs(path: path, adbPath: adbPath, exactNames: fileNames)
+        if lsFiles.count > statFiles.count {
+            let lsNames = Set(lsFiles.map { $0.name })
+            var merged = lsFiles
+            for f in statFiles where !lsNames.contains(f.name) { merged.append(f) }
+            if merged.count == fileNames.count { return merged }
+            return fillMissing(from: fileNames, existing: merged, basePath: path)
+        }
         
-        if findCode == 0 && !findOutput.isEmpty {
-            // Parse find output: "d timestamp dirname" or "f timestamp size filename"
-            findOutput.enumerateLines { line, _ in
-                guard line.count >= 3 else { return }
+        if !statFiles.isEmpty {
+            return fillMissing(from: fileNames, existing: statFiles, basePath: path)
+        }
+        if !lsFiles.isEmpty {
+            return fillMissing(from: fileNames, existing: lsFiles, basePath: path)
+        }
+        
+        // Final fallback: names only (no metadata)
+        return fillMissing(from: fileNames, existing: [], basePath: path)
+    }
+    
+    // MARK: - content:// Media Provider fallback (Android 12+ / Samsung scoped storage)
+    
+    /// Fallback for DCIM/Camera on Android 12+ where direct `ls` may be silently
+    /// blocked by scoped storage / Samsung One UI SELinux policy.
+    /// Queries the Android MediaStore content provider which is always accessible over ADB.
+    private static func listMediaFiles(dcimPath: String, adbPath: String) async -> [ADBFile] {
+        // Determine media type from path
+        let isVideo = dcimPath.lowercased().contains("video") || dcimPath.lowercased().contains("movies")
+        let uri = isVideo
+            ? "content://media/external/video/media"
+            : "content://media/external/images/media"
+        
+        // Also query videos if in a generic DCIM path
+        let uris: [String] = dcimPath.lowercased().contains("dcim")
+            ? ["content://media/external/images/media", "content://media/external/video/media"]
+            : [uri]
+        
+        var allFiles: [ADBFile] = []
+        
+        for queryUri in uris {
+            let cmd = "content query --uri \(queryUri) --projection _display_name,_size,date_modified,_data 2>/dev/null"
+            let (code, output, _) = await Shell.runAsyncWithTimeout(
+                adbPath, args: deviceArgs(["shell", cmd]), timeoutSeconds: 30.0
+            )
+            guard code == 0, !output.isEmpty else { continue }
+            
+            output.enumerateLines { line, _ in
+                // Each row: "Row: N _display_name=foo.jpg, _size=1234, date_modified=1700000000, _data=/storage/.../foo.jpg"
+                let cleanLine = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+                guard cleanLine.hasPrefix("Row:") else { return }
                 
-                let typeChar = line.first
-                let rest = String(line.dropFirst(2))
+                // Filter to only files whose _data path matches dcimPath
+                guard cleanLine.contains(dcimPath) else { return }
                 
-                if typeChar == "d" {
-                    // Directory: "d timestamp name"
-                    let parts = rest.split(separator: " ", maxSplits: 1)
-                    if parts.count >= 2 {
-                        let timestamp = Double(parts[0])
-                        let modDate = timestamp.map { Date(timeIntervalSince1970: $0) }
-                        let name = String(parts[1])
-                        guard !name.isEmpty && name != "." && name != ".." else { return }
-                        let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
-                        files.append(ADBFile(name: name, path: fullPath, isDirectory: true, size: 0, modificationDate: modDate))
-                    }
-                } else if typeChar == "f" {
-                    // File: "f timestamp size name"
-                    let parts = rest.split(separator: " ", maxSplits: 2)
-                    if parts.count >= 3 {
-                        let timestamp = Double(parts[0])
-                        let modDate = timestamp.map { Date(timeIntervalSince1970: $0) }
-                        let size = UInt64(parts[1]) ?? 0
-                        let name = String(parts[2])
-                        guard !name.isEmpty else { return }
-                        let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
-                        files.append(ADBFile(name: name, path: fullPath, isDirectory: false, size: size, modificationDate: modDate))
-                    }
-                } else {
-                    // Unknown type, treat as file
-                    let parts = rest.split(separator: " ", maxSplits: 1)
-                    if parts.count >= 2 {
-                        let timestamp = Double(parts[0])
-                        let modDate = timestamp.map { Date(timeIntervalSince1970: $0) }
-                        let name = String(parts[1])
-                        guard !name.isEmpty && name != "." && name != ".." else { return }
-                        let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
-                        files.append(ADBFile(name: name, path: fullPath, isDirectory: false, size: 0, modificationDate: modDate))
+                // Parse _data (full device path)
+                guard let dataRange = cleanLine.range(of: "_data=") else { return }
+                let dataAndRest = String(cleanLine[dataRange.upperBound...])
+                let dataPath = dataAndRest.components(separatedBy: ",").first?.trimmingCharacters(in: .whitespaces) ?? ""
+                guard !dataPath.isEmpty else { return }
+                let fileName = (dataPath as NSString).lastPathComponent
+                
+                // Parse _size
+                var fileSize: UInt64 = 0
+                if let sizeRange = cleanLine.range(of: "_size=") {
+                    let sizeAndRest = String(cleanLine[sizeRange.upperBound...])
+                    let sizeStr = sizeAndRest.components(separatedBy: ",").first?.trimmingCharacters(in: .whitespaces) ?? ""
+                    fileSize = UInt64(sizeStr) ?? 0
+                }
+                
+                // Parse date_modified (Unix timestamp)
+                var modDate: Date? = nil
+                if let dateRange = cleanLine.range(of: "date_modified=") {
+                    let dateAndRest = String(cleanLine[dateRange.upperBound...])
+                    let dateStr = dateAndRest.components(separatedBy: ",").first?.trimmingCharacters(in: .whitespaces) ?? ""
+                    if let ts = Double(dateStr) {
+                        modDate = Date(timeIntervalSince1970: ts)
                     }
                 }
+                
+                allFiles.append(ADBFile(
+                    name: fileName,
+                    path: dataPath,
+                    isDirectory: false,
+                    size: fileSize,
+                    modificationDate: modDate
+                ))
             }
-            return files
         }
         
-        // Final fallback: just use file names without sizes
-        for name in fileNames {
-            let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
-            // Guess directory by common patterns or lack of extension
-            let isDir = !name.contains(".")
-            files.append(ADBFile(name: name, path: fullPath, isDirectory: isDir, size: 0, modificationDate: nil))
-        }
-        
-        return files
+        return allFiles
     }
     
     // Helper for small directories — tries stat first (modern), falls back to ls -la (legacy)
@@ -911,12 +966,14 @@ class ADBManager {
             guard code == 0 else { continue }
             
             output.enumerateLines { line, _ in
-                let parts = line.split(separator: "|", maxSplits: 3)
+                // Strip \r — Samsung/Android 12+ ADB sends \r\n line endings
+                let cleanLine = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+                let parts = cleanLine.split(separator: "|", maxSplits: 3)
                 guard parts.count == 4 else { return }
                 let perms = String(parts[0])
                 let size  = UInt64(parts[1]) ?? 0
                 let ts    = Double(parts[2])
-                let name  = String(parts[3])
+                let name  = String(parts[3]).trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
                 let isDir = perms.hasPrefix("d")
                 let modDate = ts.map { Date(timeIntervalSince1970: $0) }
                 let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
