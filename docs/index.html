@@ -901,22 +901,34 @@
 async function fetchGHStats() {
   try {
     const repo = 'Santosh7017/AndroidFileSync';
-    const [repoResp, relResp] = await Promise.all([
+    const [repoResp, relResp, clonesResp] = await Promise.all([
       fetch('https://api.github.com/repos/' + repo),
-      fetch('https://api.github.com/repos/' + repo + '/releases?per_page=20')
+      fetch('https://api.github.com/repos/' + repo + '/releases?per_page=20'),
+      fetch('clones.json').catch(() => null)
     ]);
     if (repoResp.ok) {
       const data = await repoResp.json();
       const el = document.getElementById('stars-count');
       if (el && data.stargazers_count) el.textContent = data.stargazers_count;
     }
+    
+    let totalDownloads = 0;
     if (relResp.ok) {
       const releases = await relResp.json();
-      let total = 0;
-      releases.forEach(r => { if (r.assets) r.assets.forEach(a => { total += (a.download_count || 0); }); });
-      const el = document.getElementById('dl-count');
-      if (el && total > 0) el.textContent = total.toLocaleString();
+      releases.forEach(r => { if (r.assets) r.assets.forEach(a => { totalDownloads += (a.download_count || 0); }); });
     }
+    
+    if (clonesResp && clonesResp.ok) {
+      try {
+        const clonesData = await clonesResp.json();
+        if (clonesData && clonesData.total_count) {
+          totalDownloads += clonesData.total_count;
+        }
+      } catch(e) {}
+    }
+    
+    const el = document.getElementById('dl-count');
+    if (el && totalDownloads > 0) el.textContent = totalDownloads.toLocaleString();
   } catch(e) { console.error(e); }
 }
 

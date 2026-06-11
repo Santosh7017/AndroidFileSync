@@ -1,0 +1,74 @@
+name: Fetch Clone Stats
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # Runs every day at midnight
+  workflow_dispatch: # Allows manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  fetch-and-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Fetch and Accumulate Clone Stats
+        uses: actions/github-script@v7
+        env:
+          TRAFFIC_TOKEN: ${{ secrets.TRAFFIC_TOKEN }}
+        with:
+          script: |
+            const fs = require('fs');
+            const file_path = 'docs/clones.json';
+            
+            // Read existing data if it exists
+            let data = { total_count: 0, history: {} };
+            if (fs.existsSync(file_path)) {
+              data = JSON.parse(fs.readFileSync(file_path, 'utf8'));
+            }
+            
+            // Ensure history is an object in case of malformed previous files
+            if (!data.history) {
+              data.history = {};
+            }
+            
+            // Fetch traffic data from GitHub API
+            const response = await github.request('GET /repos/{owner}/{repo}/traffic/clones', {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              headers: {
+                authorization: `token ${process.env.TRAFFIC_TOKEN}`
+              }
+            });
+            
+            // Update history to avoid double counting across overlapping windows
+            if (response.data && response.data.clones) {
+              for (const clone of response.data.clones) {
+                // clone.timestamp looks like '2023-10-14T00:00:00Z'
+                data.history[clone.timestamp] = clone.count;
+              }
+            }
+            
+            // Recalculate the all-time total count by summing up all historical days
+            data.total_count = Object.values(data.history).reduce((a, b) => a + b, 0);
+            
+            // Save updated JSON
+            fs.writeFileSync(file_path, JSON.stringify(data, null, 2) + '\n');
+            console.log(`Updated clone stats successfully. Total clone count: ${data.total_count}`);
+
+      - name: Commit and push changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add docs/clones.json
+          
+          # Only commit if there are actual changes
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: Update clone statistics [skip ci]"
+            git push
+          fi
