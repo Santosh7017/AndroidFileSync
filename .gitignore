@@ -69,3 +69,4 @@ playground.xcworkspace
 # Project-specific
 AndroidFileSync/remove_bg.swift
 .continue/agents/new-config.yaml
+.codegraph
