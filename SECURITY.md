@@ -6,7 +6,7 @@ We currently provide security updates for the following versions of AndroidFileS
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 2.0.x   | :white_check_mark: |
+| 2.3.x   | :white_check_mark: |
 | 1.1.x   | :x:                |
 | 1.0.x   | :x:                |
 | < 1.0   | :x:                |
