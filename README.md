@@ -14,7 +14,7 @@ No cloud. No Google account needed. Plug in via USB or connect wirelessly over W
 ## What Can It Do?
 
 - 📁 **Browse your phone like Finder** — Navigate folders, search, sort by name/size/type
-- 🖱️ **Drag & Drop** — Drag files from your Mac straight to your phone (and back)
+- 🖱️ **Drag & Drop** — Drag files from your Mac straight to your phone
 - 📶 **USB or WiFi** — Connect with a cable, or wirelessly over your home network
 - 👁️ **Preview files** — Double-click to view images, videos, and PDFs without downloading
 - 🚀 **Fast transfers** — Upload and download multiple files at the same time
