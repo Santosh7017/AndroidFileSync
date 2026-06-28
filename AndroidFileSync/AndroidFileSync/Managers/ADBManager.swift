@@ -672,7 +672,7 @@ class ADBManager {
         let basePath = path.hasSuffix("/") ? path : path + "/"
         
         output.enumerateLines { line, _ in
-            // Strip \r — Samsung/modern devices send \r\n over ADB shell
+            // Strip \r to handle carriage returns from ADB shell output
             let cleanLine = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
             guard !cleanLine.isEmpty else { return }
             // Format: "<size> <relative/path/to/file>"
@@ -737,29 +737,55 @@ class ADBManager {
         }
     }
 
-    static func listFiles(path: String) async throws -> [ADBFile] {
+    static func listFiles(path: String, onPageLoaded: (([ADBFile]) -> Void)? = nil) async throws -> [ADBFile] {
         let adbPath = getADBPath()
+        let totalStart = Date()
+        AppLogger.log("⚙️ [listFiles] Request to list directory: \(path)")
         
         let startTime = Date()
-        
-        // FAST APPROACH: Use ls -1 for names only (very fast even for 1000+ files)
-        // Redirect stderr to stdout (2>&1) so we can detect Samsung/Android 15 silent
-        // permission-denied responses that return exit code 0 with no output.
         let listCommand = "ls -1a '\(path)' 2>&1"
+        AppLogger.log("⚙️ [listFiles] Executing command: ls -1a '\(path)' 2>&1")
+        
+        // Shorter timeout for media paths — FUSE/Scoped Storage can block ls on Android 14+
+        let isMediaPath = path.contains("/DCIM") || path.contains("/Pictures") || path.contains("/Movies")
+        let lsTimeout: Double = isMediaPath ? 12.0 : 30.0
+        if isMediaPath {
+            AppLogger.log("⚙️ [listFiles] Media path detected — using \(Int(lsTimeout))s ls timeout (content:// fallback available)")
+        }
         
         let (code, output, error) = await Shell.runAsyncWithTimeout(
             adbPath,
             args: deviceArgs(["shell", listCommand]),
-            timeoutSeconds: 30.0
+            timeoutSeconds: lsTimeout
         )
         
         let elapsed = Date().timeIntervalSince(startTime)
+        AppLogger.log("⚙️ [listFiles] Command finished. Code: \(code), Elapsed: \(String(format: "%.3fs", elapsed)), Output length: \(output.count) chars, Stderr length: \(error.count) chars")
         
-        // Handle errors
+        if !error.isEmpty {
+            AppLogger.log("⚠️ [listFiles] Stderr: \(error)")
+        }
+        
+        let lines = output.components(separatedBy: .newlines).filter { !$0.isEmpty }
+        AppLogger.log("⚙️ [listFiles] Raw output lines count: \(lines.count)")
+        
         if code != 0 {
-            // Suppress "No such file or directory" error for optional paths like Documents
-            if !error.contains("No such file or directory") {
-                print("❌ ADB Error: \(error)")
+            AppLogger.log("❌ [listFiles] Command failed with code \(code)")
+            let isDCIMOnError = path.contains("/DCIM") || path.contains("/Pictures") || path.contains("/Movies")
+            if isDCIMOnError {
+                AppLogger.log("⚠️ [listFiles] Path contains DCIM/Pictures/Movies on error, attempting listMediaFiles content:// fallback...")
+                let mediaFiles = await listMediaFiles(dcimPath: path, adbPath: adbPath, onPageLoaded: onPageLoaded)
+                if !mediaFiles.isEmpty {
+                    let totalElapsed = Date().timeIntervalSince(totalStart)
+                    AppLogger.log("📷 [listFiles] content:// fallback recovered \(mediaFiles.count) files in \(String(format: "%.3fs", totalElapsed)) total")
+                    return mediaFiles
+                } else {
+                    AppLogger.log("⚠️ [listFiles] content:// fallback returned 0 files")
+                }
+            }
+            
+            if !error.contains("No such file or directory") && !output.contains("No such file or directory") {
+                AppLogger.log("❌ [listFiles] Error: \(error.isEmpty ? output : error)")
             }
             throw NSError(
                 domain: "ADBError",
@@ -768,176 +794,885 @@ class ADBManager {
             )
         }
         
-        // Parse file names
-        // Strip \r from each name — Samsung devices (Android 12+) send \r\n over ADB shell.
-        // Without this, filenames become "photo.jpg\r" and stat/find can't locate them,
-        // causing the folder to appear empty even when files exist.
         var fileNames: [String] = []
         output.enumerateLines { name, _ in
             let cleanName = name.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
-            // Skip . and .. and empty lines
             guard !cleanName.isEmpty && cleanName != "." && cleanName != ".." else { return }
-            // Skip permission-denied lines that ended up in stdout (from 2>&1)
-            guard !cleanName.hasPrefix("ls:") && !cleanName.contains("Permission denied") else { return }
+            guard !cleanName.hasPrefix("ls:") && !cleanName.contains("Permission denied") && !cleanName.contains("Operation not permitted") else {
+                // Safe to log: these lines contain only directory paths, not file names
+                AppLogger.log("⚠️ [listFiles] Permission error: \(cleanName)")
+                return
+            }
             fileNames.append(cleanName)
         }
         
+        let rawCount = output.components(separatedBy: .newlines).filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.count
+        let skipped = rawCount - fileNames.count - 2 // subtract "." and ".."
+        if skipped > 0 {
+            AppLogger.log("⚙️ [listFiles] Parsed \(fileNames.count) valid filenames (\(skipped) lines filtered out — '.' / '..' / permission errors)")
+        } else {
+            AppLogger.log("⚙️ [listFiles] Parsed \(fileNames.count) valid filenames (raw: \(rawCount) lines, no errors filtered)")
+        }
+        
         if fileNames.isEmpty {
-            // Detect Android 12+ / Samsung One UI scoped-storage silent permission denial:
-            // `ls` returns exit 0 but the output contains a permission error or is truly empty.
-            // Try the content:// media provider as a fallback for DCIM paths.
+            AppLogger.log("⚠️ [listFiles] No files returned by ls. Checking if media fallback is appropriate...")
             let isDCIM = path.contains("/DCIM") || path.contains("/Pictures") || path.contains("/Movies")
             if isDCIM {
-                let permissionError = output.contains("Permission denied") || output.contains("Operation not permitted")
-                if permissionError {
-                    print("⚠️ ADB: Permission denied for \(path) — trying content:// media fallback")
-                }
-                let mediaFiles = await listMediaFiles(dcimPath: path, adbPath: adbPath)
-                if !mediaFiles.isEmpty {
-                    print("📷 ADB: content:// fallback returned \(mediaFiles.count) files for \(path)")
-                    return mediaFiles
-                }
-            }
-            return []
-        }
-        
-        // For small directories, use ls -la to get full details
-        if fileNames.count <= 100 {
-            return try await listFilesWithDetails(path: path, adbPath: adbPath, exactNames: fileNames)
-        }
-        
-        // For large directories, use stat in batches.
-        // NOTE: Samsung toybox `find` does NOT support -printf, so the previous
-        // `find -printf` approach silently returned empty output on Samsung devices.
-        // Stat-based batching is universally supported (Android 7+ toybox & busybox).
-        var files: [ADBFile] = []
-        files.reserveCapacity(fileNames.count)
-        
-        let statFiles = await listFilesViaStat(path: path, adbPath: adbPath, exactNames: fileNames)
-        if statFiles.count == fileNames.count {
-            return statFiles
-        }
-        
-        // stat missed some files — supplement with ls -la
-        let lsFiles = await listFilesViaLs(path: path, adbPath: adbPath, exactNames: fileNames)
-        if lsFiles.count > statFiles.count {
-            let lsNames = Set(lsFiles.map { $0.name })
-            var merged = lsFiles
-            for f in statFiles where !lsNames.contains(f.name) { merged.append(f) }
-            if merged.count == fileNames.count { return merged }
-            return fillMissing(from: fileNames, existing: merged, basePath: path)
-        }
-        
-        if !statFiles.isEmpty {
-            return fillMissing(from: fileNames, existing: statFiles, basePath: path)
-        }
-        if !lsFiles.isEmpty {
-            return fillMissing(from: fileNames, existing: lsFiles, basePath: path)
-        }
-        
-        // Final fallback: names only (no metadata)
-        return fillMissing(from: fileNames, existing: [], basePath: path)
-    }
-    
-    // MARK: - content:// Media Provider fallback (Android 12+ / Samsung scoped storage)
-    
-    /// Fallback for DCIM/Camera on Android 12+ where direct `ls` may be silently
-    /// blocked by scoped storage / Samsung One UI SELinux policy.
-    /// Queries the Android MediaStore content provider which is always accessible over ADB.
-    private static func listMediaFiles(dcimPath: String, adbPath: String) async -> [ADBFile] {
-        // Determine media type from path
-        let isVideo = dcimPath.lowercased().contains("video") || dcimPath.lowercased().contains("movies")
-        let uri = isVideo
-            ? "content://media/external/video/media"
-            : "content://media/external/images/media"
-        
-        // Also query videos if in a generic DCIM path
-        let uris: [String] = dcimPath.lowercased().contains("dcim")
-            ? ["content://media/external/images/media", "content://media/external/video/media"]
-            : [uri]
-        
-        var allFiles: [ADBFile] = []
-        
-        for queryUri in uris {
-            let cmd = "content query --uri \(queryUri) --projection _display_name,_size,date_modified,_data 2>/dev/null"
-            let (code, output, _) = await Shell.runAsyncWithTimeout(
-                adbPath, args: deviceArgs(["shell", cmd]), timeoutSeconds: 30.0
-            )
-            guard code == 0, !output.isEmpty else { continue }
-            
-            output.enumerateLines { line, _ in
-                // Each row: "Row: N _display_name=foo.jpg, _size=1234, date_modified=1700000000, _data=/storage/.../foo.jpg"
-                let cleanLine = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
-                guard cleanLine.hasPrefix("Row:") else { return }
-                
-                // Filter to only files whose _data path matches dcimPath
-                guard cleanLine.contains(dcimPath) else { return }
-                
-                // Parse _data (full device path)
-                guard let dataRange = cleanLine.range(of: "_data=") else { return }
-                let dataAndRest = String(cleanLine[dataRange.upperBound...])
-                let dataPath = dataAndRest.components(separatedBy: ",").first?.trimmingCharacters(in: .whitespaces) ?? ""
-                guard !dataPath.isEmpty else { return }
-                let fileName = (dataPath as NSString).lastPathComponent
-                
-                // Parse _size
-                var fileSize: UInt64 = 0
-                if let sizeRange = cleanLine.range(of: "_size=") {
-                    let sizeAndRest = String(cleanLine[sizeRange.upperBound...])
-                    let sizeStr = sizeAndRest.components(separatedBy: ",").first?.trimmingCharacters(in: .whitespaces) ?? ""
-                    fileSize = UInt64(sizeStr) ?? 0
+                // Classify the permission type for diagnostics
+                let permType: String
+                if output.contains("Operation not permitted") {
+                    permType = "SELinux/Capability (Operation not permitted)"
+                } else if output.contains("Permission denied") {
+                    permType = "FUSE/Scoped Storage (Permission denied)"
+                } else {
+                    permType = "Unknown (ls returned 0 files with no error text)"
                 }
                 
-                // Parse date_modified (Unix timestamp)
-                var modDate: Date? = nil
-                if let dateRange = cleanLine.range(of: "date_modified=") {
-                    let dateAndRest = String(cleanLine[dateRange.upperBound...])
-                    let dateStr = dateAndRest.components(separatedBy: ",").first?.trimmingCharacters(in: .whitespaces) ?? ""
-                    if let ts = Double(dateStr) {
-                        modDate = Date(timeIntervalSince1970: ts)
+                // ls returned Code 0 + 0 bytes — either a genuinely empty folder or FUSE sync delay.
+                // Use a quick 'find' check (different syscalls than ls) to distinguish the two cases
+                // before doing any slow retries. find takes ~0.1s vs 4.5s of blind retries.
+                if output.isEmpty && !output.contains("Permission denied") && !output.contains("Operation not permitted") {
+                    let escapedPathForFind = path.replacingOccurrences(of: "'", with: "'\\''")
+                    let findCheckCmd = "find '\(escapedPathForFind)' -mindepth 1 -maxdepth 1 2>/dev/null | head -5"
+                    AppLogger.log("⚙️ [listFiles] ls returned 0 chars. Running quick find check...")
+                    let (findCode, findOut, _) = await Shell.runAsyncWithTimeout(
+                        adbPath, args: deviceArgs(["shell", findCheckCmd]), timeoutSeconds: 5.0
+                    )
+                    let findResults = findOut.trimmingCharacters(in: .whitespacesAndNewlines)
+                    
+                    if findCode == 0 && findResults.isEmpty {
+                        // Both ls and find agree: directory is genuinely empty — return immediately
+                        AppLogger.log("⚙️ [listFiles] find also returned 0 entries. Directory is genuinely empty.")
+                        let totalElapsed = Date().timeIntervalSince(totalStart)
+                        AppLogger.log("⚙️ [listFiles] ✅ COMPLETE for \(path) - 0 files in \(String(format: "%.3fs", totalElapsed)) total")
+                        return []
+                    }
+                    
+                    if !findResults.isEmpty {
+                        // find found files but ls didn't → genuine FUSE sync delay. Single retry after 1.5s.
+                        AppLogger.log("⚠️ [listFiles] find found entries but ls returned empty — FUSE sync delay confirmed. Retrying ls after 1.5s...")
+                        try await Task.sleep(nanoseconds: 1_500_000_000)
+                        
+                        let (retryCode, retryOutput, retryError) = await Shell.runAsyncWithTimeout(
+                            adbPath, args: deviceArgs(["shell", listCommand]), timeoutSeconds: 10.0
+                        )
+                        let retryLines = retryOutput.components(separatedBy: .newlines).filter { !$0.isEmpty }
+                        AppLogger.log("⚙️ [listFiles] Retry result - Code: \(retryCode), Output length: \(retryOutput.count) chars, Lines: \(retryLines.count)")
+                        
+                        if retryCode == 0 && !retryOutput.isEmpty {
+                            var retryFileNames: [String] = []
+                            retryOutput.enumerateLines { name, _ in
+                                let cleanName = name.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+                                guard !cleanName.isEmpty && cleanName != "." && cleanName != ".." else { return }
+                                guard !cleanName.hasPrefix("ls:") && !cleanName.contains("Permission denied") && !cleanName.contains("Operation not permitted") else { return }
+                                retryFileNames.append(cleanName)
+                            }
+                            if !retryFileNames.isEmpty {
+                                AppLogger.log("✅ [listFiles] Retry recovered \(retryFileNames.count) files — FUSE sync delay resolved")
+                                let totalElapsed = Date().timeIntervalSince(totalStart)
+                                if retryFileNames.count <= 100 {
+                                    let result = try await listFilesWithDetails(path: path, adbPath: adbPath, exactNames: retryFileNames)
+                                    AppLogger.log("⚙️ [listFiles] ✅ COMPLETE for \(path) - \(result.count) files in \(String(format: "%.3fs", totalElapsed)) total (1 retry)")
+                                    return result
+                                }
+                                fileNames = retryFileNames
+                            } else {
+                                AppLogger.log("⚠️ [listFiles] Retry also returned 0 valid filenames")
+                                if !retryError.isEmpty {
+                                    AppLogger.log("⚠️ [listFiles] Retry error: \(retryError)")
+                                }
+                            }
+                        } else {
+                            AppLogger.log("⚠️ [listFiles] Retry failed - Code: \(retryCode), Error: \(retryError)")
+                        }
                     }
                 }
                 
-                allFiles.append(ADBFile(
-                    name: fileName,
-                    path: dataPath,
-                    isDirectory: false,
-                    size: fileSize,
-                    modificationDate: modDate
-                ))
+                if fileNames.isEmpty {
+                    // Optimization: If the ls command executed successfully (code 0) and returned no permission errors,
+                    // the folder is verified accessible and simply empty. Avoid calling slow media content fallback.
+                    let hasPermissionError = output.contains("Permission denied") || output.contains("Operation not permitted") || error.contains("Permission denied") || error.contains("Operation not permitted")
+                    if !hasPermissionError && code == 0 {
+                        AppLogger.log("⚙️ [listFiles] Directory is verified accessible and empty. Skipping content:// fallback.")
+                        let totalElapsed = Date().timeIntervalSince(totalStart)
+                        AppLogger.log("⚙️ [listFiles] ✅ COMPLETE for \(path) - 0 files in \(String(format: "%.3fs", totalElapsed)) total")
+                        return []
+                    }
+                    
+                    AppLogger.log("⚠️ [listFiles] Empty result on media path. Permission type: \(permType). Attempting content:// fallback...")
+                    let mediaFiles = await listMediaFiles(dcimPath: path, adbPath: adbPath, onPageLoaded: onPageLoaded)
+                    if !mediaFiles.isEmpty {
+                        let totalElapsed = Date().timeIntervalSince(totalStart)
+                        AppLogger.log("📷 [listFiles] content:// fallback returned \(mediaFiles.count) files in \(String(format: "%.3fs", totalElapsed)) total")
+                        return mediaFiles
+                    } else {
+                        AppLogger.log("⚠️ [listFiles] content:// fallback returned 0 files")
+                    }
+                }
+            }
+            let totalElapsed = Date().timeIntervalSince(totalStart)
+            AppLogger.log("⚠️ [listFiles] ❗ Returning EMPTY for path: \(path) - no files from ls and \(isDCIM ? "content:// fallback also empty" : "not a media path, no fallback available"). Elapsed: \(String(format: "%.3fs", totalElapsed))")
+            return []
+        }
+        
+        AppLogger.log("⚙️ [listFiles] Deciding strategy for \(fileNames.count) files...")
+        
+        if fileNames.count <= 100 {
+            AppLogger.log("⚙️ [listFiles] Small directory (<=100 files) -> using listFilesWithDetails")
+            let detailStart = Date()
+            let result = try await listFilesWithDetails(path: path, adbPath: adbPath, exactNames: fileNames)
+            let detailElapsed = Date().timeIntervalSince(detailStart)
+            AppLogger.log("⚙️ [listFiles] listFilesWithDetails returned \(result.count) files in \(String(format: "%.3fs", detailElapsed))")
+            // Log file size stats (privacy-safe: no names, just min/max/total)
+            let sizes = result.map { $0.size }
+            let totalBytes = sizes.reduce(0, +)
+            let maxSize = sizes.max() ?? 0
+            let minSize = sizes.filter { $0 > 0 }.min() ?? 0
+            AppLogger.log("⚙️ [listFiles] Size stats: total=\(totalBytes) bytes (\(totalBytes / 1_048_576) MB), max=\(maxSize) bytes (\(maxSize / 1_048_576) MB), min=\(minSize) bytes")
+            let totalElapsed = Date().timeIntervalSince(totalStart)
+            AppLogger.log("⚙️ [listFiles] ✅ COMPLETE for \(path) - \(result.count) files in \(String(format: "%.3fs", totalElapsed)) total")
+            return result
+        }
+        
+        AppLogger.log("⚙️ [listFiles] Large directory (>100 files) -> trying fast stat path")
+        let escapedPath = path.replacingOccurrences(of: "'", with: "'\\''")
+        let statAllCmd = "cd '\(escapedPath)' && stat -c '%A|%s|%Y|%n' * 2>/dev/null"
+        let fastStatStart = Date()
+        AppLogger.log("⚙️ [listFiles] Executing fast stat on \(fileNames.count) files in: \(path)")
+        let (statCode, statOutput, statErr) = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", statAllCmd]), timeoutSeconds: 3.0
+        )
+        let fastStatElapsed = Date().timeIntervalSince(fastStatStart)
+        AppLogger.log("⚙️ [listFiles] Fast stat result - Code: \(statCode), Elapsed: \(String(format: "%.3fs", fastStatElapsed)), Output length: \(statOutput.count) chars, Stderr length: \(statErr.count) chars")
+        
+        // Parse stdout regardless of exit code — stat outputs results for
+        // successful files even when some files cause errors (non-zero exit).
+        if !statOutput.isEmpty {
+            var files: [ADBFile] = []
+            files.reserveCapacity(fileNames.count)
+            let nameSet = Set(fileNames)
+            
+            statOutput.enumerateLines { line, _ in
+                let cleanLine = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+                let parts = cleanLine.split(separator: "|", maxSplits: 3)
+                guard parts.count == 4 else { return }
+                let perms = String(parts[0])
+                let size  = UInt64(parts[1]) ?? 0
+                let ts    = Double(parts[2])
+                let name  = String(parts[3]).trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+                guard nameSet.contains(name) else { return }
+                let isDir = perms.hasPrefix("d")
+                let modDate = ts.map { Date(timeIntervalSince1970: $0) }
+                let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
+                files.append(ADBFile(name: name, path: fullPath, isDirectory: isDir, size: size, modificationDate: modDate))
+            }
+            
+            if files.count == fileNames.count {
+                AppLogger.log("⚙️ [listFiles] stat * returned all \(files.count) files")
+                let totalElapsed = Date().timeIntervalSince(totalStart)
+                AppLogger.log("⚙️ [listFiles] ✅ COMPLETE for \(path) - \(files.count) files in \(String(format: "%.3fs", totalElapsed)) total")
+                return files
+            }
+            // stat * got some — fill missing
+            if !files.isEmpty {
+                AppLogger.log("⚙️ [listFiles] stat * returned \(files.count)/\(fileNames.count), filling missing")
+                return fillMissing(from: fileNames, existing: files, basePath: path)
             }
         }
         
-        return allFiles
+        // stat * failed or timed out — return names immediately so user isn't stuck waiting.
+        // Files show with "---" for size/date but are fully browsable, downloadable, etc.
+        AppLogger.log("⚙️ [listFiles] stat * unavailable, returning \(fileNames.count) files with names only")
+        let totalElapsed = Date().timeIntervalSince(totalStart)
+        AppLogger.log("⚙️ [listFiles] ✅ COMPLETE for \(path) - \(fileNames.count) names-only in \(String(format: "%.3fs", totalElapsed)) total")
+        return fillMissing(from: fileNames, existing: [], basePath: path)
+    }
+    
+    // MARK: - Device Diagnostics
+    
+    /// Logs device info at connection time for debugging Samsung/Scoped Storage issues.
+    /// Privacy-safe: file names are masked (e.g. IMG***456.jpg) — enough to verify data flow without revealing content.
+    static func logDeviceDiagnostics() async {
+        let adbPath = getADBPath()
+        guard !adbPath.isEmpty else { return }
+        
+        // Masks a file name: "IMG_20240101_vacation.jpg" → "IMG***ion.jpg"
+        func mask(_ name: String) -> String {
+            let ext = (name as NSString).pathExtension
+            let base = (name as NSString).deletingPathExtension
+            if base.count <= 6 {
+                return "***" + (ext.isEmpty ? "" : ".\(ext)")
+            }
+            let prefix = String(base.prefix(3))
+            let suffix = String(base.suffix(3))
+            return "\(prefix)***\(suffix)" + (ext.isEmpty ? "" : ".\(ext)")
+        }
+        
+        AppLogger.log("═══════════════════════════════════════════════════════")
+        AppLogger.log("📱 [DEVICE DIAGNOSTICS] Starting (file names masked for privacy)...")
+        
+        // --- Device system info (not user-private) ---
+        let props: [(String, String)] = [
+            ("Device Model", "ro.product.model"),
+            ("Manufacturer", "ro.product.manufacturer"),
+            ("Android Version", "ro.build.version.release"),
+            ("SDK Level", "ro.build.version.sdk"),
+            ("Build Display", "ro.build.display.id"),
+            ("Security Patch", "ro.build.version.security_patch"),
+            ("One UI Version", "ro.build.version.oneui"),
+        ]
+        
+        for (label, prop) in props {
+            let (_, val, _) = await Shell.runAsyncWithTimeout(
+                adbPath, args: deviceArgs(["shell", "getprop", prop]), timeoutSeconds: 5.0
+            )
+            let trimmed = val.trimmingCharacters(in: .whitespacesAndNewlines)
+            AppLogger.log("📱 [DIAG] \(label): \(trimmed.isEmpty ? "(empty)" : trimmed)")
+        }
+        
+        // SELinux status
+        let (_, selinux, _) = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", "getenforce"]), timeoutSeconds: 5.0
+        )
+        AppLogger.log("📱 [DIAG] SELinux: \(selinux.trimmingCharacters(in: .whitespacesAndNewlines))")
+        
+        // Shell user identity (UID/GID, no personal data)
+        let (_, idOut, _) = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", "id"]), timeoutSeconds: 5.0
+        )
+        AppLogger.log("📱 [DIAG] Shell User: \(idOut.trimmingCharacters(in: .whitespacesAndNewlines))")
+        
+        // ADB security setting
+        let (_, secOut, _) = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", "settings get global adb_enabled"]), timeoutSeconds: 5.0
+        )
+        AppLogger.log("📱 [DIAG] ADB enabled setting: \(secOut.trimmingCharacters(in: .whitespacesAndNewlines))")
+        
+        // --- File system access tests ---
+        
+        // Test ls on DCIM/Camera — log count + 3 masked sample names
+        let (lsCode, lsOut, lsErr) = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", "ls -1 /storage/emulated/0/DCIM/Camera/ 2>&1"]), timeoutSeconds: 5.0
+        )
+        let lsLines = lsOut.components(separatedBy: .newlines).filter { !$0.isEmpty && !$0.contains("Permission denied") && !$0.contains("No such file") }
+        AppLogger.log("📱 [DIAG] ls DCIM/Camera - Code: \(lsCode), File count: \(lsLines.count)")
+        // Log 3 masked samples to verify ls is actually returning file data
+        for (idx, name) in lsLines.prefix(3).enumerated() {
+            AppLogger.log("📱 [DIAG]   ls sample[\(idx)]: \(mask(name.trimmingCharacters(in: .whitespacesAndNewlines)))")
+        }
+        if !lsErr.isEmpty {
+            AppLogger.log("📱 [DIAG] ls DCIM/Camera Stderr: \(lsErr.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        if lsOut.contains("Permission denied") || lsOut.contains("No such file") {
+            AppLogger.log("📱 [DIAG] ⚠️ ls errors in output: \(lsOut.components(separatedBy: .newlines).filter { $0.contains("Permission") || $0.contains("No such") }.joined(separator: "; "))")
+        }
+        
+        // Readable test
+        let (testCode, testOut, _) = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", "test -r /storage/emulated/0/DCIM/Camera && echo 'READABLE' || echo 'NOT_READABLE'"]), timeoutSeconds: 5.0
+        )
+        AppLogger.log("📱 [DIAG] DCIM/Camera readable: \(testOut.trimmingCharacters(in: .whitespacesAndNewlines)) (code: \(testCode))")
+        
+        // --- Permission type classification ---
+        
+        // Test write access (distinguishes read-only vs full block)
+        let (_, writeOut, _) = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", "touch /storage/emulated/0/DCIM/Camera/.afs_perm_test 2>&1 && rm /storage/emulated/0/DCIM/Camera/.afs_perm_test 2>&1 && echo 'WRITABLE' || echo 'NOT_WRITABLE'"]), timeoutSeconds: 5.0
+        )
+        AppLogger.log("📱 [DIAG] DCIM/Camera writable: \(writeOut.trimmingCharacters(in: .whitespacesAndNewlines))")
+        
+        // Test reading a single file's first byte (can we actually access file content?)
+        // Use simple two-step: get first filename, then try to read it
+        let (_, firstFileOut, _) = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", "ls /storage/emulated/0/DCIM/Camera/ 2>/dev/null | head -1"]), timeoutSeconds: 5.0
+        )
+        let firstFile = firstFileOut.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !firstFile.isEmpty && !firstFile.contains("No such") {
+            let (readCode, _, readErr) = await Shell.runAsyncWithTimeout(
+                adbPath, args: deviceArgs(["shell", "head -c 1 '/storage/emulated/0/DCIM/Camera/\(firstFile)' >/dev/null 2>&1; echo $?"]), timeoutSeconds: 5.0
+            )
+            let exitResult = readErr.isEmpty ? "code \(readCode)" : readErr.trimmingCharacters(in: .whitespacesAndNewlines)
+            AppLogger.log("📱 [DIAG] Single file read test: \(readCode == 0 ? "FILE_READABLE" : "FILE_NOT_READABLE") (\(exitResult))")
+        } else {
+            AppLogger.log("📱 [DIAG] Single file read test: SKIPPED (no files found by ls)")
+        }
+        
+        // Check SELinux status and recent denials (logcat is more reliable than dmesg on Android)
+        let (_, logcatOut, _) = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", "logcat -d -s avc -t 10 2>/dev/null || echo 'LOGCAT_NOT_AVAILABLE'"]), timeoutSeconds: 5.0
+        )
+        let logcatClean = logcatOut.trimmingCharacters(in: .whitespacesAndNewlines)
+        if logcatClean.contains("denied") {
+            AppLogger.log("📱 [DIAG] ⚠️ SELinux AVC denials found in logcat:")
+            logcatClean.components(separatedBy: .newlines)
+                .filter { $0.contains("denied") }
+                .prefix(3)
+                .forEach { AppLogger.log("📱 [DIAG]   \($0)") }
+        } else if logcatClean.contains("LOGCAT_NOT_AVAILABLE") {
+            AppLogger.log("📱 [DIAG] SELinux AVC check: logcat not available")
+        } else {
+            AppLogger.log("📱 [DIAG] SELinux AVC denials: none found")
+        }
+        
+        // Samsung-specific: check USB debugging security setting
+        let (_, samSecOut, _) = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", "settings get global development_settings_enabled"]), timeoutSeconds: 5.0
+        )
+        AppLogger.log("📱 [DIAG] Developer settings enabled: \(samSecOut.trimmingCharacters(in: .whitespacesAndNewlines))")
+        
+        // Check shell user's group memberships using 'id' — always outputs named groups
+        let (_, groupsOut, _) = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", "id"]), timeoutSeconds: 5.0
+        )
+        let groupLines = groupsOut.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasSDCardRW  = groupLines.contains("sdcard_rw")  || groupLines.contains("1015")
+        let hasMediaRW   = groupLines.contains("media_rw")   || groupLines.contains("1023")
+        let hasExtDataRW = groupLines.contains("ext_data_rw") || groupLines.contains("1078")
+        let hasSDCardR   = groupLines.contains("sdcard_r")   || groupLines.contains("1028")
+        AppLogger.log("📱 [DIAG] Shell groups: sdcard_rw=\(hasSDCardRW), sdcard_r=\(hasSDCardR), media_rw=\(hasMediaRW), ext_data_rw=\(hasExtDataRW)")
+        
+        // --- Content provider tests (masked file names for verification) ---
+        
+        // Unfiltered content query — check _data prefix pattern and verify data flows (limit to top 3)
+        let contentCmd = "content query --uri \"content://media/external/images/media?limit=3\" --projection _display_name:_data:relative_path --sort \"date_modified DESC\""
+        let (cCode, cOut, cErr) = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", contentCmd]), timeoutSeconds: 10.0
+        )
+        AppLogger.log("📱 [DIAG] Content query (images, top 3) - Code: \(cCode)")
+        if !cErr.isEmpty {
+            AppLogger.log("📱 [DIAG] Content query Stderr: \(cErr.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        var printedCount = 0
+        cOut.enumerateLines { line, stop in
+            let clean = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+            if clean.contains("Permission") || clean.contains("Error") || clean.contains("No result") {
+                AppLogger.log("📱 [DIAG] ⚠️ \(clean)")
+            } else if clean.hasPrefix("Row:") {
+                printedCount += 1
+                if printedCount > 3 {
+                    stop = true
+                    return
+                }
+                // Extract _data prefix (directory only) and masked _display_name
+                var dirPrefix = "(none)"
+                var maskedName = "(none)"
+                var relPath = "(none)"
+                if let dataRange = clean.range(of: "_data=") {
+                    let pathValue = String(clean[dataRange.upperBound...]).components(separatedBy: ",").first ?? ""
+                    dirPrefix = (pathValue as NSString).deletingLastPathComponent
+                }
+                if let nameRange = clean.range(of: "_display_name=") {
+                    let nameValue = String(clean[nameRange.upperBound...]).components(separatedBy: ",").first ?? ""
+                    maskedName = mask(nameValue.trimmingCharacters(in: .whitespaces))
+                }
+                if let rpRange = clean.range(of: "relative_path=") {
+                    relPath = String(clean[rpRange.upperBound...]).components(separatedBy: ",").first ?? ""
+                }
+                AppLogger.log("📱 [DIAG]   → dir: \(dirPrefix), name: \(maskedName), relative_path: \(relPath)")
+            }
+        }
+        
+        // Count + sample images in DCIM/Camera via _data LIKE
+        let countCmd = "content query --uri content://media/external/images/media --projection _display_name --where \"_data LIKE '/storage/emulated/0/DCIM/Camera/%' AND _data NOT LIKE '/storage/emulated/0/DCIM/Camera/%/%'\""
+        let (_, countOut, countErr) = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", countCmd]), timeoutSeconds: 15.0
+        )
+        let countLines = countOut.components(separatedBy: .newlines).filter { $0.hasPrefix("Row:") }
+        AppLogger.log("📱 [DIAG] Image count (_data LIKE '/storage/emulated/0/DCIM/Camera/%%'): \(countLines.count)")
+        // Log 3 masked samples to prove data is actually returned
+        for (idx, row) in countLines.prefix(3).enumerated() {
+            if let nameRange = row.range(of: "_display_name=") {
+                let nameVal = String(row[nameRange.upperBound...]).components(separatedBy: ",").first ?? ""
+                AppLogger.log("📱 [DIAG]   _data sample[\(idx)]: \(mask(nameVal.trimmingCharacters(in: .whitespaces)))")
+            }
+        }
+        if countOut.contains("No result") { AppLogger.log("📱 [DIAG] ⚠️ _data WHERE returned no results") }
+        if countOut.contains("Permission") || countOut.contains("Error") {
+            AppLogger.log("📱 [DIAG] ⚠️ _data WHERE error: \(countErr.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        
+        // Count + sample images in DCIM/Camera via relative_path
+        let rpCountCmd = "content query --uri content://media/external/images/media --projection _display_name --where \"relative_path='DCIM/Camera/'\""
+        let (_, rpCountOut, _) = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", rpCountCmd]), timeoutSeconds: 15.0
+        )
+        let rpCountLines = rpCountOut.components(separatedBy: .newlines).filter { $0.hasPrefix("Row:") }
+        AppLogger.log("📱 [DIAG] Image count (relative_path='DCIM/Camera/'): \(rpCountLines.count)")
+        for (idx, row) in rpCountLines.prefix(3).enumerated() {
+            if let nameRange = row.range(of: "_display_name=") {
+                let nameVal = String(row[nameRange.upperBound...]).components(separatedBy: ",").first ?? ""
+                AppLogger.log("📱 [DIAG]   rp sample[\(idx)]: \(mask(nameVal.trimmingCharacters(in: .whitespaces)))")
+            }
+        }
+        if rpCountOut.contains("No result") { AppLogger.log("📱 [DIAG] ⚠️ relative_path WHERE returned no results") }
+        
+        // Count videos in DCIM/Camera
+        let vidCountCmd = "content query --uri content://media/external/video/media --projection _id --where \"relative_path='DCIM/Camera/'\""
+        let (_, vidCountOut, vidErr) = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", vidCountCmd]), timeoutSeconds: 15.0
+        )
+        let vidCountRows = vidCountOut.components(separatedBy: .newlines).filter { $0.hasPrefix("Row:") }.count
+        AppLogger.log("📱 [DIAG] Video count (relative_path='DCIM/Camera/'): \(vidCountRows)")
+        if !vidErr.isEmpty && (vidErr.contains("Permission") || vidErr.contains("Error")) {
+            AppLogger.log("📱 [DIAG] ⚠️ Video query error: \(vidErr.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        
+        // Count all files in DCIM/Camera via files table
+        let filesCountCmd = "content query --uri content://media/external/file --projection _id --where \"_data LIKE '/storage/emulated/0/DCIM/Camera/%' AND _data NOT LIKE '/storage/emulated/0/DCIM/Camera/%/%'\""
+        let (_, filesCountOut, filesErr) = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", filesCountCmd]), timeoutSeconds: 15.0
+        )
+        let filesCountRows = filesCountOut.components(separatedBy: .newlines).filter { $0.hasPrefix("Row:") }.count
+        AppLogger.log("📱 [DIAG] Files table count in DCIM/Camera: \(filesCountRows)")
+        if !filesErr.isEmpty && (filesErr.contains("Permission") || filesErr.contains("Error")) {
+            AppLogger.log("📱 [DIAG] ⚠️ Files table error: \(filesErr.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        
+        // DCIM subdirectory count (not names — privacy safe)
+        let (_, dcimCountOut, _) = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", "ls -1 /storage/emulated/0/DCIM/ 2>&1 | wc -l"]), timeoutSeconds: 5.0
+        )
+        AppLogger.log("📱 [DIAG] DCIM subdirectory count: \(dcimCountOut.trimmingCharacters(in: .whitespacesAndNewlines))")
+        
+        // --- CONCLUSION: compare ls vs MediaStore to identify root cause ---
+        let totalMediaStoreCount = countLines.count + rpCountLines.count + vidCountRows + filesCountRows
+        AppLogger.log("─────────────────────────────────────────────────────────")
+        AppLogger.log("📱 [DIAG CONCLUSION]")
+        AppLogger.log("📱   ls file count:         \(lsLines.count)")
+        AppLogger.log("📱   MediaStore total count: \(totalMediaStoreCount) (images+rp+videos+files)")
+        
+        if lsLines.count == 0 && totalMediaStoreCount == 0 {
+            AppLogger.log("📱   ❌ DIAGNOSIS: Both ls AND MediaStore return 0")
+            AppLogger.log("📱   ❌ Likely causes: FUSE/Scoped Storage blocking ls, SELinux policy, OR Samsung 'USB debugging (Security settings)' not enabled")
+        } else if lsLines.count > 0 && totalMediaStoreCount == 0 {
+            AppLogger.log("📱   ⚠️ DIAGNOSIS: ls sees \(lsLines.count) files but MediaStore returns 0")
+            AppLogger.log("📱   ⚠️ Possible causes:")
+            AppLogger.log("📱     1. Files added via ADB directly (bypassing media scanner) — most common on test devices")
+            AppLogger.log("📱     2. Media scan ran but Android 13+ FUSE blocked indexing of these files")
+        } else if lsLines.count > 0 && totalMediaStoreCount > 0 {
+            AppLogger.log("📱   ✅ DIAGNOSIS: Both ls and MediaStore return data — no access issues detected")
+        }
+        AppLogger.log("─────────────────────────────────────────────────────────")
+        
+        AppLogger.log("📱 [DEVICE DIAGNOSTICS] Complete.")
+        AppLogger.log("═══════════════════════════════════════════════════════")
+    }
+    
+    // MARK: - content:// Media Provider fallback
+    
+    private static func resolvePhysicalPath(_ path: String) -> String {
+        var p = path
+        if p.hasPrefix("/sdcard") {
+            p = "/storage/emulated/0" + p.dropFirst("/sdcard".count)
+        } else if p.hasPrefix("sdcard") {
+            p = "/storage/emulated/0" + p.dropFirst("sdcard".count)
+        }
+        return p
+    }
+    
+    /// Fallback for DCIM/Camera where direct `ls` may be blocked by Android FUSE/Scoped Storage.
+    /// Queries the Android MediaStore content provider with a WHERE clause to fetch only
+    /// files in the target directory — fast even on devices with thousands of media files.
+    private static func listMediaFiles(dcimPath: String, adbPath: String, onPageLoaded: (([ADBFile]) -> Void)? = nil) async -> [ADBFile] {
+        let resolvedPath = resolvePhysicalPath(dcimPath)
+        let normalizedPath = resolvedPath.hasSuffix("/") ? resolvedPath : resolvedPath + "/"
+        AppLogger.log("⚙️ [listMediaFiles] Starting scan for: \(dcimPath) (Normalized: \(normalizedPath))", level: .info)
+        
+        var fileNames: [String] = []
+        var seenNames = Set<String>()
+        
+        // ── Strategy 1: `find` command ──
+        // Gets ALL files (media + non-media). Uses different syscalls than `ls`,
+        // which may bypass FUSE blocking on some Samsung builds.
+        AppLogger.log("⚙️ [listMediaFiles] Strategy 1: find command (gets all file types)", level: .info)
+        let escapedPath = dcimPath.replacingOccurrences(of: "'", with: "'\\''")
+        let findCmd = "find '\(escapedPath)' -maxdepth 1 -not -name '.' -not -name '..' 2>/dev/null"
+        let (findCode, findOutput, findError) = await Shell.runAsyncWithTimeout(
+            adbPath,
+            args: deviceArgs(["shell", findCmd]),
+            timeoutSeconds: 10.0
+        )
+        AppLogger.log("⚙️ [listMediaFiles] find result - Code: \(findCode), Output: \(findOutput.count) chars", level: .info)
+        if !findError.isEmpty {
+            AppLogger.log("⚠️ [listMediaFiles] find stderr: \(findError)", level: .warning)
+        }
+        
+        if findCode == 0, !findOutput.isEmpty {
+            findOutput.enumerateLines { line, _ in
+                let clean = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+                guard !clean.isEmpty else { return }
+                let name = (clean as NSString).lastPathComponent
+                guard !name.isEmpty, name != "." , name != ".." else { return }
+                // Skip the directory itself (find outputs the search dir as first result)
+                let fullPath = clean.hasPrefix("/") ? clean : normalizedPath + clean
+                guard fullPath != dcimPath, fullPath != normalizedPath,
+                      fullPath != String(normalizedPath.dropLast()) else { return }
+                if seenNames.insert(name).inserted {
+                    fileNames.append(name)
+                }
+            }
+            if !fileNames.isEmpty {
+                AppLogger.log("⚙️ [listMediaFiles] Strategy 1 (find) found \(fileNames.count) entries", level: .info)
+            }
+        }
+        
+        // ── Strategy 2: file URI (ALL indexed files) — PAGINATED ──
+        // content://media/external/file contains images, videos, audio, documents — everything.
+        // Uses keyset pagination (_id > lastId, LIMIT 500) to avoid FUSE/SQLite timeouts
+        // on large directories. Each page is forwarded via onPageLoaded for progressive UI.
+        if fileNames.isEmpty {
+            let storagePrefix = "/storage/emulated/0/"
+            let relativePath: String? = {
+                if normalizedPath.hasPrefix(storagePrefix) {
+                    return String(normalizedPath.dropFirst(storagePrefix.count))
+                }
+                let storagePrefixBase = "/storage/"
+                if normalizedPath.hasPrefix(storagePrefixBase) {
+                    let afterStorage = String(normalizedPath.dropFirst(storagePrefixBase.count))
+                    if let slashIndex = afterStorage.firstIndex(of: "/") {
+                        let afterVolume = String(afterStorage[afterStorage.index(after: slashIndex)...])
+                        if !afterVolume.isEmpty { return afterVolume }
+                    }
+                }
+                return nil
+            }()
+            
+            let baseWhereClause: String
+            if let rp = relativePath, !rp.isEmpty {
+                let escapedRP = rp.replacingOccurrences(of: "'", with: "''")
+                baseWhereClause = "relative_path='\(escapedRP)'"
+            } else {
+                let escapedNorm = normalizedPath.replacingOccurrences(of: "'", with: "''")
+                baseWhereClause = "_data LIKE '\(escapedNorm)%' AND _data NOT LIKE '\(escapedNorm)%/%'"
+            }
+            
+            let pageSize = 500
+            var lastId = 0
+            var pageIndex = 0
+            AppLogger.log("⚙️ [listMediaFiles] Strategy 2: file URI (paginated, page size: \(pageSize))", level: .info)
+            
+            while true {
+                // Stop immediately if the task was cancelled (user navigated to another directory)
+                guard !Task.isCancelled else {
+                    AppLogger.log("⚙️ [listMediaFiles] Strategy 2 pagination cancelled at page \(pageIndex)", level: .info)
+                    break
+                }
+                let paginatedWhere = "\(baseWhereClause) AND _id>\(lastId)"
+                let fileCmd = "content query --uri \"content://media/external/file?limit=\(pageSize)\" --projection _display_name:_id --where \"\(paginatedWhere)\" --sort \"_id ASC\""
+                let (fileCode, fileOutput, fileError) = await Shell.runAsyncWithTimeout(
+                    adbPath,
+                    args: deviceArgs(["shell", fileCmd]),
+                    timeoutSeconds: 15.0
+                )
+                if !fileError.isEmpty {
+                    AppLogger.log("⚠️ [listMediaFiles] Strategy 2 page \(pageIndex) stderr: \(fileError)", level: .warning)
+                }
+                
+                guard fileCode == 0, !fileOutput.isEmpty else { break }
+                
+                var pageNames: [String] = []
+                var maxIdInPage = lastId
+                
+                fileOutput.enumerateLines { line, _ in
+                    let clean = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+                    guard clean.hasPrefix("Row:") else { return }
+                    if let name = extractDisplayName(from: clean),
+                       seenNames.insert(name).inserted {
+                        pageNames.append(name)
+                        fileNames.append(name)
+                    }
+                    if let id = extractId(from: clean), id > maxIdInPage {
+                        maxIdInPage = id
+                    }
+                }
+                
+                if pageNames.isEmpty { break }
+                
+                // Progressive callback: send placeholder ADBFile entries for immediate UI display
+                if let callback = onPageLoaded {
+                    let pageFiles = pageNames.map { name in
+                        ADBFile(
+                            name: name,
+                            path: normalizedPath + name,
+                            isDirectory: false,
+                            size: 0,
+                            modificationDate: nil
+                        )
+                    }
+                    callback(pageFiles)
+                }
+                
+                AppLogger.log("⚙️ [listMediaFiles] Strategy 2 page \(pageIndex): \(pageNames.count) files (total: \(fileNames.count), lastId: \(maxIdInPage))", level: .info)
+                
+                lastId = maxIdInPage
+                pageIndex += 1
+                
+                // If we got fewer than pageSize, this is the last page
+                if pageNames.count < pageSize { break }
+            }
+            
+            if !fileNames.isEmpty {
+                AppLogger.log("⚙️ [listMediaFiles] Strategy 2 (paginated) found \(fileNames.count) files in \(pageIndex) pages", level: .info)
+            }
+        }
+        
+        // ── Strategy 3: Per-type URIs (fallback) — PAGINATED ──
+        // If file URI failed, try individual media type URIs with keyset pagination.
+        if fileNames.isEmpty {
+            let lowerPath = dcimPath.lowercased()
+            var uris: [String] = []
+            if lowerPath.contains("music") || lowerPath.contains("audio") || lowerPath.contains("recording") {
+                uris.append("content://media/external/audio/media")
+            } else if lowerPath.contains("video") || lowerPath.contains("movies") {
+                uris.append("content://media/external/video/media")
+                uris.append("content://media/external/images/media")
+            } else {
+                uris.append("content://media/external/images/media")
+                uris.append("content://media/external/video/media")
+                uris.append("content://media/external/audio/media")
+            }
+            
+            let storagePrefix = "/storage/emulated/0/"
+            let relativePath: String? = normalizedPath.hasPrefix(storagePrefix) ? String(normalizedPath.dropFirst(storagePrefix.count)) : nil
+            let baseWhereClause: String
+            if let rp = relativePath, !rp.isEmpty {
+                baseWhereClause = "relative_path='\(rp.replacingOccurrences(of: "'", with: "''"))'"
+            } else {
+                let escapedNorm = normalizedPath.replacingOccurrences(of: "'", with: "''")
+                baseWhereClause = "_data LIKE '\(escapedNorm)%' AND _data NOT LIKE '\(escapedNorm)%/%'"
+            }
+            
+            let pageSize = 500
+            AppLogger.log("⚙️ [listMediaFiles] Strategy 3: per-type URIs (\(uris.count) types, paginated)", level: .info)
+            for uri in uris {
+                var lastId = 0
+                var pageIndex = 0
+                
+                while true {
+                    // Stop immediately if the task was cancelled (user navigated to another directory)
+                    guard !Task.isCancelled else {
+                        AppLogger.log("⚙️ [listMediaFiles] Strategy 3 [\(uri)] pagination cancelled at page \(pageIndex)", level: .info)
+                        break
+                    }
+                    let paginatedWhere = "\(baseWhereClause) AND _id>\(lastId)"
+                    let cmd = "content query --uri \"\(uri)?limit=\(pageSize)\" --projection _display_name:_id --where \"\(paginatedWhere)\" --sort \"_id ASC\""
+                    let (code, output, error) = await Shell.runAsyncWithTimeout(
+                        adbPath,
+                        args: deviceArgs(["shell", cmd]),
+                        timeoutSeconds: 15.0
+                    )
+                    if !error.isEmpty {
+                        AppLogger.log("⚠️ [listMediaFiles] Strategy 3 [\(uri)] page \(pageIndex) stderr: \(error)", level: .warning)
+                    }
+                    guard code == 0, !output.isEmpty else { break }
+                    
+                    var pageNames: [String] = []
+                    var maxIdInPage = lastId
+                    
+                    output.enumerateLines { line, _ in
+                        let clean = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+                        guard clean.hasPrefix("Row:") else { return }
+                        if let name = extractDisplayName(from: clean),
+                           seenNames.insert(name).inserted {
+                            pageNames.append(name)
+                            fileNames.append(name)
+                        }
+                        if let id = extractId(from: clean), id > maxIdInPage {
+                            maxIdInPage = id
+                        }
+                    }
+                    
+                    if pageNames.isEmpty { break }
+                    
+                    // Progressive callback
+                    if let callback = onPageLoaded {
+                        let pageFiles = pageNames.map { name in
+                            ADBFile(
+                                name: name,
+                                path: normalizedPath + name,
+                                isDirectory: false,
+                                size: 0,
+                                modificationDate: nil
+                            )
+                        }
+                        callback(pageFiles)
+                    }
+                    
+                    AppLogger.log("⚙️ [listMediaFiles] Strategy 3 [\(uri)] page \(pageIndex): \(pageNames.count) files (total: \(fileNames.count), lastId: \(maxIdInPage))", level: .info)
+                    
+                    lastId = maxIdInPage
+                    pageIndex += 1
+                    
+                    if pageNames.count < pageSize { break }
+                }
+            }
+            if !fileNames.isEmpty {
+                AppLogger.log("⚙️ [listMediaFiles] Strategy 3 (paginated) found \(fileNames.count) files", level: .info)
+            }
+        }
+        
+        if fileNames.isEmpty {
+            // All three strategies returned 0 files.
+            // This can happen when files were pushed externally (e.g. adb push from terminal,
+            // another app) and are physically on disk but not yet indexed in MediaStore.
+            // Strategy 1 (find) failed due to FUSE/Scoped Storage, Strategies 2 & 3 queried
+            // MediaStore which hasn't indexed the new files yet.
+            //
+            // Fix: trigger a quick media scan for this directory, wait briefly for MediaStore to
+            // index, then retry Strategy 2 once. Only fires in the "all failed" path — no overhead
+            // in normal browsing.
+            AppLogger.log("⚙️ [listMediaFiles] All strategies returned 0 files. Triggering media scan + retry for: \(dcimPath)", level: .info)
+            
+            let escapedScan = dcimPath.replacingOccurrences(of: "'", with: "'\\''")
+            let scanCmd = "cmd media.scanner scan '\(escapedScan)' >/dev/null 2>&1"
+            _ = await Shell.runAsyncWithTimeout(adbPath, args: deviceArgs(["shell", scanCmd]), timeoutSeconds: 8.0)
+            
+            // Give MediaStore ~1.5s to process the scan before retrying
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            
+            // Retry Strategy 2: content://media/external/file (paginated)
+            let storagePrefix = "/storage/emulated/0/"
+            let retryRP: String? = normalizedPath.hasPrefix(storagePrefix)
+                ? String(normalizedPath.dropFirst(storagePrefix.count)) : nil
+            let retryBaseWhere: String
+            if let rp = retryRP, !rp.isEmpty {
+                retryBaseWhere = "relative_path='\(rp.replacingOccurrences(of: "'", with: "''"))'"
+            } else {
+                let esc = normalizedPath.replacingOccurrences(of: "'", with: "''")
+                retryBaseWhere = "_data LIKE '\(esc)%' AND _data NOT LIKE '\(esc)%/%'"
+            }
+            
+            let retryPageSize = 500
+            var retryLastId = 0
+            var retryPageIndex = 0
+            
+            while true {
+                // Stop immediately if the task was cancelled (user navigated to another directory)
+                guard !Task.isCancelled else {
+                    AppLogger.log("⚙️ [listMediaFiles] Post-scan retry pagination cancelled at page \(retryPageIndex)", level: .info)
+                    break
+                }
+                let paginatedWhere = "\(retryBaseWhere) AND _id>\(retryLastId)"
+                let retryCmd = "content query --uri \"content://media/external/file?limit=\(retryPageSize)\" --projection _display_name:_id --where \"\(paginatedWhere)\" --sort \"_id ASC\""
+                let (retryCode, retryOut, _) = await Shell.runAsyncWithTimeout(
+                    adbPath, args: deviceArgs(["shell", retryCmd]), timeoutSeconds: 15.0
+                )
+                AppLogger.log("⚙️ [listMediaFiles] Post-scan retry page \(retryPageIndex) - Code: \(retryCode), Output: \(retryOut.count) chars", level: .info)
+                
+                guard retryCode == 0, !retryOut.isEmpty else { break }
+                
+                var pageNames: [String] = []
+                var maxIdInPage = retryLastId
+                
+                retryOut.enumerateLines { line, _ in
+                    let clean = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+                    guard clean.hasPrefix("Row:") else { return }
+                    if let name = extractDisplayName(from: clean),
+                       seenNames.insert(name).inserted {
+                        pageNames.append(name)
+                        fileNames.append(name)
+                    }
+                    if let id = extractId(from: clean), id > maxIdInPage {
+                        maxIdInPage = id
+                    }
+                }
+                
+                if pageNames.isEmpty { break }
+                
+                // Progressive callback for post-scan retry pages
+                if let callback = onPageLoaded {
+                    let pageFiles = pageNames.map { name in
+                        ADBFile(
+                            name: name,
+                            path: normalizedPath + name,
+                            isDirectory: false,
+                            size: 0,
+                            modificationDate: nil
+                        )
+                    }
+                    callback(pageFiles)
+                }
+                
+                retryLastId = maxIdInPage
+                retryPageIndex += 1
+                
+                if pageNames.count < retryPageSize { break }
+            }
+            
+            if !fileNames.isEmpty {
+                AppLogger.log("📷 [listMediaFiles] Post-scan retry found \(fileNames.count) newly indexed files in \(retryPageIndex) pages", level: .info)
+            }
+            
+            if fileNames.isEmpty {
+                AppLogger.log("📷 [listMediaFiles] Post-scan retry also returned 0 files for \(dcimPath)", level: .info)
+                return []
+            }
+        }
+        
+        AppLogger.log("⚙️ [listMediaFiles] Total filenames discovered: \(fileNames.count)", level: .info)
+        
+        // ── Pass 2: Batch stat for metadata (size, date) ──
+        let basePath = normalizedPath.hasSuffix("/") ? String(normalizedPath.dropLast()) : normalizedPath
+        let statFiles = await listFilesViaStat(path: basePath, adbPath: adbPath, exactNames: fileNames, timeoutPerBatch: 8.0)
+        
+        if statFiles.count > 0 {
+            AppLogger.log("📷 [listMediaFiles] stat returned \(statFiles.count)/\(fileNames.count) files with metadata", level: .info)
+            if statFiles.count < fileNames.count {
+                let statNames = Set(statFiles.map { $0.name })
+                var merged = statFiles
+                for name in fileNames where !statNames.contains(name) {
+                    merged.append(ADBFile(
+                        name: name,
+                        path: normalizedPath + name,
+                        isDirectory: false,
+                        size: 0,
+                        modificationDate: nil
+                    ))
+                }
+                AppLogger.log("📷 [listMediaFiles] Finished. \(merged.count) total files for \(dcimPath)", level: .info)
+                return merged
+            }
+            return statFiles
+        }
+        
+        // stat failed entirely — return names-only entries (size=0, no date)
+        AppLogger.log("⚙️ [listMediaFiles] Stat failed, returning \(fileNames.count) files without metadata", level: .info)
+        return fileNames.map { name in
+            ADBFile(
+                name: name,
+                path: normalizedPath + name,
+                isDirectory: false,
+                size: 0,
+                modificationDate: nil
+            )
+        }
     }
     
     // Helper for small directories — tries stat first (modern), falls back to ls -la (legacy)
     private static func listFilesWithDetails(path: String, adbPath: String, exactNames: [String]) async throws -> [ADBFile] {
+        AppLogger.log("⚙️ [listFilesWithDetails] Retrieving details for \(exactNames.count) files in: \(path)")
         
-        // ── Strategy 1: stat (modern Android 7+, toybox) ──────────────────
-        // stat -c gives pipe-delimited output that's trivial to parse.
         let statFiles = await listFilesViaStat(path: path, adbPath: adbPath, exactNames: exactNames)
+        AppLogger.log("⚙️ [listFilesWithDetails] Strategy 1 (stat) returned \(statFiles.count)/\(exactNames.count) files")
         if statFiles.count == exactNames.count {
-            return statFiles                       // stat worked for every file
+            return statFiles
         }
         
-        // ── Strategy 2: ls -la (legacy fallback for old phones) ───────────
-        // Only attempt this if stat missed some/all files.
+        AppLogger.log("⚙️ [listFilesWithDetails] Strategy 1 incomplete, trying Strategy 2 (ls -la)...")
         let lsFiles = await listFilesViaLs(path: path, adbPath: adbPath, exactNames: exactNames)
+        AppLogger.log("⚙️ [listFilesWithDetails] Strategy 2 (ls -la) returned \(lsFiles.count)/\(exactNames.count) files")
+        
         if lsFiles.count > statFiles.count {
-            // ls -la recovered more files — use it, but supplement with stat
-            // results for any files ls may have missed.
             let lsNames = Set(lsFiles.map { $0.name })
             var merged = lsFiles
             for f in statFiles where !lsNames.contains(f.name) {
                 merged.append(f)
             }
+            AppLogger.log("⚙️ [listFilesWithDetails] Merged stat + ls-la returned \(merged.count)/\(exactNames.count) files")
             if merged.count == exactNames.count { return merged }
-            // Still missing some — fall through to raw fallback
             return fillMissing(from: exactNames, existing: merged, basePath: path)
         }
         
-        // stat was better (or both equally incomplete) — supplement stat
         if !statFiles.isEmpty {
             return fillMissing(from: exactNames, existing: statFiles, basePath: path)
         }
@@ -945,12 +1680,41 @@ class ADBManager {
             return fillMissing(from: exactNames, existing: lsFiles, basePath: path)
         }
         
-        // ── Strategy 3: raw names fallback (nothing else worked) ──────────
+        AppLogger.log("⚠️ [listFilesWithDetails] Both stat and ls-la failed completely. Falling back to names-only.")
         return fillMissing(from: exactNames, existing: [], basePath: path)
     }
     
-    // MARK: - stat-based listing (modern)
-    private static func listFilesViaStat(path: String, adbPath: String, exactNames: [String]) async -> [ADBFile] {
+    /// Parses a `content query` row to extract the `_display_name` value.
+    ///
+    /// Handles both single-projection and multi-projection formats:
+    ///   Single: `Row: 0 _display_name=My Photo, Summer.jpg`
+    ///   Multi:  `Row: 0 _display_name=My Photo, Summer.jpg, _id=12345`
+    ///
+    /// When `_id` is also projected, the value ends at `, _id=` boundary.
+    /// When `_display_name` is the only projection, value runs to end of line.
+    private static func extractDisplayName(from line: String) -> String? {
+        guard let range = line.range(of: "_display_name=") else { return nil }
+        var value = String(line[range.upperBound...])
+        // If _id is also projected, strip it from the end: ", _id=12345"
+        if let idBoundary = value.range(of: ", _id=") {
+            value = String(value[..<idBoundary.lowerBound])
+        }
+        value = value.trimmingCharacters(in: .whitespaces)
+        guard !value.isEmpty, value != "null" else { return nil }
+        return value
+    }
+    
+    /// Parses a `content query` row to extract the `_id` value for keyset pagination.
+    /// Row format: `Row: 0 _display_name=file.jpg, _id=12345`
+    private static func extractId(from line: String) -> Int? {
+        guard let range = line.range(of: "_id=") else { return nil }
+        let afterId = String(line[range.upperBound...])
+        // _id may be followed by ", " (more columns) or end of line
+        let idStr = afterId.components(separatedBy: ",").first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? afterId.trimmingCharacters(in: .whitespacesAndNewlines)
+        return Int(idStr)
+    }
+    
+    private static func listFilesViaStat(path: String, adbPath: String, exactNames: [String], timeoutPerBatch: Double = 30.0) async -> [ADBFile] {
         var files: [ADBFile] = []
         let batchSize = 50
         for i in stride(from: 0, to: exactNames.count, by: batchSize) {
@@ -958,15 +1722,23 @@ class ADBManager {
             let batch = Array(exactNames[i..<end])
             
             let escapedArgs = batch.map { "'\($0.replacingOccurrences(of: "'", with: "'\\''"))'" }.joined(separator: " ")
-            let command = "cd '\(path.replacingOccurrences(of: "'", with: "'\\''"))' && stat -c '%A|%s|%Y|%n' \(escapedArgs) 2>/dev/null"
+            let command = "cd '\(path.replacingOccurrences(of: "'", with: "'\\''"))' && stat -c '%A|%s|%Y|%n' \(escapedArgs)"
             
-            let (code, output, _) = await Shell.runAsyncWithTimeout(
-                adbPath, args: deviceArgs(["shell", command]), timeoutSeconds: 30.0
+            let batchStart = Date()
+            AppLogger.log("⚙️ [listFilesViaStat] Executing stat batch of \(batch.count) files in: \(path)")
+            let (code, output, error) = await Shell.runAsyncWithTimeout(
+                adbPath, args: deviceArgs(["shell", command]), timeoutSeconds: timeoutPerBatch
             )
-            guard code == 0 else { continue }
+            let batchElapsed = Date().timeIntervalSince(batchStart)
+            AppLogger.log("⚙️ [listFilesViaStat] Batch result - Code: \(code), Elapsed: \(String(format: "%.3fs", batchElapsed)), Output length: \(output.count) chars")
+            if !error.isEmpty {
+                AppLogger.log("⚠️ [listFilesViaStat] Batch stderr: \(error)")
+            }
+            
+            guard !output.isEmpty else { continue }
             
             output.enumerateLines { line, _ in
-                // Strip \r — Samsung/Android 12+ ADB sends \r\n line endings
+                // Strip \r to handle carriage returns from ADB shell output.
                 let cleanLine = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
                 let parts = cleanLine.split(separator: "|", maxSplits: 3)
                 guard parts.count == 4 else { return }
@@ -986,33 +1758,68 @@ class ADBManager {
     // MARK: - ls -la based listing (legacy)
     private static func listFilesViaLs(path: String, adbPath: String, exactNames: [String]) async -> [ADBFile] {
         let command = "ls -la '\(path.replacingOccurrences(of: "'", with: "'\\''"))'"
-        let (code, output, _) = await Shell.runAsyncWithTimeout(
+        let lsStart = Date()
+        AppLogger.log("⚙️ [listFilesViaLs] Executing ls -la on: \(path)")
+        let (code, output, error) = await Shell.runAsyncWithTimeout(
             adbPath, args: deviceArgs(["shell", command]), timeoutSeconds: 60.0
         )
+        let lsElapsed = Date().timeIntervalSince(lsStart)
+        AppLogger.log("⚙️ [listFilesViaLs] ls -la result - Code: \(code), Elapsed: \(String(format: "%.3fs", lsElapsed)), Output length: \(output.count) chars")
+        if !error.isEmpty {
+            AppLogger.log("⚠️ [listFilesViaLs] ls -la stderr: \(error)")
+        }
         guard code == 0 else { return [] }
-        
-        var files: [ADBFile] = []
-        let lines = output.components(separatedBy: "\n")
         
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd HH:mm"
         dateFormatter.locale = Locale(identifier: "en_US_POSIX")
         
-        for exactName in exactNames {
-            // Find the line ending with this exact name
-            guard let lineStr = lines.first(where: {
-                $0.hasSuffix(" " + exactName) || $0.hasSuffix(" " + exactName + "\r")
-            }) else { continue }
-            
-            let cleanLine = lineStr.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+        // Build a dictionary keyed by filename for O(1) lookup to optimize performance.
+        var linesByName: [String: String] = [:]
+        linesByName.reserveCapacity(exactNames.count)
+        
+        output.enumerateLines { line, _ in
+            let cleanLine = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+            // Extract filename from end of ls -la line.
+            // Format: "drwxrwx--x 2 root sdcard_rw 4096 2025-05-22 11:01 filename"
+            // The filename is everything after the last date+time columns.
             let parts = cleanLine.split(whereSeparator: { $0.isWhitespace })
-            // Android ls -la outputs 7 or 8 columns depending on device/version
+            guard parts.count >= 7 else { return }
+            
+            // Find the date columns (YYYY-MM-DD HH:MM) to extract filename after them
+            for idx in 3..<(parts.count - 1) {
+                let candidate = String(parts[idx])
+                if candidate.count == 10 && candidate.contains("-") {
+                    let next = String(parts[idx + 1])
+                    if next.count == 5 && next.contains(":") {
+                        // Everything after date+time is the filename (may contain spaces)
+                        let nameStartIndex = cleanLine.range(of: next, range: cleanLine.startIndex..<cleanLine.endIndex)?.upperBound
+                        if let start = nameStartIndex {
+                            let name = cleanLine[start...].trimmingCharacters(in: .whitespaces)
+                            if !name.isEmpty {
+                                linesByName[name] = cleanLine
+                            }
+                        }
+                        return
+                    }
+                }
+            }
+        }
+        
+        // Now look up each exactName in O(1)
+        var files: [ADBFile] = []
+        files.reserveCapacity(exactNames.count)
+        
+        for exactName in exactNames {
+            guard let cleanLine = linesByName[exactName] else { continue }
+            
+            let parts = cleanLine.split(whereSeparator: { $0.isWhitespace })
             guard parts.count >= 7 else { continue }
             
             let perms = String(parts[0])
             let isDir = perms.hasPrefix("d")
             
-            // Find the date columns (YYYY-MM-DD HH:MM) to anchor the layout
+            // Find the date columns to extract size
             var dateIndex: Int? = nil
             for idx in 3..<(parts.count - 1) {
                 let candidate = String(parts[idx])
@@ -1029,12 +1836,10 @@ class ADBManager {
             var modDate: Date? = nil
             
             if let di = dateIndex {
-                // Size is the column immediately before the date
                 if di > 0 { size = UInt64(parts[di - 1]) ?? 0 }
                 let dateStr = "\(parts[di]) \(parts[di + 1])"
                 modDate = dateFormatter.date(from: dateStr)
             } else {
-                // Couldn't find date — try column 4 as size (standard 8-col layout)
                 if parts.count >= 8 { size = UInt64(parts[4]) ?? 0 }
             }
             
@@ -1054,6 +1859,143 @@ class ADBManager {
             result.append(ADBFile(name: name, path: fullPath, isDirectory: isDir, size: 0, modificationDate: nil))
         }
         return result
+    }
+    
+    // MARK: - Progressive batch metadata fetcher (for large directories)
+    
+    /// Fetches file metadata (size, date, isDirectory) in batches of 50 for large directories.
+    /// After each batch, calls `onBatch` with an array of `ADBFile` entries that now have real metadata.
+    /// The caller can update the UI progressively. Respects task cancellation between batches.
+    static func fetchMetadataBatched(
+        path: String,
+        fileNames: [String],
+        onBatch: @escaping ([ADBFile]) -> Void
+    ) async {
+        let adbPath = getADBPath()
+        guard !adbPath.isEmpty else { return }
+        
+        let batchSize = 50
+        let totalBatches = (fileNames.count + batchSize - 1) / batchSize
+        var completedFiles = 0
+        var resolvedNames: Set<String> = []
+        
+        for batchIndex in 0..<totalBatches {
+            // Check cancellation between batches
+            guard !Task.isCancelled else {
+                print("📂 ADB: Metadata batch loading cancelled at batch \(batchIndex + 1)/\(totalBatches)")
+                return
+            }
+            
+            let start = batchIndex * batchSize
+            let end = min(start + batchSize, fileNames.count)
+            let batch = Array(fileNames[start..<end])
+            
+            let escapedArgs = batch.map { name in
+                let escaped = name.replacingOccurrences(of: "'", with: "'\\''")
+                return "'\(escaped)'"
+            }.joined(separator: " ")
+            let escapedPath = path.replacingOccurrences(of: "'", with: "'\\''")
+            let command = "cd '\(escapedPath)' && stat -c '%A|%s|%Y|%n' \(escapedArgs) 2>/dev/null"
+            
+            let (code, output, _) = await Shell.runAsyncWithTimeout(
+                adbPath, args: deviceArgs(["shell", command]), timeoutSeconds: 15.0
+            )
+            
+            var batchFiles: [ADBFile] = []
+            
+            // Parse stdout regardless of exit code — stat outputs results
+            // for successful files even when some files in the batch fail.
+            if !output.isEmpty {
+                output.enumerateLines { line, _ in
+                    let cleanLine = line.trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+                    let parts = cleanLine.split(separator: "|", maxSplits: 3)
+                    guard parts.count == 4 else { return }
+                    let perms = String(parts[0])
+                    let size  = UInt64(parts[1]) ?? 0
+                    let ts    = Double(parts[2])
+                    let name  = String(parts[3]).trimmingCharacters(in: CharacterSet(charactersIn: "\r"))
+                    let isDir = perms.hasPrefix("d")
+                    let modDate = ts.map { Date(timeIntervalSince1970: $0) }
+                    let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
+                    batchFiles.append(ADBFile(name: name, path: fullPath, isDirectory: isDir, size: size, modificationDate: modDate))
+                }
+            }
+            
+            completedFiles += batch.count
+            
+            if !batchFiles.isEmpty {
+                onBatch(batchFiles)
+                print("📂 ADB: Metadata batch \(batchIndex + 1)/\(totalBatches) — got \(batchFiles.count) files (\(completedFiles)/\(fileNames.count) total)")
+            } else {
+                print("📂 ADB: Metadata batch \(batchIndex + 1)/\(totalBatches) — stat returned nothing for \(batch.count) files")
+            }
+            
+            // Track which files stat resolved
+            for f in batchFiles { resolvedNames.insert(f.name) }
+        }
+        
+        // ── Retry pass: individual ls -ld for files that stat missed ──────────
+        let missedNames = fileNames.filter { !resolvedNames.contains($0) }
+        if !missedNames.isEmpty && !Task.isCancelled {
+            print("📂 ADB: \(missedNames.count) files missed by stat — retrying with individual ls -ld")
+            
+            let dateFormatter = DateFormatter()
+            dateFormatter.dateFormat = "yyyy-MM-dd HH:mm"
+            dateFormatter.locale = Locale(identifier: "en_US_POSIX")
+            
+            // Process in small sub-batches of 10 to give periodic UI updates
+            let retryBatchSize = 10
+            for retryStart in stride(from: 0, to: missedNames.count, by: retryBatchSize) {
+                guard !Task.isCancelled else { break }
+                
+                let retryEnd = min(retryStart + retryBatchSize, missedNames.count)
+                let retryBatch = Array(missedNames[retryStart..<retryEnd])
+                var recovered: [ADBFile] = []
+                
+                for name in retryBatch {
+                    guard !Task.isCancelled else { break }
+                    let escapedName = name.replacingOccurrences(of: "'", with: "'\\''")
+                    let escapedPath = path.replacingOccurrences(of: "'", with: "'\\''")
+                    let cmd = "ls -ld '\(escapedPath)/\(escapedName)'"
+                    let (_, lsOut, _) = await Shell.runAsyncWithTimeout(
+                        adbPath, args: deviceArgs(["shell", cmd]), timeoutSeconds: 5.0
+                    )
+                    let line = lsOut.trimmingCharacters(in: CharacterSet(charactersIn: "\r\n"))
+                    guard !line.isEmpty else { continue }
+                    
+                    let parts = line.split(whereSeparator: { $0.isWhitespace })
+                    guard parts.count >= 7 else { continue }
+                    
+                    let perms = String(parts[0])
+                    let isDir = perms.hasPrefix("d")
+                    var size: UInt64 = 0
+                    var modDate: Date? = nil
+                    
+                    // Find date columns (YYYY-MM-DD HH:MM) and size before them
+                    for idx in 3..<(parts.count - 1) {
+                        let candidate = String(parts[idx])
+                        if candidate.count == 10 && candidate.contains("-") {
+                            let next = String(parts[idx + 1])
+                            if next.count == 5 && next.contains(":") {
+                                if idx > 0 { size = UInt64(parts[idx - 1]) ?? 0 }
+                                modDate = dateFormatter.date(from: "\(candidate) \(next)")
+                                break
+                            }
+                        }
+                    }
+                    
+                    let fullPath = path.hasSuffix("/") ? path + name : path + "/" + name
+                    recovered.append(ADBFile(name: name, path: fullPath, isDirectory: isDir, size: size, modificationDate: modDate))
+                }
+                
+                if !recovered.isEmpty {
+                    onBatch(recovered)
+                    print("📂 ADB: ls -ld retry recovered \(recovered.count) files (\(retryStart + retryEnd)/\(missedNames.count) retried)")
+                }
+            }
+        }
+        
+        print("📂 ADB: Metadata batch loading complete — \(completedFiles)/\(fileNames.count) files processed, \(missedNames.count) needed ls -ld retry")
     }
 
     static func pullFileWithProgress(
@@ -1187,7 +2129,7 @@ class ADBManager {
                                 }
                             }
                             
-                            Thread.sleep(forTimeInterval: 2)
+                            Thread.sleep(forTimeInterval: 1)
                         }
                     }
                     
@@ -1328,7 +2270,10 @@ class ADBManager {
     
     /// Deletes a file or folder from the Android device
     /// - Parameter devicePath: Path to the file or folder on the device
-    static func deleteFile(devicePath: String) async throws {
+    static func deleteFile(devicePath: String, cancellationCheck: @escaping () -> Bool = { false }) async throws {
+        if cancellationCheck() {
+            throw NSError(domain: "ADB", code: -1, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+        }
         let adbPath = getADBPath()
         
         // Escape single quotes in the path
@@ -1336,12 +2281,23 @@ class ADBManager {
         
         // Strategy 1: Use rm -rf with single-quoted path (handles most cases)
         let command = "rm -rf '\(escapedPath)'"
-        let (code, _, error) = await Shell.runAsync(adbPath, args: deviceArgs(["shell", command]))
+        let (code, _, error, _) = await Shell.runWithProgressCancellable(
+            adbPath,
+            args: deviceArgs(["shell", command]),
+            progressCallback: { _ in },
+            cancellationCheck: cancellationCheck
+        )
+        
+        if cancellationCheck() {
+            throw NSError(domain: "ADB", code: -1, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+        }
         
         // rm -rf with -f flag can return 0 even on failure, so verify the file is gone
-        let (_, checkOut, _) = await Shell.runAsync(
+        let (_, checkOut, _, _) = await Shell.runWithProgressCancellable(
             adbPath,
-            args: deviceArgs(["shell", "[ -e '\(escapedPath)' ] && echo EXISTS || echo GONE"])
+            args: deviceArgs(["shell", "[ -e '\(escapedPath)' ] && echo EXISTS || echo GONE"]),
+            progressCallback: { _ in },
+            cancellationCheck: cancellationCheck
         )
         let stillExists = checkOut.trimmingCharacters(in: .whitespacesAndNewlines) == "EXISTS"
         
@@ -1350,18 +2306,30 @@ class ADBManager {
             return
         }
         
+        if cancellationCheck() {
+            throw NSError(domain: "ADB", code: -1, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+        }
+        
         // Strategy 2: Pass rm and path as separate arguments (avoids shell re-parsing)
         // This handles filenames with spaces, dots, and special characters better
         print("⚠️ Delete: File still exists after rm -rf, retrying with separate args...")
-        let (code2, _, error2) = await Shell.runAsync(
+        let (code2, _, error2, _) = await Shell.runWithProgressCancellable(
             adbPath,
-            args: deviceArgs(["shell", "rm", "-rf", devicePath])
+            args: deviceArgs(["shell", "rm", "-rf", devicePath]),
+            progressCallback: { _ in },
+            cancellationCheck: cancellationCheck
         )
         
+        if cancellationCheck() {
+            throw NSError(domain: "ADB", code: -1, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+        }
+        
         // Verify again
-        let (_, checkOut2, _) = await Shell.runAsync(
+        let (_, checkOut2, _, _) = await Shell.runWithProgressCancellable(
             adbPath,
-            args: deviceArgs(["shell", "[ -e '\(escapedPath)' ] && echo EXISTS || echo GONE"])
+            args: deviceArgs(["shell", "[ -e '\(escapedPath)' ] && echo EXISTS || echo GONE"]),
+            progressCallback: { _ in },
+            cancellationCheck: cancellationCheck
         )
         let stillExists2 = checkOut2.trimmingCharacters(in: .whitespacesAndNewlines) == "EXISTS"
         
@@ -1369,17 +2337,29 @@ class ADBManager {
             return
         }
         
+        if cancellationCheck() {
+            throw NSError(domain: "ADB", code: -1, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+        }
+        
         // Strategy 3: Try verbose rm without -f to capture the EXACT error message from Android
         print("⚠️ Delete: Still exists, trying rm -rv without -f to capture error...")
-        let (code3, out3, err3) = await Shell.runAsync(
+        let (code3, out3, err3, _) = await Shell.runWithProgressCancellable(
             adbPath,
-            args: deviceArgs(["shell", "rm -rv '\(escapedPath)'"])
+            args: deviceArgs(["shell", "rm -rv '\(escapedPath)'"]),
+            progressCallback: { _ in },
+            cancellationCheck: cancellationCheck
         )
         
+        if cancellationCheck() {
+            throw NSError(domain: "ADB", code: -1, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+        }
+        
         // Final verification
-        let (_, checkOut3, _) = await Shell.runAsync(
+        let (_, checkOut3, _, _) = await Shell.runWithProgressCancellable(
             adbPath,
-            args: deviceArgs(["shell", "[ -e '\(escapedPath)' ] && echo EXISTS || echo GONE"])
+            args: deviceArgs(["shell", "[ -e '\(escapedPath)' ] && echo EXISTS || echo GONE"]),
+            progressCallback: { _ in },
+            cancellationCheck: cancellationCheck
         )
         let stillExists3 = checkOut3.trimmingCharacters(in: .whitespacesAndNewlines) == "EXISTS"
         
@@ -1418,13 +2398,13 @@ class ADBManager {
                 throw NSError(
                     domain: "ADB",
                     code: Int(code),
-                    userInfo: [NSLocalizedDescriptionKey: "Cannot rename: File system is read-only"]
+                    userInfo: [NSLocalizedDescriptionKey: "File system is read-only"]
                 )
             } else if error.contains("Permission denied") || error.contains("permission denied") {
                 throw NSError(
                     domain: "ADB",
                     code: Int(code),
-                    userInfo: [NSLocalizedDescriptionKey: "Cannot rename: Permission denied"]
+                    userInfo: [NSLocalizedDescriptionKey: "Permission denied"]
                 )
             } else if error.contains("No such file") {
                 throw NSError(
@@ -1442,7 +2422,7 @@ class ADBManager {
                 throw NSError(
                     domain: "ADB",
                     code: Int(code),
-                    userInfo: [NSLocalizedDescriptionKey: error.isEmpty ? "Failed to rename file" : error]
+                    userInfo: [NSLocalizedDescriptionKey: error.isEmpty ? "Unknown error occurred" : error]
                 )
             }
         }
@@ -1943,31 +2923,92 @@ class ADBManager {
 
     // MARK: - Media Scanner
     
-    /// Triggers the Android media scanner for a specific file path so it appears in the Gallery immediately.
-    /// Uses a lightweight broadcast intent that only indexes the single file, not the entire storage.
+    /// Triggers the Android media scanner for a specific file path so it appears in the Gallery
+    /// and Google Photos immediately. Scans both the file AND its parent directory in a single
+    /// ADB call so MediaStore indexes the file properly without extra round-trip overhead.
     static func triggerMediaScan(path: String) async {
         let adbPath = getADBPath()
         guard !adbPath.isEmpty else { return }
         
         let escapedPath = path.replacingOccurrences(of: "'", with: "'\\''")
         
-        // Two strategies combined — both target ONLY this specific file, never the whole device:
+        // Derive parent directory for the directory-level scan that Google Photos needs
+        let parentDir = (path as NSString).deletingLastPathComponent
+        let escapedParent = parentDir.replacingOccurrences(of: "'", with: "'\\''")
+        
+        // Combined single-call strategy (file + parent dir) — avoids extra ADB round trips:
         //
-        // 1. Modern (Android 11+): "cmd media.scanner scan" indexes just this one file
+        // 1. Modern (Android 11+): "cmd media.scanner scan" on both file and parent directory
+        //    → This updates the MediaStore database so Google Photos sees the new files
         // 2. Legacy (Android ≤10): broadcast intent for single-file scan
         //
-        // Whichever matches the device's Android version will work; the other silently no-ops.
-        let command = "cmd media.scanner scan '\(escapedPath)' >/dev/null 2>&1; am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d 'file://\(escapedPath)' >/dev/null 2>&1"
+        // All commands are chained with ';' (not &&) so failures in one don't block others.
+        // All output is suppressed to keep it lightweight.
+        let command = "cmd media.scanner scan '\(escapedPath)' >/dev/null 2>&1; cmd media.scanner scan '\(escapedParent)' >/dev/null 2>&1; am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d 'file://\(escapedPath)' >/dev/null 2>&1"
         
         _ = await Shell.runAsync(adbPath, args: deviceArgs(["shell", command]))
+    }
+    
+    /// Lightweight post-batch media scan: scans a single directory so Google Photos picks up
+    /// all newly uploaded files. Called once after a batch upload completes — NOT per file.
+    /// Uses a short timeout so it never blocks the UI or other ADB operations.
+    static func triggerMediaScanForDirectory(_ directoryPath: String) async {
+        let adbPath = getADBPath()
+        guard !adbPath.isEmpty else { return }
+        
+        let escapedPath = directoryPath.replacingOccurrences(of: "'", with: "'\\''")
+        
+        // Single directory scan — 'cmd media.scanner scan' is recursive for directories
+        // and fast for a single folder. 5-second timeout ensures we never block.
+        let command = "cmd media.scanner scan '\(escapedPath)' >/dev/null 2>&1"
+        _ = await Shell.runAsyncWithTimeout(
+            adbPath, args: deviceArgs(["shell", command]), timeoutSeconds: 5.0
+        )
+    }
+    
+    /// Triggers the media scanner for common media directories (DCIM/Camera, Pictures, etc.)
+    /// so content:// fallback queries work even on devices where files were pushed via ADB.
+    /// Called on device connection to pre-warm the MediaStore index.
+    static func triggerMediaScanForCommonPaths() async {
+        let adbPath = getADBPath()
+        guard !adbPath.isEmpty else { return }
+        
+        let paths = [
+            "/storage/emulated/0/DCIM/Camera",
+            "/storage/emulated/0/DCIM",
+            "/storage/emulated/0/Pictures",
+            "/storage/emulated/0/Movies"
+        ]
+        
+        AppLogger.log("📱 [MediaScanner] Pre-scanning \(paths.count) common media paths...")
+        
+        // Use 'cmd media.scanner scan' for each directory — it's recursive and fast
+        for path in paths {
+            let escapedPath = path.replacingOccurrences(of: "'", with: "'\\''")
+            let command = "cmd media.scanner scan '\(escapedPath)' >/dev/null 2>&1"
+            let (code, _, _) = await Shell.runAsyncWithTimeout(
+                adbPath, args: deviceArgs(["shell", command]), timeoutSeconds: 10.0
+            )
+            if code != 0 {
+                // Try legacy broadcast as fallback
+                let broadcastCmd = "am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d 'file://\(escapedPath)' >/dev/null 2>&1"
+                _ = await Shell.runAsyncWithTimeout(
+                    adbPath, args: deviceArgs(["shell", broadcastCmd]), timeoutSeconds: 5.0
+                )
+            }
+        }
+        
+        AppLogger.log("📱 [MediaScanner] Pre-scan complete.")
     }
 
     // MARK: - Get File Info
     
-    /// Gets detailed information about a file
-    /// - Parameter path: Path to the file
+    /// Gets detailed information about a file or folder.
+    /// - Parameters:
+    ///   - path: Path to the file/folder.
+    ///   - isDirectory: Pass true when the selected item is a folder so size uses `du`.
     /// - Returns: Dictionary with file properties
-    static func getFileInfo(path: String) async throws -> [String: String] {
+    static func getFileInfo(path: String, isDirectory: Bool = false) async throws -> [String: String] {
         let adbPath = getADBPath()
         let escapedPath = path.replacingOccurrences(of: "'", with: "'\\''")
         
@@ -1998,6 +3039,18 @@ class ADBManager {
             info["owner"] = String(parts[3])
             info["group"] = String(parts[4])
             info["type"] = String(parts[5])
+        }
+
+        // `stat %s` returns directory entry size for folders (often 4K/8K), not total content size.
+        // For "Get Info", prefer `du -sk` so folder size matches actual contents.
+        let typeSuggestsDirectory = info["type"]?.localizedCaseInsensitiveContains("directory") == true
+        if isDirectory || typeSuggestsDirectory {
+            if let folderBytes = await fetchSingleFolderSize(path: path) {
+                info["size"] = String(folderBytes)
+            } else {
+                // Avoid showing misleading inode size when recursive size couldn't be computed.
+                info.removeValue(forKey: "size")
+            }
         }
         
         info["path"] = path

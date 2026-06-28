@@ -11,7 +11,6 @@ struct ActionToolbar: View {
     let currentPath: String
     @ObservedObject var fileActionManager: FileActionManager
     let onRefresh: () async -> Void
-    
     // Dialog states
     @State private var showNewFolderDialog = false
     @State private var showNewFileDialog = false
@@ -169,7 +168,6 @@ struct ActionToolbar: View {
                 Divider()
                     .frame(height: 16)
             }
-            
             Spacer()
             
             // Search Field - Always visible, better styled

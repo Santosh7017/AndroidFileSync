@@ -10,7 +10,11 @@ import IOKit.usb
 
 final class USBDeviceMonitor {
 
-    /// Called on the main thread whenever a USB device is attached or removed.
+    /// Called on the main thread when a USB device is attached.
+    var onDeviceAdded: (() -> Void)?
+    /// Called on the main thread when a USB device is removed.
+    var onDeviceRemoved: (() -> Void)?
+    /// Legacy: called for both add and remove if the specific callbacks aren't set.
     var onChange: (() -> Void)?
 
     private var notifyPort: IONotificationPortRef?
@@ -44,13 +48,12 @@ final class USBDeviceMonitor {
 
         // ── Device ADDED ────────────────────────────────────────────────────
         let addedCB: IOServiceMatchingCallback = { ctx, iterator in
-            // Drain the iterator (required so future events fire)
             var service = IOIteratorNext(iterator)
             while service != 0 { IOObjectRelease(service); service = IOIteratorNext(iterator) }
             guard let ctx else { return }
             let monitor = Unmanaged<USBDeviceMonitor>.fromOpaque(ctx).takeUnretainedValue()
             print("🔌 USBMonitor: Device attached")
-            DispatchQueue.main.async { monitor.onChange?() }
+            DispatchQueue.main.async { (monitor.onDeviceAdded ?? monitor.onChange)?() }
         }
 
         IOServiceAddMatchingNotification(
@@ -69,7 +72,7 @@ final class USBDeviceMonitor {
             guard let ctx else { return }
             let monitor = Unmanaged<USBDeviceMonitor>.fromOpaque(ctx).takeUnretainedValue()
             print("🔌 USBMonitor: Device removed")
-            DispatchQueue.main.async { monitor.onChange?() }
+            DispatchQueue.main.async { (monitor.onDeviceRemoved ?? monitor.onChange)?() }
         }
 
         if let matchingRemoved {

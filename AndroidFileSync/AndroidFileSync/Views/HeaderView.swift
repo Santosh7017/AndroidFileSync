@@ -65,7 +65,7 @@ struct HeaderView: View {
     
     private var deviceInfo: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("Android File Sync")
+            Text("AndroidFileSync")
                 .font(.headline)
             
             HStack(spacing: 4) {

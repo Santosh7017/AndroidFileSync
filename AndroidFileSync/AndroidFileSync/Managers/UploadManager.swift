@@ -487,6 +487,15 @@ class UploadManager: ObservableObject {
             print("🛑 Batch upload cancelled at \(await MainActor.run { batchCompleted })/\(files.count)")
         } else {
             print("✅ All \(files.count) uploads completed")
+            
+            // Fire-and-forget: scan unique parent directories so Google Photos picks up new files.
+            // This runs detached so it never blocks the UI or slows down subsequent ADB ops.
+            let uniqueDirs = Set(files.map { ($0.devicePath as NSString).deletingLastPathComponent })
+            Task.detached(priority: .background) {
+                for dir in uniqueDirs {
+                    await ADBManager.triggerMediaScanForDirectory(dir)
+                }
+            }
         }
     }
 }

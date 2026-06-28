@@ -43,6 +43,8 @@ class DeviceManager: ObservableObject {
     private var usbMonitor: USBDeviceMonitor? = nil
     /// True when user explicitly disconnected — prevents auto-reconnect
     @Published var userDisconnected = false
+    /// True when the background device diagnostics task has completed
+    @Published var diagnosticsComplete = false
     /// One-time flag: restart ADB server on first detection to apply env var
     private var hasRestartedServer = false
     /// Prevent overlapping detection runs that can flood ADB and mDNS queries.
@@ -55,6 +57,8 @@ class DeviceManager: ObservableObject {
     private var lastUSBTransportRecoveryAt: Date? = nil
     /// Single in-flight wireless hunt task to avoid spawning one per detect cycle.
     private var wirelessHuntTask: Task<Void, Never>? = nil
+    /// Background diagnostics task — cancelled on disconnect to avoid stale serial queries.
+    private var diagnosticsTask: Task<Void, Never>? = nil
     private var lastWirelessReconnectAttemptAt: Date? = nil
     private static let wirelessReconnectCooldown: TimeInterval = 8.0
     /// Cache last liveness check timestamp per wireless serial to prevent spamming adb shell commands.
@@ -502,6 +506,8 @@ class DeviceManager: ObservableObject {
                         self.statusMessage = "Connected via USB"
                     }
                     self.isConnected = true
+                    
+                    // task and silently kill the upload popup. It resets only on disconnect.
                     print("📱 DeviceManager: Device connected (\(self.connectionType.rawValue))!")
                 }
             } else {
@@ -509,6 +515,7 @@ class DeviceManager: ObservableObject {
                 self.deviceName = "No Device"
                 self.statusMessage = "No device detected. Please connect your device."
                 self.isConnected = false
+                self.diagnosticsComplete = false
                 self.sdCardPath = nil
                 self.storageStats = [:]
                 // Only clear lastWirelessIP if no wireless device is available at all
@@ -527,6 +534,55 @@ class DeviceManager: ObservableObject {
         if adbAvailable && isAuthorized {
             Self.hasAttemptedWirelessReconnectThisLaunch = false
             lastWirelessReconnectAttemptAt = nil
+            
+            // ── FUSE Pre-warm (Samsung fix) ─────────────────────────────────────
+            // Samsung's FUSE filesystem can block `ls` on DCIM/Camera the first time
+            // after USB connect. Running a lightweight `ls` NOW (in background) wakes
+            // up the FUSE daemon so it's ready when the user navigates there.
+            // This runs immediately — no 10s delay — because it's a single cheap command.
+            Task.detached(priority: .utility) {
+                let adbPath = ADBManager.getADBPath()
+                guard !adbPath.isEmpty else { return }
+                
+                // Trigger media scanner FIRST — ensures MediaStore index is fresh
+                await ADBManager.triggerMediaScanForCommonPaths()
+                
+                // Touch DCIM/Camera with a quick ls to wake FUSE
+                let warmPaths = [
+                    "/storage/emulated/0/DCIM/Camera",
+                    "/storage/emulated/0/DCIM",
+                    "/storage/emulated/0/Pictures"
+                ]
+                for path in warmPaths {
+                    let escaped = path.replacingOccurrences(of: "'", with: "'\\''")
+                    _ = await Shell.runAsyncWithTimeout(
+                        adbPath,
+                        args: ADBManager.deviceArgs(["shell", "ls '\(escaped)' >/dev/null 2>&1"]),
+                        timeoutSeconds: 5.0
+                    )
+                }
+                AppLogger.log("📱 [FUSE Pre-warm] Completed — DCIM/Camera/Pictures touched", level: .info)
+            }
+            
+            if DiagnosticsControl.isEnabled {
+                diagnosticsTask?.cancel()
+                diagnosticsComplete = false
+                diagnosticsTask = Task.detached(priority: .background) { [weak self] in
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    guard !Task.isCancelled else { return }
+                    guard let self, await MainActor.run(body: { self.isConnected }) else { return }
+                    await ADBManager.logDeviceDiagnostics()
+                    guard !Task.isCancelled else { return }
+                    await MainActor.run {
+                        self.diagnosticsComplete = true
+                    }
+                }
+            } else {
+                diagnosticsTask?.cancel()
+                diagnosticsTask = nil
+                diagnosticsComplete = false
+            }
+            
             Task {
                 if isWireless {
                     let currentIP = await MainActor.run { self.lastWirelessIP }
@@ -558,6 +614,20 @@ class DeviceManager: ObservableObject {
     private func canAttemptUSBTransportRecovery() -> Bool {
         guard let lastUSBTransportRecoveryAt else { return true }
         return Date().timeIntervalSince(lastUSBTransportRecoveryAt) > 10.0
+    }
+
+    func setDiagnosticsEnabled(_ enabled: Bool) {
+        if !enabled {
+            diagnosticsTask?.cancel()
+            diagnosticsTask = nil
+            diagnosticsComplete = false
+            return
+        }
+
+        diagnosticsComplete = false
+        if isConnected {
+            Task { await detectDevice() }
+        }
     }
 
     // MARK: - Device Switching
@@ -594,34 +664,31 @@ class DeviceManager: ObservableObject {
 
     // MARK: - USB Device Monitor (IOKit, zero-overhead)
 
-    /// Registers IOKit USB attach/detach callbacks. Fires instantly when a USB
-    /// device is plugged or unplugged — no polling, no CPU cost when idle.
     func startMonitoring() {
         let monitor = USBDeviceMonitor()
-        monitor.onChange = { [weak self] in
+        
+        // USB device plugged in — poll for ADB to register the new device
+        monitor.onDeviceAdded = { [weak self] in
             guard let self else { return }
             Task {
+                // Cancel any running wireless hunt or stale diagnostics from prior disconnect
+                self.cancelWirelessReconnectHunt()
+                self.diagnosticsTask?.cancel()
+                self.diagnosticsTask = nil
+                
                 await MainActor.run {
                     self.preferUSBUntil = Date().addingTimeInterval(6.0)
                 }
 
-                // Snapshot the device count before detection
                 let previousDeviceCount = await MainActor.run { self.availableDevices.count }
-                
-                // Try immediately (fastest for disconnects, and sometimes connects)
                 await self.detectDevice()
                 
-                // Poll a few times for ADB to register the change.
-                // - On connect: ADB can take ~0.5-1s to register a new USB device
-                // - On disconnect: detectDevice() above handles it instantly
-                // We poll until the device list has actually changed or we time out.
                 var attemptedUSBTransportRecovery = false
                 for _ in 1...4 {
                     let connected = await MainActor.run { self.isConnected }
                     let hasUSB = await MainActor.run {
                         self.availableDevices.contains(where: { !$0.isWireless })
                     }
-                    // Stop if we're connected and have a USB device, OR if any device count change has already been processed
                     let currentCount = await MainActor.run { self.availableDevices.count }
                     if connected && hasUSB { break }
                     if currentCount != previousDeviceCount { break }
@@ -633,13 +700,11 @@ class DeviceManager: ObservableObject {
                             let recoveredUSB = await MainActor.run {
                                 self.availableDevices.contains(where: { !$0.isWireless })
                             }
-                            if recoveredUSB {
-                                break
-                            }
+                            if recoveredUSB { break }
                         }
                     }
 
-                    try? await Task.sleep(nanoseconds: 500_000_000) // 0.5s
+                    try? await Task.sleep(nanoseconds: 500_000_000)
                     await self.detectDevice()
                 }
 
@@ -650,6 +715,69 @@ class DeviceManager: ObservableObject {
                 }
             }
         }
+        
+        // USB device unplugged — instant UI response, then confirm with ADB
+        monitor.onDeviceRemoved = { [weak self] in
+            guard let self else { return }
+            Task {
+                // Cancel stale diagnostics so they don't query a disconnected serial
+                self.diagnosticsTask?.cancel()
+                self.diagnosticsTask = nil
+                
+                let wasUSB = await MainActor.run {
+                    self.isConnected && self.connectionType == .usb
+                }
+                
+                if wasUSB {
+                    // IOKit fires for ALL USB devices (mouse, keyboard, etc.).
+                    // Quick `adb devices` check to confirm our Android device is actually gone.
+                    let adbPath = ADBManager.getADBPath()
+                    let activeSerial = ADBManager.activeDeviceSerial
+                    let (_, devOutput, _) = await Shell.runAsyncWithTimeout(
+                        adbPath, args: ["devices"], timeoutSeconds: 2.0
+                    )
+                    let stillListed = activeSerial != nil && devOutput.contains(activeSerial!)
+                    
+                    if !stillListed {
+                        // Preserve wireless entries — only remove USB device from the list
+                        let wirelessDevices = await MainActor.run {
+                            self.availableDevices.filter { $0.isWireless }
+                        }
+                        
+                        if wirelessDevices.isEmpty {
+                            // No wireless fallback — full disconnect
+                            await MainActor.run {
+                                self.isConnected = false
+                                self.deviceName = "No Device"
+                                self.statusMessage = "Device disconnected"
+                                self.connectionType = .none
+                                self.sdCardPath = nil
+                                self.storageStats = [:]
+                                self.availableDevices = []
+                                print("📱 DeviceManager: USB removed — disconnected (no wireless fallback)")
+                            }
+                            ADBManager.activeDeviceSerial = nil
+                        } else {
+                            // Wireless fallback available — switch to it immediately
+                            let wirelessDev = wirelessDevices[0]
+                            await MainActor.run {
+                                self.availableDevices = wirelessDevices
+                                self.connectionType = .wireless
+                                self.statusMessage = "Connected via WiFi"
+                                self.deviceName = wirelessDev.displayName
+                                print("📱 DeviceManager: USB removed — switching to wireless: \(wirelessDev.serial)")
+                            }
+                            ADBManager.activeDeviceSerial = wirelessDev.serial
+                        }
+                    }
+                }
+                
+                // Full detection for cleanup and state refresh
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                await self.detectDevice()
+            }
+        }
+        
         monitor.start()
         usbMonitor = monitor
         print("📡 IOKit USB monitor started")
@@ -911,7 +1039,7 @@ class DeviceManager: ObservableObject {
         }
     }
     
-    func listFiles(path: String = "/sdcard") async throws -> [UnifiedFile] {
+    func listFiles(path: String = "/sdcard", onPageLoaded: (([UnifiedFile]) -> Void)? = nil) async throws -> [UnifiedFile] {
         guard adbAvailable else {
             throw NSError(
                 domain: "DeviceManager",
@@ -920,7 +1048,14 @@ class DeviceManager: ObservableObject {
             )
         }
         
-        let adbFiles = try await ADBManager.listFiles(path: path)
+        // Convert the UnifiedFile callback to an ADBFile callback for ADBManager
+        let adbCallback: (([ADBFile]) -> Void)? = onPageLoaded.map { callback in
+            return { adbFiles in
+                callback(adbFiles.map { UnifiedFile(from: $0) })
+            }
+        }
+        
+        let adbFiles = try await ADBManager.listFiles(path: path, onPageLoaded: adbCallback)
         return adbFiles.map { UnifiedFile(from: $0) }
     }
     

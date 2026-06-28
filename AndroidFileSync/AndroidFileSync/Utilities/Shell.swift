@@ -83,7 +83,9 @@ struct Shell {
         }
     }
     
-    // Async run with timeout - kills process if it takes too long
+    // Async run with timeout - drains stdout/stderr while the process is running
+    // so large responses (for example MediaStore `content query` output) do not
+    // deadlock after filling the pipe buffer.
     static func runAsyncWithTimeout(
         _ command: String,
         args: [String],
@@ -101,46 +103,107 @@ struct Shell {
             process.standardOutput = stdout
             process.standardError = stderr
             
+            let stdoutHandle = stdout.fileHandleForReading
+            let stderrHandle = stderr.fileHandleForReading
+            
+            var outputData = Data()
+            var errorData = Data()
             var hasResumed = false
+            var didTimeout = false
             let lock = NSLock()
             
-            // Timeout timer
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeoutSeconds) {
-                lock.lock()
-                defer { lock.unlock() }
+            func finish(status: Int32, flushRemaining: Bool, extraErrorMessage: String? = nil) {
+                var result: (Int32, String, String)?
                 
-                if !hasResumed && process.isRunning {
-                    process.terminate()
+                lock.lock()
+                if !hasResumed {
                     hasResumed = true
-                    continuation.resume(returning: (-1, "", "Command timed out after \(Int(timeoutSeconds)) seconds"))
+                    
+                    stdoutHandle.readabilityHandler = nil
+                    stderrHandle.readabilityHandler = nil
+                    
+                    if flushRemaining {
+                        outputData.append(stdoutHandle.readDataToEndOfFile())
+                        errorData.append(stderrHandle.readDataToEndOfFile())
+                    }
+                    
+                    let output = String(data: outputData, encoding: .utf8) ?? ""
+                    var error = String(data: errorData, encoding: .utf8) ?? ""
+                    
+                    if let extraErrorMessage, !extraErrorMessage.isEmpty {
+                        error = error.isEmpty ? extraErrorMessage : error + "\n" + extraErrorMessage
+                    }
+                    
+                    if didTimeout {
+                        let timeoutMessage = "Command timed out after \(Int(timeoutSeconds)) seconds"
+                        error = error.isEmpty ? timeoutMessage : error + "\n" + timeoutMessage
+                    }
+                    
+                    result = (didTimeout ? -1 : status, output, error)
+                }
+                lock.unlock()
+                
+                if let result {
+                    continuation.resume(returning: result)
+                }
+            }
+            
+            stdoutHandle.readabilityHandler = { handle in
+                let data = handle.availableData
+                lock.lock()
+                if data.isEmpty {
+                    handle.readabilityHandler = nil
+                } else {
+                    outputData.append(data)
+                }
+                lock.unlock()
+            }
+            
+            stderrHandle.readabilityHandler = { handle in
+                let data = handle.availableData
+                lock.lock()
+                if data.isEmpty {
+                    handle.readabilityHandler = nil
+                } else {
+                    errorData.append(data)
+                }
+                lock.unlock()
+            }
+            
+            // Timeout timer
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + timeoutSeconds) {
+                var shouldTerminate = false
+                
+                lock.lock()
+                if !hasResumed && process.isRunning {
+                    didTimeout = true
+                    shouldTerminate = true
+                }
+                lock.unlock()
+                
+                guard shouldTerminate else { return }
+                
+                process.terminate()
+                
+                // Give Process a moment to deliver its termination handler so we can
+                // flush any remaining bytes. If it still refuses to die, force-kill it
+                // and return the partial output captured so far.
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.3) {
+                    if process.isRunning {
+                        kill(process.processIdentifier, SIGKILL)
+                    }
+                    finish(status: -1, flushRemaining: false)
                 }
             }
             
             process.terminationHandler = { proc in
-                lock.lock()
-                defer { lock.unlock() }
-                
-                if !hasResumed {
-                    hasResumed = true
-                    let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
-                    let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
-                    
-                    let output = String(data: outputData, encoding: .utf8) ?? ""
-                    let error = String(data: errorData, encoding: .utf8) ?? ""
-                    
-                    continuation.resume(returning: (proc.terminationStatus, output, error))
-                }
+                finish(status: proc.terminationStatus, flushRemaining: true)
             }
             
             do {
                 try process.run()
             } catch {
-                lock.lock()
-                if !hasResumed {
-                    hasResumed = true
-                    continuation.resume(returning: (-1, "", error.localizedDescription))
-                }
-                lock.unlock()
+                finish(status: -1, flushRemaining: false, extraErrorMessage: error.localizedDescription)
             }
         }
     }

@@ -33,6 +33,19 @@ class FileActionManager: ObservableObject {
     @Published var currentAction: String = ""
     @Published var lastError: String?
     
+    // Cancellation support
+    @Published var cancellationRequested: Bool = false
+    
+    /// Request cancellation of the current operation
+    func requestCancellation() {
+        cancellationRequested = true
+    }
+    
+    /// Reset cancellation flag (called at the start of each new operation)
+    private func resetCancellation() {
+        cancellationRequested = false
+    }
+    
     // MARK: - Paste Conflict Resolution
     
     enum ConflictResolution {
@@ -83,12 +96,16 @@ class FileActionManager: ObservableObject {
     
     /// Ensures the trash folder exists on the device
     private func ensureTrashFolder() async throws {
-        let (code, _, _) = await Shell.runAsync(
+        let (code, _, error) = await Shell.runAsync(
             ADBManager.getADBPath(),
             args: ADBManager.deviceArgs(["shell", "mkdir -p '\(trashFolderPath)'"])
         )
         if code != 0 {
-            print("⚠️ Could not create trash folder, will delete permanently")
+            throw NSError(
+                domain: "FileAction",
+                code: Int(code),
+                userInfo: [NSLocalizedDescriptionKey: "Could not create trash folder: \(error.isEmpty ? "Unknown error" : error)"]
+            )
         }
     }
     
@@ -125,6 +142,7 @@ class FileActionManager: ObservableObject {
         let action = permanent ? "Permanently deleting" : "Moving to Trash"
 
         await MainActor.run {
+            resetCancellation()
             isPerformingAction = true
             currentAction = "\(action) \(files.count) item\(files.count == 1 ? "" : "s")..."
             lastError = nil
@@ -132,6 +150,15 @@ class FileActionManager: ObservableObject {
 
         do {
             for (index, file) in files.enumerated() {
+                // Check for cancellation
+                if await MainActor.run(body: { cancellationRequested }) {
+                    await MainActor.run {
+                        isPerformingAction = false
+                        currentAction = ""
+                        lastError = "Cancelled after \(index) of \(files.count) items"
+                    }
+                    return
+                }
                 await MainActor.run {
                     currentAction = "\(action) \(index + 1) of \(files.count): \(file.name)"
                 }
@@ -153,12 +180,22 @@ class FileActionManager: ObservableObject {
     }
 
     private func performDelete(_ file: UnifiedFile, permanent: Bool) async throws {
+        let cancelCheck = { [weak self] in self?.cancellationRequested ?? false }
+        
+        if cancellationRequested {
+            throw NSError(domain: "FileAction", code: -1, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+        }
+        
         if permanent {
-            try await ADBManager.deleteFile(devicePath: file.path)
+            try await ADBManager.deleteFile(devicePath: file.path, cancellationCheck: cancelCheck)
             return
         }
 
         try await ensureTrashFolder()
+        
+        if cancellationRequested {
+            throw NSError(domain: "FileAction", code: -1, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+        }
 
         let timestamp = Int(Date().timeIntervalSince1970)
         let trashName = "\(timestamp)_\(file.id.uuidString)_\(file.name)"
@@ -178,8 +215,12 @@ class FileActionManager: ObservableObject {
                 saveTrashedItems()
             }
         } catch {
-            print("⚠️ Move to trash failed for '\(file.name)': \(error.localizedDescription). Falling back to permanent delete.")
-            try await ADBManager.deleteFile(devicePath: file.path)
+            print("❌ Move to trash failed for '\(file.name)': \(error.localizedDescription)")
+            throw NSError(
+                domain: "FileAction",
+                code: (error as NSError).code,
+                userInfo: [NSLocalizedDescriptionKey: "Cannot move '\(file.name)' to trash: \(error.localizedDescription)"]
+            )
         }
     }
     
@@ -207,12 +248,17 @@ class FileActionManager: ObservableObject {
             }
             
         } catch {
+            let formattedError = NSError(
+                domain: "FileAction",
+                code: (error as NSError).code,
+                userInfo: [NSLocalizedDescriptionKey: "Cannot restore '\(item.name)': \(error.localizedDescription)"]
+            )
             await MainActor.run {
                 isPerformingAction = false
                 currentAction = ""
-                lastError = "Failed to restore: \(error.localizedDescription)"
+                lastError = formattedError.localizedDescription
             }
-            throw error
+            throw formattedError
         }
     }
 
@@ -258,7 +304,7 @@ class FileActionManager: ObservableObject {
         }
         
         do {
-            try await ADBManager.deleteFile(devicePath: item.trashPath)
+            try await ADBManager.deleteFile(devicePath: item.trashPath, cancellationCheck: { [weak self] in self?.cancellationRequested ?? false })
             
             await MainActor.run {
                 trashedItems.removeAll { $0.id == item.id }
@@ -346,12 +392,17 @@ class FileActionManager: ObservableObject {
             try await ADBManager.renameFile(oldPath: file.path, newPath: newPath)
             await MainActor.run { isPerformingAction = false; currentAction = "" }
         } catch {
+            let formattedError = NSError(
+                domain: "Rename",
+                code: (error as NSError).code,
+                userInfo: [NSLocalizedDescriptionKey: "Cannot rename '\(file.name)': \(error.localizedDescription)"]
+            )
             await MainActor.run {
                 isPerformingAction = false
                 currentAction = ""
-                lastError = error.localizedDescription
+                lastError = formattedError.localizedDescription
             }
-            throw error
+            throw formattedError
         }
     }
     
@@ -448,6 +499,7 @@ class FileActionManager: ObservableObject {
         let itemsToPaste = clipboard
 
         await MainActor.run {
+            resetCancellation()
             isPerformingAction = true
             currentAction      = "Checking destination…"
             lastError          = nil
@@ -563,25 +615,73 @@ class FileActionManager: ObservableObject {
         var failedItems: [(name: String, error: String)] = []
         var successPaths: [String] = []
 
-        for (file, destFile) in items {
-            print("\u{1F4CB} Paste: \(operation == .cut ? "move" : "copy") '\(file.path)' \u{2192} '\(destFile)'")
-            do {
-                if operation == .cut {
-                    try await ADBManager.renameFile(oldPath: file.path, newPath: destFile)
-                } else {
-                    try await ADBManager.copyFile(from: file.path, to: destFile, isDirectory: file.isDirectory)
+        if operation == .cut {
+            // ── BATCH MOVE: combine all mv commands into a single ADB shell call ──
+            // This avoids N separate ADB round trips over WiFi.
+            var moveCommands: [String] = []
+            for (file, destFile) in items {
+                let escapedSrc = file.path.replacingOccurrences(of: "'", with: "'\\''")
+                let escapedDst = destFile.replacingOccurrences(of: "'", with: "'\\''")
+                moveCommands.append("mv '\(escapedSrc)' '\(escapedDst)'")
+                print("\u{1F4CB} Paste: move '\(file.path)' \u{2192} '\(destFile)'")
+            }
+            
+            let batchCommand = moveCommands.joined(separator: " && ")
+            let (code, _, error) = await Shell.runAsyncWithTimeout(
+                ADBManager.getADBPath(),
+                args: ADBManager.deviceArgs(["shell", batchCommand]),
+                timeoutSeconds: 30.0
+            )
+            
+            if code == 0 {
+                successCount = items.count
+                successPaths = items.map { $0.dest }
+            } else {
+                // Batch failed — fall back to individual moves to identify which ones failed
+                print("⚠️ Batch move failed (code \(code)): \(error) — retrying individually")
+                for (file, destFile) in items {
+                    do {
+                        try await ADBManager.renameFile(oldPath: file.path, newPath: destFile)
+                        successPaths.append(destFile)
+                        successCount += 1
+                    } catch {
+                        print("\u{274C} Failed to paste \(file.name): \(error.localizedDescription)")
+                        failedItems.append((file.name, error.localizedDescription))
+                    }
                 }
-                successPaths.append(destFile)
-                successCount += 1
-            } catch {
-                print("\u{274C} Failed to paste \(file.name): \(error.localizedDescription)")
-                failedItems.append((file.name, error.localizedDescription))
+            }
+        } else {
+            // ── COPY: run individually (cp -r needs per-item error handling) ──
+            for (file, destFile) in items {
+                // Check for cancellation
+                if await MainActor.run(body: { cancellationRequested }) {
+                    await MainActor.run {
+                        isPerformingAction = false
+                        currentAction = ""
+                        lastError = "Cancelled after \(successCount) of \(n) items"
+                        if successCount > 0 { clipboard.removeAll(); clipboardOperation = .none }
+                    }
+                    return
+                }
+                print("\u{1F4CB} Paste: copy '\(file.path)' \u{2192} '\(destFile)'")
+                do {
+                    try await ADBManager.copyFile(from: file.path, to: destFile, isDirectory: file.isDirectory)
+                    successPaths.append(destFile)
+                    successCount += 1
+                } catch {
+                    print("\u{274C} Failed to paste \(file.name): \(error.localizedDescription)")
+                    failedItems.append((file.name, error.localizedDescription))
+                }
             }
         }
 
-        // Trigger media scan for all pasted files (runs after paste is done, doesn't block UI)
-        for path in successPaths {
-            await ADBManager.triggerMediaScan(path: path)
+        // Trigger media scan for all pasted files (batch, non-blocking)
+        if !successPaths.isEmpty {
+            Task.detached(priority: .background) {
+                for path in successPaths {
+                    await ADBManager.triggerMediaScan(path: path)
+                }
+            }
         }
 
         await MainActor.run {

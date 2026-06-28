@@ -2,6 +2,11 @@
 import SwiftUI
 import AppKit
 
+extension Notification.Name {
+    static let afsDeleteShortcut = Notification.Name("afsDeleteShortcut")
+    static let afsPermanentDeleteShortcut = Notification.Name("afsPermanentDeleteShortcut")
+}
+
 @main
 struct AndroidFileSyncApp: App {
     
@@ -31,8 +36,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     private let dropCoordinator = DropCoordinator()
     private let showQuitDebuggingReminderKey = "showQuitDebuggingReminder"
+    private var localKeyMonitor: Any?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AppLogger.addSessionSeparator()
+        AppLogger.log("🚀 AndroidFileSync started successfully on macOS.")
         guard let window = NSApp.windows.first,
               let contentView = window.contentView else {
             return
@@ -45,6 +53,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Register for drag-and-drop
         contentView.registerForDraggedTypes([.fileURL])
         (contentView as? NSView)?.window?.registerForDraggedTypes([.fileURL])
+        
+        installDeleteShortcutMonitor()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -68,6 +78,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if let localKeyMonitor {
+            NSEvent.removeMonitor(localKeyMonitor)
+            self.localKeyMonitor = nil
+        }
+        
         let adbPath = ADBManager.getADBPath()
         guard !adbPath.isEmpty else { return }
 
@@ -81,6 +96,50 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             ADBManager.disconnectAppManagedWirelessSync()
         }
 
+    }
+
+    private func installDeleteShortcutMonitor() {
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            guard event.keyCode == 51 else { return event } // Backspace/Delete key
+            guard NSApp.modalWindow == nil else { return event }
+            guard NSApp.keyWindow?.attachedSheet == nil else { return event }
+            guard !self.shouldBypassDeleteShortcutForTextInput() else { return event }
+
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting(.capsLock)
+            let commandOnly: NSEvent.ModifierFlags = [.command]
+            let commandOption: NSEvent.ModifierFlags = [.command, .option]
+
+            if flags == commandOnly {
+                NotificationCenter.default.post(name: .afsDeleteShortcut, object: nil)
+                return nil
+            }
+            if flags == commandOption {
+                NotificationCenter.default.post(name: .afsPermanentDeleteShortcut, object: nil)
+                return nil
+            }
+            return event
+        }
+    }
+
+    private func shouldBypassDeleteShortcutForTextInput() -> Bool {
+        guard let textView = NSApp.keyWindow?.firstResponder as? NSTextView,
+              textView.isFieldEditor else {
+            return false
+        }
+
+        // Keep normal Cmd+Delete behavior in text inputs, except search fields where
+        // we want file-level delete shortcuts to keep working without pressing Esc first.
+        if let delegate = textView.delegate {
+            if delegate is NSSearchField {
+                return false
+            }
+            let delegateType = String(describing: type(of: delegate))
+            if delegateType.localizedCaseInsensitiveContains("search") {
+                return false
+            }
+        }
+        return true
     }
 }
 

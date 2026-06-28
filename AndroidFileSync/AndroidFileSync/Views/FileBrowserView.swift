@@ -21,6 +21,8 @@ struct FileBrowserView: View, Equatable {
     var onPreview: ((UnifiedFile) -> Void)? = nil
     var isPerformingAction: Bool = false
     var currentActionText: String = ""
+    /// Called when the user taps the Stop button during an ongoing operation
+    var onCancelAction: (() -> Void)? = nil
     let onBatchDelete: (() -> Void)?
     let onBatchDownload: (() -> Void)?
     let onBatchChangeExtension: ((String) -> Void)?
@@ -39,6 +41,14 @@ struct FileBrowserView: View, Equatable {
     // Folder sizes fetched asynchronously — keyed by folder path
     var folderSizes: [String: UInt64] = [:]
     
+    // Metadata loading progress (for large directories)
+    var isLoadingMetadata: Bool = false
+    var metadataLoadedCount: Int = 0
+    var metadataTotalCount: Int = 0
+    
+    // Progressive loading (paginated content:// fallback)
+    var isLoadingMoreFiles: Bool = false
+    
     // Equatable implementation - only compare data that affects rendering
     static func == (lhs: FileBrowserView, rhs: FileBrowserView) -> Bool {
         lhs.files.map(\.id) == rhs.files.map(\.id) &&
@@ -49,8 +59,14 @@ struct FileBrowserView: View, Equatable {
         lhs.isPerformingAction == rhs.isPerformingAction &&
         lhs.currentActionText == rhs.currentActionText &&
         lhs.sortOption == rhs.sortOption &&
-        lhs.folderSizes == rhs.folderSizes
+        lhs.folderSizes == rhs.folderSizes &&
+        lhs.isLoadingMetadata == rhs.isLoadingMetadata &&
+        lhs.metadataLoadedCount == rhs.metadataLoadedCount &&
+        lhs.isLoadingMoreFiles == rhs.isLoadingMoreFiles
     }
+    
+    // Guard against re-entrant sort loop (column header click → onChange → sortFiles → filteredFiles recompute → Table re-renders)
+    @State private var isSyncingSortOrder = false
     
     // Table sort state
     @State private var sortOrder: [KeyPathComparator<UnifiedFile>] = [
@@ -160,6 +176,22 @@ struct FileBrowserView: View, Equatable {
             // Item count
             if isLoading {
                 ProgressView().scaleEffect(0.65).frame(width: 14, height: 14)
+            } else if isLoadingMoreFiles {
+                HStack(spacing: 4) {
+                    ProgressView().scaleEffect(0.55).frame(width: 12, height: 12)
+                    Text("\(files.count) items")
+                        .font(.system(size: 13))
+                        .foregroundColor(.secondary)
+                }
+                .help("Loading more files from MediaStore...")
+            } else if isLoadingMetadata {
+                HStack(spacing: 4) {
+                    ProgressView().scaleEffect(0.55).frame(width: 12, height: 12)
+                    Text("\(metadataLoadedCount)/\(metadataTotalCount)")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+                .help("Loading file details...")
             } else {
                 Text(files.count == 1 ? "1 item" : "\(files.count) items")
                     .font(.system(size: 13))
@@ -189,7 +221,19 @@ struct FileBrowserView: View, Equatable {
     
     // Breadcrumb segments built from current path
     private var breadcrumbPath: some View {
-        let segments = displayPathSegments
+        let allSegments = displayPathSegments
+        // For deep paths, collapse middle segments: first > … > parent > current
+        let segments: [(text: String, isCollapsed: Bool)]
+        if allSegments.count > 3 {
+            segments = [
+                (allSegments[0], false),
+                ("…", true),
+                (allSegments[allSegments.count - 2], false),
+                (allSegments[allSegments.count - 1], false)
+            ]
+        } else {
+            segments = allSegments.map { ($0, false) }
+        }
         
         return HStack(spacing: 2) {
             if segments.isEmpty {
@@ -204,11 +248,26 @@ struct FileBrowserView: View, Equatable {
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundColor(Color(NSColor.tertiaryLabelColor))
                 }
-                Text(segment)
-                    .font(.system(size: 14, weight: index == segments.count - 1 ? .medium : .regular))
-                    .foregroundColor(index == segments.count - 1 ? .primary : .secondary)
-                    .lineLimit(1)
-                    .truncationMode(index == segments.count - 1 ? .tail : .middle)
+                if segment.isCollapsed {
+                    Text(segment.text)
+                        .font(.system(size: 14))
+                        .foregroundColor(Color(NSColor.tertiaryLabelColor))
+                } else if index == segments.count - 1 {
+                    // Last segment (current folder) — never truncate
+                    Text(segment.text)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                } else {
+                    // Intermediate segments — allow truncation
+                    Text(segment.text)
+                        .font(.system(size: 14))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(minWidth: 20, alignment: .leading)
+                }
             }
         }
     }
@@ -265,18 +324,31 @@ struct FileBrowserView: View, Equatable {
                     .foregroundColor(inlineActionAccentColor.opacity(0.85))
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .frame(maxWidth: 176, alignment: .trailing)
+                    .frame(maxWidth: 156, alignment: .trailing)
                     .padding(.vertical, 2)
                     .padding(.horizontal, 6)
                     .background(
                         Capsule()
                             .fill(inlineActionAccentColor.opacity(0.08))
                     )
+                
+                // Stop button
+                if onCancelAction != nil {
+                    Button {
+                        onCancelAction?()
+                    } label: {
+                        Image(systemName: "stop.circle.fill")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.red.opacity(0.8))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop operation")
+                }
             }
         }
-        .frame(width: 220, alignment: .trailing)
+        .frame(width: isPerformingAction ? 250 : 0, alignment: .trailing)
         .clipped()
-        .padding(.trailing, 10)
+        .padding(.trailing, isPerformingAction ? 10 : 0)
     }
     
     @ViewBuilder
@@ -320,12 +392,6 @@ struct FileBrowserView: View, Equatable {
             }
             return true
         }
-        .background(
-            Group {
-                Button("") { handleDeleteShortcut() }.keyboardShortcut(.delete, modifiers: .command)
-                Button("") { handleDeleteShortcut() }.keyboardShortcut(.delete, modifiers: [])
-            }.hidden()
-        )
     }
     
     private func handleDeleteShortcut() {
@@ -380,28 +446,12 @@ struct FileBrowserView: View, Equatable {
             }
             
             TableColumn("Size", value: \.size) { file in
-                if file.isDirectory {
-                    if let size = folderSizes[file.path] {
-                        Text(formatBytes(size))
-                            .font(.system(.callout, design: .monospaced))
-                            .foregroundColor(.secondary)
-                    } else {
-                        Text("--")
-                            .font(.system(.callout, design: .monospaced))
-                            .foregroundColor(.secondary)
-                    }
-                } else {
-                    Text(formatBytes(file.size))
-                        .font(.system(.callout, design: .monospaced))
-                        .foregroundColor(.secondary)
-                }
+                sizeColumnContent(for: file)
             }
             .width(min: 70, ideal: 90, max: 110)
             
             TableColumn("Date", value: \.sortableDate) { file in
-                Text(file.modificationDate != nil ? Self.dateFormatter.string(from: file.modificationDate!) : "--")
-                    .font(.system(.callout, design: .default))
-                    .foregroundColor(.secondary)
+                dateColumnContent(for: file)
             }
             .width(min: 160, ideal: 170, max: 200)
             
@@ -415,12 +465,19 @@ struct FileBrowserView: View, Equatable {
         .tableStyle(.inset)
         .scrollContentBackground(.hidden)
         .onChange(of: sortOrder) { newOrder in
+            // Guard: if we're already processing a sort change, skip to break re-entrant loop
+            guard !isSyncingSortOrder else { return }
             guard let first = newOrder.first else { return }
+            
+            isSyncingSortOrder = true
             let ascending = first.order == .forward
             if first.keyPath == \UnifiedFile.name { onSortChange?(.name, ascending) }
             else if first.keyPath == \UnifiedFile.size { onSortChange?(.size, ascending) }
             else if first.keyPath == \UnifiedFile.sortableDate { onSortChange?(.date, ascending) }
             else if first.keyPath == \UnifiedFile.sortableType { onSortChange?(.type, ascending) }
+            
+            // Reset guard on next run loop tick so future column clicks still work
+            DispatchQueue.main.async { isSyncingSortOrder = false }
         }
         // Use contextMenu with primaryAction for double-click - this is the macOS-native approach
                 // that works with selection (macOS 13+)
@@ -614,6 +671,48 @@ struct FileBrowserView: View, Equatable {
             }
         }
         .disabled(onDelete == nil)
+    }
+    
+    // MARK: - Column Content Helpers
+    
+    @ViewBuilder
+    private func sizeColumnContent(for file: UnifiedFile) -> some View {
+        if file.isDirectory {
+            if let size = folderSizes[file.path] {
+                Text(formatBytes(size))
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundColor(.secondary)
+            } else {
+                Text("--")
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+        } else if file.size == 0 && file.modificationDate == nil && isLoadingMetadata {
+            Text("···")
+                .font(.system(.callout, design: .monospaced))
+                .foregroundStyle(.tertiary)
+        } else {
+            Text(formatBytes(file.size))
+                .font(.system(.callout, design: .monospaced))
+                .foregroundColor(.secondary)
+        }
+    }
+    
+    @ViewBuilder
+    private func dateColumnContent(for file: UnifiedFile) -> some View {
+        if let date = file.modificationDate {
+            Text(Self.dateFormatter.string(from: date))
+                .font(.system(.callout, design: .default))
+                .foregroundColor(.secondary)
+        } else if !file.isDirectory && file.size == 0 && isLoadingMetadata {
+            Text("···")
+                .font(.system(.callout, design: .default))
+                .foregroundStyle(.tertiary)
+        } else {
+            Text("--")
+                .font(.system(.callout, design: .default))
+                .foregroundColor(.secondary)
+        }
     }
     
     // MARK: - Helper Functions

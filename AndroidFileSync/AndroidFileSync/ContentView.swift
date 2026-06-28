@@ -24,12 +24,27 @@ struct ContentView: View {
     @State private var files: [UnifiedFile] = []
     @State private var currentPath = "/sdcard"
     @State private var pathHistory: [String] = []
+    @State private var forwardHistory: [String] = []
     @State private var isLoading = false
     @State private var loadTask: Task<Void, Never>? = nil
     @State private var folderSizes: [String: UInt64] = [:]
     
+    // Directory cache — stores last 10 visited directories for instant back-navigation
+    @State private var directoryCache: [String: [UnifiedFile]] = [:]
+    @State private var directoryCacheOrder: [String] = []  // LRU order tracking
+    
+    // Metadata enrichment tracking
+    @State private var metadataTask: Task<Void, Never>? = nil
+    @State private var isLoadingMetadata = false
+    @State private var metadataLoadedCount = 0
+    @State private var metadataTotalCount = 0
+    
+    // Progressive loading (paginated content:// fallback)
+    @State private var isLoadingMoreFiles = false
+    
     // File action manager
     @StateObject private var fileActionManager = FileActionManager()
+
     @State private var showErrorAlert = false
     @State private var errorMessage = ""
     
@@ -45,6 +60,29 @@ struct ContentView: View {
     @State private var showTrashView = false
     @State private var showWirelessConnect = false
     @ObservedObject private var updateChecker = UpdateChecker.shared
+    @ObservedObject private var supportPromptManager = SupportPromptManager.shared
+    @ObservedObject private var diagnosticsControl = DiagnosticsControl.shared
+
+    // Get Info panel state (⌘I)
+    @State private var infoFile: UnifiedFile? = nil
+    @State private var fileInfoData: [String: String] = [:]
+    @State private var isLoadingFileInfo = false
+    @State private var fileInfoTask: Task<Void, Never>? = nil
+
+    // Permanent delete confirmation (⌘⌥⌫)
+    @State private var showPermanentDeleteConfirmation = false
+    @State private var permanentDeleteCount = 0
+
+    // Move to Trash confirmation (⌘⌫)
+    @State private var showTrashConfirmation = false
+    @State private var trashConfirmCount = 0
+
+    // Diagnostic log upload state
+    @ObservedObject private var logUploader = LogUploader.shared
+    @State private var showDiagnosticUploadAlert = false
+    @State private var showUploadSuccessToast = false
+    @State private var pendingDiagnosticUpload = false
+    @State private var showReportIssuePopover = false
 
     // App browser state
     @StateObject private var appManager = AppManager()
@@ -148,12 +186,43 @@ struct ContentView: View {
             }
             .background(
                 Group {
+                    // ── Clipboard shortcuts ────────────────────────────────
                     Button("") { handleGlobalCopy() }.keyboardShortcut("c", modifiers: .command)
                     Button("") { handleGlobalCut() }.keyboardShortcut("x", modifiers: .command)
                     Button("") { handleGlobalPaste() }.keyboardShortcut("v", modifiers: .command)
+                    
+                    // ── Delete shortcuts (moved here for reliability) ─────
+                    Button("") { handleDeleteShortcut() }.keyboardShortcut(.delete, modifiers: .command)
+                    Button("") { handlePermanentDeleteShortcut() }.keyboardShortcut(.delete, modifiers: [.command, .option])
+
+                    // ── Finder-style navigation ───────────────────────────
+                    Button("") { handleDeselectAll() }.keyboardShortcut("a", modifiers: [.command, .shift])
+                    Button("") { handleNavigateUp() }.keyboardShortcut(.upArrow, modifiers: .command)
+                    Button("") { handleOpenSelected() }.keyboardShortcut(.downArrow, modifiers: .command)
+                    Button("") { navigateBack() }.keyboardShortcut("[", modifiers: .command)
+                    Button("") { navigateForward() }.keyboardShortcut("]", modifiers: .command)
+
+                    // ── File actions ──────────────────────────────────────
+                    Button("") { handleGetInfo() }.keyboardShortcut("i", modifiers: .command)
+                    Button("") { handleRenameShortcut() }.keyboardShortcut("r", modifiers: [.command, .shift])
+                    Button("") { handleQuickPreview() }.keyboardShortcut(.space, modifiers: [])
                 }
                 .hidden()
             )
+            .onReceive(NotificationCenter.default.publisher(for: .afsDeleteShortcut)) { _ in
+                handleDeleteShortcut()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .afsPermanentDeleteShortcut)) { _ in
+                handlePermanentDeleteShortcut()
+            }
+            .sheet(item: $infoFile, onDismiss: {
+                fileInfoTask?.cancel()
+                fileInfoTask = nil
+                fileInfoData = [:]
+                isLoadingFileInfo = false
+            }) { file in
+                FileInfoView(file: file, info: fileInfoData, isLoading: isLoadingFileInfo)
+            }
     }
 
     // Level 2: alert modifiers
@@ -189,12 +258,47 @@ struct ContentView: View {
             } message: {
                 Text(pasteConflictMessage)
             }
+            .alert("Is AndroidFileSync helping you?", isPresented: $supportPromptManager.shouldShowPrompt) {
+                Button("Star on GitHub") {
+                    supportPromptManager.openGitHubAndMarkDone()
+                }
+                Button("Send Feedback") {
+                    supportPromptManager.openFeedbackAndSnooze()
+                }
+                Button("Not Now", role: .cancel) {
+                    supportPromptManager.snooze()
+                }
+            } message: {
+                Text("If the app saved you time, a GitHub star helps other users find it. If something can be better, feedback is welcome too.")
+            }
             .alert("Result", isPresented: $showGlobalResultAlert) {
                 Button("OK", role: .cancel) {
                     appManager.globalResultMessage = nil
                 }
             } message: {
                 Text(globalResultAlertMessage)
+            }
+            .alert("Permanently Delete \(permanentDeleteCount) item\(permanentDeleteCount == 1 ? "" : "s")?", isPresented: $showPermanentDeleteConfirmation) {
+                Button("Cancel", role: .cancel) {
+                    permanentDeleteCount = 0
+                }
+                Button("Delete Permanently", role: .destructive) {
+                    handlePermanentDelete()
+                    permanentDeleteCount = 0
+                }
+            } message: {
+                Text("This cannot be undone. The item\(permanentDeleteCount == 1 ? " will" : "s will") be permanently removed from the device.")
+            }
+            .alert("Move \(trashConfirmCount) item\(trashConfirmCount == 1 ? "" : "s") to Trash?", isPresented: $showTrashConfirmation) {
+                Button("Cancel", role: .cancel) {
+                    trashConfirmCount = 0
+                }
+                Button("Move to Trash", role: .destructive) {
+                    executeTrashShortcut()
+                    trashConfirmCount = 0
+                }
+            } message: {
+                Text("You can restore \(trashConfirmCount == 1 ? "this item" : "these items") from the Trash.")
             }
             .onChange(of: fileActionManager.pasteConflicts.count) { newCount in
                 showConflictAlert = newCount > 0
@@ -209,14 +313,71 @@ struct ContentView: View {
             }
             .onChange(of: deviceManager.deviceName) { newName in
                 // Reload the file browser whenever the active device changes.
-                // deviceName is set at the end of detectDevice(), so this fires
-                // once the switch is fully complete and the new serial is active.
-                // This is the ONLY place that triggers loadFiles() on connection.
                 guard deviceManager.isConnected, !newName.isEmpty, newName != "No Device" else { return }
                 Task {
                     currentPath = await deviceManager.getRealStoragePath()
                     pathHistory.removeAll()
+                    forwardHistory.removeAll()
                     await loadFiles()
+                }
+            }
+            .onChange(of: deviceManager.isConnected) { connected in
+                if !connected {
+                    // Immediately clear file browser state on disconnect
+                    loadTask?.cancel()
+                    metadataTask?.cancel()
+                    metadataTask = nil
+                    files = []
+                    selectedFiles.removeAll()
+                    folderSizes = [:]
+                    isLoading = false
+                    isLoadingMetadata = false
+                    pendingDiagnosticUpload = false
+                    showDiagnosticUploadAlert = false
+                    showUploadSuccessToast = false
+                }
+            }
+            .onChange(of: downloadManager.batchCompleted) { completed in
+                guard completed > 0, completed == downloadManager.batchTotal else { return }
+                supportPromptManager.recordSuccessfulTransfer(count: completed)
+            }
+            .onChange(of: uploadManager.batchCompleted) { completed in
+                guard completed > 0, completed == uploadManager.batchTotal else { return }
+                supportPromptManager.recordSuccessfulTransfer(count: completed)
+            }
+            .onChange(of: diagnosticsControl.isEnabled) { enabled in
+                deviceManager.setDiagnosticsEnabled(enabled)
+                if !enabled {
+                    pendingDiagnosticUpload = false
+                    showDiagnosticUploadAlert = false
+                    showUploadSuccessToast = false
+                }
+            }
+            .onChange(of: deviceManager.diagnosticsComplete) { complete in
+                guard diagnosticsControl.isEnabled, complete else { return }
+                if pendingDiagnosticUpload {
+                    pendingDiagnosticUpload = false
+                    maybeTriggerDiagnosticUpload()
+                }
+            }
+            .alert("Camera folder issue logs", isPresented: $showDiagnosticUploadAlert) {
+                Button("Yes, Upload") {
+                    guard diagnosticsControl.isEnabled else { return }
+                    logUploader.uploadLogs()
+                }
+                Button("No", role: .cancel) {
+                    UserDefaults.standard.set(true, forKey: "diagnosticUploadDeclined")
+                }
+            } message: {
+                Text("Share your diagnostic logs to help fix this issue.\n\nNo private data is uploaded — only system diagnostic logs. You can check them at:\nhttps://github.com/Santosh7017/AndroidFileSync/issues/11")
+            }
+            .onChange(of: logUploader.uploadSuccess) { success in
+                guard diagnosticsControl.isEnabled else { return }
+                if success {
+                    showUploadSuccessToast = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                        showUploadSuccessToast = false
+                    }
                 }
             }
     }
@@ -290,9 +451,33 @@ struct ContentView: View {
                 .zIndex(100)
             }
         }
+        .overlay(alignment: .top) {
+            if showUploadSuccessToast {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.white)
+                        .font(.system(size: 14, weight: .semibold))
+                    Text("Report uploaded! Thank you.")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.white)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(
+                    Capsule()
+                        .fill(Color.green)
+                        .shadow(color: .black.opacity(0.2), radius: 6, y: 3)
+                )
+                .padding(.top, 8)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .animation(.spring(response: 0.4, dampingFraction: 0.8), value: showUploadSuccessToast)
+                .zIndex(101)
+            }
+        }
         .frame(minWidth: 800, minHeight: 600)
         .onAppear {
             updateChecker.checkForUpdates()
+            deviceManager.setDiagnosticsEnabled(diagnosticsControl.isEnabled)
         }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             var fileURLs: [URL] = []
@@ -310,10 +495,9 @@ struct ContentView: View {
             return true
         }
         .task { await initializeDevice() }
-        .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
+        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
             if !deviceManager.isConnected && !deviceManager.isDetecting {
                 Task {
-                    // Just detect — onChange(of: deviceManager.deviceName) will trigger loadFiles()
                     await deviceManager.detectDevice()
                 }
             }
@@ -421,6 +605,7 @@ struct ContentView: View {
                             onPreview: { file in filePreviewManager.previewFile(file) },
                             isPerformingAction: fileActionManager.isPerformingAction,
                             currentActionText: fileActionManager.currentAction,
+                            onCancelAction: { fileActionManager.requestCancellation() },
                             onBatchDelete: handleBatchDelete,
                             onBatchDownload: handleBatchDownload,
                             onBatchChangeExtension: { ext in handleBatchChangeExtension(ext) },
@@ -438,7 +623,11 @@ struct ContentView: View {
                             onPermanentDelete: handlePermanentDelete,
                             sortOption: sortOption,
                             onSortChange: { option, ascending in sortFiles(by: option, ascending: ascending) },
-                            folderSizes: folderSizes
+                            folderSizes: folderSizes,
+                            isLoadingMetadata: isLoadingMetadata,
+                            metadataLoadedCount: metadataLoadedCount,
+                            metadataTotalCount: metadataTotalCount,
+                            isLoadingMoreFiles: isLoadingMoreFiles
                         )
                     }
                 }
@@ -454,7 +643,7 @@ struct ContentView: View {
                     .background(RoundedRectangle(cornerRadius: 12).fill(.ultraThinMaterial))
                 }
             }
-            .navigationTitle(deviceManager.isConnected ? "Android File Sync" : "")
+            .navigationTitle(deviceManager.isConnected ? "AndroidFileSync" : "")
             .navigationSubtitle(deviceManager.statusMessage)
             .toolbar {
                 // ── Left side: New Folder + New File ─────────────────────────
@@ -554,6 +743,15 @@ struct ContentView: View {
                           : deviceManager.connectionType == .usb
                             ? "Connected via USB — tap to manage connections"
                             : "Connect via WiFi")
+
+                    Button { showReportIssuePopover = true } label: {
+                        Label("Report Issue", systemImage: "exclamationmark.bubble")
+                    }
+                    .help("Report an issue")
+                    .popover(isPresented: $showReportIssuePopover, arrowEdge: .bottom) {
+                        ReportIssuePopoverView(diagnosticsControl: diagnosticsControl)
+                    }
+
                 }
 
                 // ── Status: transfer count ────────────────────────────────────
@@ -642,6 +840,134 @@ struct ContentView: View {
             handleUpload(urls: urls)
         }
     }
+
+    // MARK: - Keyboard Shortcut Handlers
+    
+    private func handleDeselectAll() {
+        guard activeAppFilter == nil else { return }
+        selectedFiles.removeAll()
+    }
+    
+    private func handleNavigateUp() {
+        guard activeAppFilter == nil else { return }
+        // Navigate to the parent directory of currentPath
+        let parent = (currentPath as NSString).deletingLastPathComponent
+        // Don't go above root
+        guard !parent.isEmpty, parent != currentPath else { return }
+        navigateTo(parent)
+    }
+    
+    private func handleOpenSelected() {
+        guard activeAppFilter == nil else { return }
+        // Open the first selected item (same as double-click)
+        guard let firstId = selectedFiles.first,
+              let file = files.first(where: { $0.id == firstId }) else { return }
+        
+        if file.isDirectory {
+            navigateTo(file.path)
+        } else if FilePreviewManager.isPreviewable(file) {
+            filePreviewManager.previewFile(file)
+        } else {
+            handleDownload(file: file)
+        }
+    }
+    
+    private func handleDeleteShortcut() {
+        guard activeAppFilter == nil else { return }
+        let items = files.filter { selectedFiles.contains($0.id) }
+        guard !items.isEmpty else { return }
+        
+        // Single file (not folder) → delete immediately without confirmation
+        if items.count == 1, let file = items.first, !file.isDirectory {
+            handleDelete(file)
+            return
+        }
+        
+        // Folder or multiple items → show confirmation
+        trashConfirmCount = items.count
+        showTrashConfirmation = true
+    }
+    
+    /// Actually performs the trash operation after user confirms
+    private func executeTrashShortcut() {
+        let items = files.filter { selectedFiles.contains($0.id) }
+        guard !items.isEmpty else { return }
+        
+        if items.count == 1 {
+            handleDelete(items.first!)
+        } else {
+            handleBatchDelete()
+        }
+    }
+    
+    private func handlePermanentDeleteShortcut() {
+        guard activeAppFilter == nil else { return }
+        let items = files.filter { selectedFiles.contains($0.id) }
+        guard !items.isEmpty else { return }
+        permanentDeleteCount = items.count
+        showPermanentDeleteConfirmation = true
+    }
+    
+    private func handleRenameShortcut() {
+        guard activeAppFilter == nil else { return }
+        // Only rename when exactly one item is selected
+        guard selectedFiles.count == 1,
+              let fileId = selectedFiles.first,
+              let file = files.first(where: { $0.id == fileId }) else { return }
+        
+        let kind = file.isDirectory ? "Folder" : "File"
+        if let newName = TextInputDialog.show(
+            title: "Rename \(kind)",
+            message: "Enter a new name for \"\(file.name)\"",
+            placeholder: file.name,
+            initialValue: file.name,
+            confirmLabel: "Rename"
+        ), newName != file.name {
+            handleRename(file, newName: newName)
+        }
+    }
+    
+    private func handleQuickPreview() {
+        guard activeAppFilter == nil else { return }
+        guard selectedFiles.count == 1,
+              let fileId = selectedFiles.first,
+              let file = files.first(where: { $0.id == fileId }),
+              !file.isDirectory,
+              FilePreviewManager.isPreviewable(file) else { return }
+        
+        filePreviewManager.previewFile(file)
+    }
+    
+    private func handleGetInfo() {
+        guard activeAppFilter == nil else { return }
+        guard selectedFiles.count == 1,
+              let fileId = selectedFiles.first,
+              let file = files.first(where: { $0.id == fileId }) else { return }
+        
+        fileInfoTask?.cancel()
+        fileInfoTask = nil
+
+        fileInfoData = [:]
+        isLoadingFileInfo = true
+        infoFile = file
+
+        let selectedFileID = file.id
+        fileInfoTask = Task {
+            do {
+                let info = try await ADBManager.getFileInfo(path: file.path, isDirectory: file.isDirectory)
+                await MainActor.run {
+                    guard infoFile?.id == selectedFileID else { return }
+                    fileInfoData = info
+                    isLoadingFileInfo = false
+                }
+            } catch {
+                await MainActor.run {
+                    guard infoFile?.id == selectedFileID else { return }
+                    isLoadingFileInfo = false
+                }
+            }
+        }
+    }
     
     // MARK: - Functions (Your navigation and data loading logic)
 
@@ -676,17 +1002,33 @@ struct ContentView: View {
     }
     
     private func loadFiles() async {
+        AppLogger.log("📂 [loadFiles] Request to load directory: \(currentPath) (connection: \(deviceManager.connectionType.rawValue))")
         // Check if cancelled early
-        guard !Task.isCancelled else { return }
+        guard !Task.isCancelled else {
+            AppLogger.log("⚠️ [loadFiles] Task cancelled before starting (user navigated away?)")
+            return
+        }
+        
+        // Cancel any in-progress metadata loading
+        metadataTask?.cancel()
+        metadataTask = nil
         
         // Pause download progress updates to avoid ADB contention
         await MainActor.run {
             downloadManager.pauseUpdates()
             isLoading = true
+            isLoadingMetadata = false
+            metadataLoadedCount = 0
+            metadataTotalCount = 0
         }
+        
+        // Invalidate the ADB-level folder size cache so stale sizes are never shown
+        // (e.g., after paste/delete operations change folder contents)
+        ADBManager.invalidateFolderSizeCache()
         
         // Check again before expensive operation
         guard !Task.isCancelled else {
+            AppLogger.log("⚠️ [loadFiles] Task cancelled before listFiles call (user navigated away?)")
             await MainActor.run {
                 isLoading = false
                 downloadManager.resumeUpdates()
@@ -695,10 +1037,33 @@ struct ContentView: View {
         }
         
         // Do the expensive work completely off main thread
-        let newFiles = (try? await deviceManager.listFiles(path: currentPath)) ?? []
+        var newFiles: [UnifiedFile]
+        var receivedProgressiveUpdates = false
+        let pathSnapshot = currentPath
+        do {
+            newFiles = try await deviceManager.listFiles(path: currentPath) { pageFiles in
+                // This callback fires for each page of content:// pagination results.
+                // Append to UI immediately so user can start browsing while more pages load.
+                receivedProgressiveUpdates = true
+                Task { @MainActor in
+                    guard self.currentPath == pathSnapshot else { return }
+                    self.files.append(contentsOf: pageFiles)
+                    if self.isLoading {
+                        // First page arrived — stop spinner, show subtle "loading more" indicator
+                        self.isLoading = false
+                        self.isLoadingMoreFiles = true
+                    }
+                }
+            }
+        } catch {
+            AppLogger.log("❌ [loadFiles] listFiles threw error: \(error.localizedDescription)", level: .error)
+            newFiles = []
+        }
+        AppLogger.log("📂 [loadFiles] Finished fetching files. Count: \(newFiles.count)\(receivedProgressiveUpdates ? " (progressive mode)" : "")")
         
         // Check before updating UI
         guard !Task.isCancelled else {
+            AppLogger.log("⚠️ [loadFiles] Task cancelled AFTER fetching \(newFiles.count) files — results DISCARDED (user navigated away?)")
             await MainActor.run {
                 isLoading = false
                 downloadManager.resumeUpdates()
@@ -708,9 +1073,24 @@ struct ContentView: View {
         
         // Quick, simple update without animation
         await MainActor.run {
+            // In progressive mode, files were already added via callback during pagination.
+            // The final newFiles array has stat-enriched metadata — replace to upgrade placeholders.
+            // In normal mode (ls worked), this is the first and only update.
             self.files = newFiles
             isLoading = false
+            isLoadingMoreFiles = false
             downloadManager.resumeUpdates()  // Resume progress updates
+            // Cache the directory listing
+            cacheDirectory(path: pathSnapshot, files: newFiles)
+        }
+        if newFiles.isEmpty {
+            AppLogger.log("⚠️ [loadFiles] ❗ UI set to EMPTY file list for path: \(pathSnapshot)")
+        } else {
+            AppLogger.log("📂 [loadFiles] ✅ UI updated with \(newFiles.count) files for path: \(pathSnapshot)")
+        }
+
+        if DiagnosticsControl.isEnabled {
+            checkDiagnosticUploadAfterLoad(path: pathSnapshot)
         }
         
         // Now that files are loaded, fetch SD card and storage info in the background.
@@ -720,8 +1100,58 @@ struct ContentView: View {
             await deviceManager.fetchStorageInfo()
         }
         
+        // ── Background metadata enrichment for large directories ────────────
+        // Find files that came back without metadata (size == 0 and no date = placeholder)
+        let filesNeedingMetadata = newFiles.filter { !$0.isDirectory && $0.size == 0 && $0.modificationDate == nil }
+        if !filesNeedingMetadata.isEmpty {
+            let fileNamesNeedingMeta = filesNeedingMetadata.map { $0.name }
+            await MainActor.run {
+                isLoadingMetadata = true
+                metadataTotalCount = fileNamesNeedingMeta.count
+                metadataLoadedCount = 0
+            }
+            
+            metadataTask = Task.detached(priority: .utility) {
+                await ADBManager.fetchMetadataBatched(
+                    path: pathSnapshot,
+                    fileNames: fileNamesNeedingMeta
+                ) { batchFiles in
+                    // Build a lookup dict from the batch results
+                    let batchDict = Dictionary(batchFiles.map { ($0.name, $0) }, uniquingKeysWith: { _, last in last })
+                    
+                    Task { @MainActor in
+                        guard self.currentPath == pathSnapshot else { return }
+                        
+                        // Update existing files array in-place
+                        var updatedFiles = self.files
+                        for i in updatedFiles.indices {
+                            if let updated = batchDict[updatedFiles[i].name] {
+                                updatedFiles[i] = UnifiedFile(
+                                    name: updated.name,
+                                    path: updated.path,
+                                    isDirectory: updated.isDirectory,
+                                    size: updated.size,
+                                    modificationDate: updated.modificationDate
+                                )
+                            }
+                        }
+                        self.files = updatedFiles
+                        self.metadataLoadedCount += batchFiles.count
+                        
+                        // Update cache with enriched data
+                        self.cacheDirectory(path: pathSnapshot, files: updatedFiles)
+                    }
+                }
+                
+                // Mark metadata loading complete
+                await MainActor.run {
+                    guard self.currentPath == pathSnapshot else { return }
+                    self.isLoadingMetadata = false
+                }
+            }
+        }
+        
         // Fire-and-forget background folder sizing
-        let pathSnapshot = currentPath
         let dirsSnapshot = newFiles.filter { $0.isDirectory }
         
         // If folderSizes is already populated, we're refreshing after an operation
@@ -760,16 +1190,21 @@ struct ContentView: View {
     }
 
     private func navigateTo(_ path: String) {
-        // Cancel any in-progress load
+        // Cancel any in-progress load and metadata enrichment
         loadTask?.cancel()
+        metadataTask?.cancel()
+        metadataTask = nil
         
         // Clear selection — UUIDs are re-generated on every listFiles call,
         // so stale IDs would match nothing (or wrong files) in the new folder.
         selectedFiles.removeAll()
         
         pathHistory.append(currentPath)
+        forwardHistory.removeAll()  // new navigation branch — clear forward stack
         currentPath = path
         isLoading = true
+        isLoadingMetadata = false
+        isLoadingMoreFiles = false
         folderSizes = [:]
         
         loadTask = Task.detached(priority: .userInitiated) {
@@ -780,18 +1215,125 @@ struct ContentView: View {
     private func navigateBack() {
         guard let previousPath = pathHistory.popLast() else { return }
         
+        // Push current path to forward history so ⌘] can return here
+        forwardHistory.append(currentPath)
+        
         loadTask?.cancel()
+        metadataTask?.cancel()
+        metadataTask = nil
         
         // Clear selection on back navigation for the same reason.
         selectedFiles.removeAll()
         
         currentPath = previousPath
-        isLoading = true
+        isLoadingMetadata = false
+        isLoadingMoreFiles = false
         folderSizes = [:]
         
-        loadTask = Task.detached(priority: .userInitiated) {
-            await self.loadFiles()
+        // Try to use cached data for instant back-navigation
+        if let cachedFiles = directoryCache[previousPath] {
+            // Show cached data immediately — no loading spinner
+            files = cachedFiles
+            isLoading = false
+            
+            // Silently refresh in background
+            loadTask = Task.detached(priority: .utility) {
+                await self.loadFiles()
+            }
+        } else {
+            isLoading = true
+            loadTask = Task.detached(priority: .userInitiated) {
+                await self.loadFiles()
+            }
         }
+    }
+
+    private func navigateForward() {
+        guard let nextPath = forwardHistory.popLast() else { return }
+        
+        loadTask?.cancel()
+        metadataTask?.cancel()
+        metadataTask = nil
+        selectedFiles.removeAll()
+        
+        // Push current path to back history
+        pathHistory.append(currentPath)
+        currentPath = nextPath
+        isLoadingMetadata = false
+        isLoadingMoreFiles = false
+        folderSizes = [:]
+        
+        // Try to use cached data for instant navigation
+        if let cachedFiles = directoryCache[nextPath] {
+            files = cachedFiles
+            isLoading = false
+            loadTask = Task.detached(priority: .utility) {
+                await self.loadFiles()
+            }
+        } else {
+            isLoading = true
+            loadTask = Task.detached(priority: .userInitiated) {
+                await self.loadFiles()
+            }
+        }
+    }
+    
+    // MARK: - Diagnostic Upload Helpers
+
+    private func isCameraPath(_ path: String) -> Bool {
+        path.uppercased().contains("/DCIM/CAMERA")
+    }
+
+    private func checkDiagnosticUploadAfterLoad(path: String) {
+        guard DiagnosticsControl.isEnabled else { return }
+        guard LogUploader.isBetaBuild else { return }
+        guard !logUploader.hasUploadedThisSession else { return }
+        guard isCameraPath(path) else {
+            pendingDiagnosticUpload = false
+            return
+        }
+
+        if deviceManager.diagnosticsComplete {
+            maybeTriggerDiagnosticUpload()
+        } else {
+            pendingDiagnosticUpload = true
+            AppLogger.log("📋 [DiagUpload] In Camera path but diagnostics not yet complete, waiting...")
+        }
+    }
+
+    private func maybeTriggerDiagnosticUpload() {
+        guard DiagnosticsControl.isEnabled else { return }
+        guard LogUploader.isBetaBuild else { return }
+        guard !logUploader.hasUploadedThisSession else { return }
+        guard !UserDefaults.standard.bool(forKey: "diagnosticUploadDeclined") else { return }
+        guard isCameraPath(currentPath) else { return }
+        guard deviceManager.diagnosticsComplete else { return }
+        guard !showDiagnosticUploadAlert else { return }
+
+        AppLogger.log("📋 [DiagUpload] All conditions met — showing upload prompt")
+        showDiagnosticUploadAlert = true
+    }
+
+    // MARK: - Directory Cache Helpers
+    
+    private func cacheDirectory(path: String, files: [UnifiedFile]) {
+        // Remove existing entry from order tracking if it exists
+        directoryCacheOrder.removeAll { $0 == path }
+        
+        // Add to end (most recent)
+        directoryCacheOrder.append(path)
+        directoryCache[path] = files
+        
+        // Evict oldest entries if cache exceeds 10
+        while directoryCacheOrder.count > 10 {
+            let oldest = directoryCacheOrder.removeFirst()
+            directoryCache.removeValue(forKey: oldest)
+        }
+    }
+    
+    private func invalidateCache(for path: String) {
+        directoryCache.removeValue(forKey: path)
+        directoryCacheOrder.removeAll { $0 == path }
     }
     
     private func handleDownload(file: UnifiedFile) {
