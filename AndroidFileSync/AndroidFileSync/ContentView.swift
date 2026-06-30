@@ -14,10 +14,15 @@ import UniformTypeIdentifiers
 import AppKit
 
 struct ContentView: View {
-    // Observe managers from App to react to state changes
     @ObservedObject var deviceManager: DeviceManager
-    @ObservedObject var downloadManager: DownloadManager
-    @ObservedObject var uploadManager: UploadManager
+    var downloadManager: DownloadManager
+    var uploadManager: UploadManager
+    
+    @State private var activeDownloadsCount = 0
+    @State private var activeUploadsCount = 0
+    @State private var isDownloading = false
+    @State private var isUploading = false
+    
     @StateObject private var filePreviewManager = FilePreviewManager()
     @StateObject private var sidebarManager = SidebarManager()
 
@@ -362,31 +367,56 @@ struct ContentView: View {
                     }
                 }
             }
-            .onChange(of: downloadManager.batchCompleted) { completed in
-                guard completed > 0, completed == downloadManager.batchTotal else { return }
-                supportPromptManager.recordSuccessfulTransfer(count: completed)
-            }
-            .onChange(of: uploadManager.batchCompleted) { completed in
-                guard completed > 0, completed == uploadManager.batchTotal else { return }
-                supportPromptManager.recordSuccessfulTransfer(count: completed)
-            }
-            .onChange(of: uploadManager.isBatchUploading) { isUploading in
-                deviceManager.isTransferActive = isUploading || downloadManager.isBatchDownloading
-                // Refresh files and storage only when the batch finishes (transitions to false)
-                if !isUploading && uploadManager.batchTotal > 0 {
-                    Task {
-                        ADBManager.invalidateFolderSizeCache()
-                        await loadFiles()
-                        await deviceManager.fetchStorageInfo()
+            .onReceive(NotificationCenter.default.publisher(for: .afsTransferCountChanged)) { notification in
+                if let type = notification.userInfo?["type"] as? String,
+                   let count = notification.userInfo?["count"] as? Int {
+                    if type == "download" {
+                        self.activeDownloadsCount = count
+                    } else if type == "upload" {
+                        self.activeUploadsCount = count
                     }
                 }
             }
-            .onChange(of: downloadManager.isBatchDownloading) { isDownloading in
-                deviceManager.isTransferActive = isDownloading || uploadManager.isBatchUploading
-                if !isDownloading && downloadManager.batchTotal > 0 {
-                    Task {
-                        await loadFiles()
-                        await deviceManager.fetchStorageInfo()
+            .onReceive(NotificationCenter.default.publisher(for: .afsDownloadBatchCompleted)) { notification in
+                if let completed = notification.userInfo?["completed"] as? Int,
+                   let total = notification.userInfo?["total"] as? Int {
+                    guard completed > 0, completed == total else { return }
+                    supportPromptManager.recordSuccessfulTransfer(count: completed)
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .afsUploadBatchCompleted)) { notification in
+                if let completed = notification.userInfo?["completed"] as? Int,
+                   let total = notification.userInfo?["total"] as? Int {
+                    guard completed > 0, completed == total else { return }
+                    supportPromptManager.recordSuccessfulTransfer(count: completed)
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .afsUploadBatchStateChanged)) { notification in
+                if let isUploading = notification.userInfo?["isUploading"] as? Bool,
+                   let batchTotal = notification.userInfo?["batchTotal"] as? Int {
+                    let oldUploading = self.isUploading
+                    self.isUploading = isUploading
+                    deviceManager.isTransferActive = isUploading || self.isDownloading
+                    if !isUploading && oldUploading && batchTotal > 0 {
+                        Task {
+                            ADBManager.invalidateFolderSizeCache()
+                            await loadFiles()
+                            await deviceManager.fetchStorageInfo()
+                        }
+                    }
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .afsDownloadBatchStateChanged)) { notification in
+                if let isDownloading = notification.userInfo?["isDownloading"] as? Bool,
+                   let batchTotal = notification.userInfo?["batchTotal"] as? Int {
+                    let oldDownloading = self.isDownloading
+                    self.isDownloading = isDownloading
+                    deviceManager.isTransferActive = self.isUploading || isDownloading
+                    if !isDownloading && oldDownloading && batchTotal > 0 {
+                        Task {
+                            await loadFiles()
+                            await deviceManager.fetchStorageInfo()
+                        }
                     }
                 }
             }
@@ -822,8 +852,8 @@ struct ContentView: View {
         var status = deviceManager.statusMessage
         
         if deviceManager.isConnected {
-            let downloadsCount = downloadManager.activeDownloads.count
-            let uploadsCount = uploadManager.activeUploads.count
+            let downloadsCount = activeDownloadsCount
+            let uploadsCount = activeUploadsCount
             
             var transfers: [String] = []
             if downloadsCount > 0 {

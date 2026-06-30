@@ -5,6 +5,11 @@ import AppKit
 extension Notification.Name {
     static let afsDeleteShortcut = Notification.Name("afsDeleteShortcut")
     static let afsPermanentDeleteShortcut = Notification.Name("afsPermanentDeleteShortcut")
+    static let afsTransferCountChanged = Notification.Name("afsTransferCountChanged")
+    static let afsDownloadBatchCompleted = Notification.Name("afsDownloadBatchCompleted")
+    static let afsUploadBatchCompleted = Notification.Name("afsUploadBatchCompleted")
+    static let afsDownloadBatchStateChanged = Notification.Name("afsDownloadBatchStateChanged")
+    static let afsUploadBatchStateChanged = Notification.Name("afsUploadBatchStateChanged")
 }
 
 @main
