@@ -24,8 +24,10 @@ protocol TransferProgressProtocol: Identifiable {
 // MARK: - Unified File Model
 //
 
-struct UnifiedFile: Identifiable {
-    let id = UUID()
+struct UnifiedFile: Identifiable, Hashable {
+    /// Stable identity based on file path — survives metadata enrichment updates.
+    /// Previously used UUID() which caused full Table diffs on every metadata batch.
+    let id: String
     let name: String
     let path: String
     let isDirectory: Bool
@@ -34,6 +36,7 @@ struct UnifiedFile: Identifiable {
     
     // Direct initializer
     init(name: String, path: String, isDirectory: Bool, size: UInt64, modificationDate: Date? = nil) {
+        self.id = path
         self.name = name
         self.path = path
         self.isDirectory = isDirectory
@@ -42,11 +45,26 @@ struct UnifiedFile: Identifiable {
     }
     
     init(from adbFile: ADBFile) {
+        self.id = adbFile.path
         self.name = adbFile.name
         self.path = adbFile.path
         self.isDirectory = adbFile.isDirectory
         self.size = adbFile.size
         self.modificationDate = adbFile.modificationDate
+    }
+    
+    // Hashable — use path for identity (consistent with id)
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+    
+    static func == (lhs: UnifiedFile, rhs: UnifiedFile) -> Bool {
+        lhs.id == rhs.id &&
+        lhs.name == rhs.name &&
+        lhs.path == rhs.path &&
+        lhs.isDirectory == rhs.isDirectory &&
+        lhs.size == rhs.size &&
+        lhs.modificationDate == rhs.modificationDate
     }
     
     // MARK: - Sortable Properties for Table
@@ -112,4 +130,3 @@ struct ADBFile {
     let size: UInt64
     let modificationDate: Date?
 }
-

@@ -198,7 +198,7 @@ class FileActionManager: ObservableObject {
         }
 
         let timestamp = Int(Date().timeIntervalSince1970)
-        let trashName = "\(timestamp)_\(file.id.uuidString)_\(file.name)"
+        let trashName = "\(timestamp)_\(UUID().uuidString)_\(file.name)"
         let trashPath = "\(trashFolderPath)/\(trashName)"
 
         do {
