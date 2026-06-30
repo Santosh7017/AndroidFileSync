@@ -28,6 +28,14 @@ struct ContentView: View {
     @State private var isLoading = false
     @State private var loadTask: Task<Void, Never>? = nil
     @State private var folderSizes: [String: UInt64] = [:]
+    /// Buffer for collecting folder sizes off the main render cycle.
+    /// Flushed to `folderSizes` periodically to avoid per-folder re-renders.
+    private var folderSizesBuffer: [String: UInt64] {
+        get { _folderSizesBuffer }
+        nonmutating set { _folderSizesBuffer = newValue }
+    }
+    @State private var _folderSizesBuffer: [String: UInt64] = [:]
+    @State private var folderSizeFlushTask: Task<Void, Never>? = nil
     
     // Directory cache — stores last 10 visited directories for instant back-navigation
     @State private var directoryCache: [String: [UnifiedFile]] = [:]
@@ -54,7 +62,7 @@ struct ContentView: View {
     @State private var globalResultAlertMessage = ""
     
     // Multi-selection state
-    @State private var selectedFiles: Set<UUID> = []
+    @State private var selectedFiles: Set<String> = []
     
     // Trash view state
     @State private var showTrashView = false
@@ -93,8 +101,15 @@ struct ContentView: View {
     @State private var sortOption: ActionToolbar.SortOption = .name
     @State private var sortAscending: Bool = true
     
-    // Computed filtered files
-    private var filteredFiles: [UnifiedFile] {
+    // Filtered and sorted files for display.
+    @State private var displayedFiles: [UnifiedFile] = []
+    
+    // Monotonically increasing version — incremented ONLY when sort parameters change
+    // (not on every data refresh). Used by FileBrowserView Equatable to detect re-sorts.
+    @State private var sortVersion: Int = 0
+    
+    /// Recompute the displayed (filtered + sorted) file list.
+    private func updateDisplayedFiles() {
         var result = files
         
         // Apply search filter
@@ -103,51 +118,52 @@ struct ContentView: View {
         }
         
         // Apply sort
+        let ascending = sortAscending
+        let sizes = folderSizes
         switch sortOption {
         case .name:
             result.sort {
                 let cmp = $0.name.localizedCaseInsensitiveCompare($1.name)
-                return sortAscending ? cmp == .orderedAscending : cmp == .orderedDescending
+                return ascending ? cmp == .orderedAscending : cmp == .orderedDescending
             }
         case .size:
-            func effectiveSize(_ file: UnifiedFile) -> UInt64 {
-                if file.isDirectory {
-                    return folderSizes[file.path] ?? file.size
-                }
-                return file.size
-            }
             result.sort {
-                let lhsSize = effectiveSize($0)
-                let rhsSize = effectiveSize($1)
+                let lhsSize = $0.isDirectory ? (sizes[$0.path] ?? $0.size) : $0.size
+                let rhsSize = $1.isDirectory ? (sizes[$1.path] ?? $1.size) : $1.size
                 if lhsSize != rhsSize {
-                    return sortAscending ? lhsSize < rhsSize : lhsSize > rhsSize
+                    return ascending ? lhsSize < rhsSize : lhsSize > rhsSize
                 }
                 let cmp = $0.name.localizedCaseInsensitiveCompare($1.name)
-                return sortAscending ? cmp == .orderedAscending : cmp == .orderedDescending
+                return ascending ? cmp == .orderedAscending : cmp == .orderedDescending
             }
         case .type:
             result.sort {
                 let t0 = $0.sortableType
                 let t1 = $1.sortableType
-                if t0 != t1 { return sortAscending ? t0 < t1 : t0 > t1 }
-                // Within same category, sort by name
+                if t0 != t1 { return ascending ? t0 < t1 : t0 > t1 }
                 let cmp = $0.name.localizedCaseInsensitiveCompare($1.name)
-                return sortAscending ? cmp == .orderedAscending : cmp == .orderedDescending
+                return ascending ? cmp == .orderedAscending : cmp == .orderedDescending
             }
         case .date:
             result.sort {
                 let d0 = $0.modificationDate ?? Date.distantPast
                 let d1 = $1.modificationDate ?? Date.distantPast
-                return sortAscending ? d0 < d1 : d0 > d1
+                return ascending ? d0 < d1 : d0 > d1
             }
         }
         
-        return result
+        displayedFiles = result
+        print("🔄 [SORT] updateDisplayedFiles — \(result.count) files, sort: \(sortOption.rawValue) \(ascending ? "ASC" : "DESC"), ver: \(sortVersion)")
     }
     
+    /// Called when the user changes sort (via column header or toolbar menu).
+    /// Increments sortVersion to force FileBrowserView re-render.
     private func sortFiles(by option: ActionToolbar.SortOption, ascending: Bool = true) {
+        print("🔄 [SORT] sortFiles() — \(option.rawValue) \(ascending ? "ASC" : "DESC") (was: \(sortOption.rawValue) \(sortAscending ? "ASC" : "DESC"))")
         sortOption = option
         sortAscending = ascending
+        sortVersion += 1  // Always bump — guarantees Equatable detects the change
+        updateDisplayedFiles()
     }
 
     private var globalOperationAccentColor: Color {
@@ -327,9 +343,13 @@ struct ContentView: View {
                     loadTask?.cancel()
                     metadataTask?.cancel()
                     metadataTask = nil
+                    folderSizeFlushTask?.cancel()
+                    folderSizeFlushTask = nil
                     files = []
+                    displayedFiles = []
                     selectedFiles.removeAll()
                     folderSizes = [:]
+                    _folderSizesBuffer = [:]
                     isLoading = false
                     isLoadingMetadata = false
                     pendingDiagnosticUpload = false
@@ -358,6 +378,15 @@ struct ContentView: View {
                 if pendingDiagnosticUpload {
                     pendingDiagnosticUpload = false
                     maybeTriggerDiagnosticUpload()
+                }
+            }
+            // ── displayedFiles sync ─────────────────────────────────
+            // Rebuild the sorted/filtered list when data or search changes.
+            .onChange(of: files) { _ in updateDisplayedFiles() }
+            .onChange(of: searchQuery) { _ in updateDisplayedFiles() }
+            .onChange(of: folderSizes) { _ in
+                if sortOption == .size {
+                    updateDisplayedFiles()
                 }
             }
             .alert("Camera folder issue logs", isPresented: $showDiagnosticUploadAlert) {
@@ -591,7 +620,7 @@ struct ContentView: View {
                         }
 
                         FileBrowserView(
-                            files: filteredFiles,
+                            files: displayedFiles,
                             currentPath: currentPath,
                             isLoading: isLoading,
                             canGoBack: !pathHistory.isEmpty,
@@ -622,6 +651,8 @@ struct ContentView: View {
                             },
                             onPermanentDelete: handlePermanentDelete,
                             sortOption: sortOption,
+                            sortAscending: sortAscending,
+                            sortVersion: sortVersion,
                             onSortChange: { option, ascending in sortFiles(by: option, ascending: ascending) },
                             folderSizes: folderSizes,
                             isLoadingMetadata: isLoadingMetadata,
@@ -1158,8 +1189,15 @@ struct ContentView: View {
         if !folderSizes.isEmpty {
             folderSizes = [:]
         }
+        _folderSizesBuffer = [:]
+        folderSizeFlushTask?.cancel()
         
         Task.detached(priority: .background) {
+            // Accumulate sizes in a local dict, flush to @State periodically
+            var localBuffer: [String: UInt64] = [:]
+            var lastFlush = Date()
+            let flushInterval: TimeInterval = 0.5  // 500ms debounce
+            
             await withTaskGroup(of: (String, UInt64?).self) { group in
                 let maxConcurrent = 3
                 var index = 0
@@ -1174,16 +1212,35 @@ struct ContentView: View {
                 // Process results and add more tasks
                 for await (path, sizeOpt) in group {
                     if let size = sizeOpt {
+                        localBuffer[path] = size
+                    }
+                    
+                    // Flush to UI if enough time has passed
+                    let now = Date()
+                    if now.timeIntervalSince(lastFlush) >= flushInterval {
+                        let batch = localBuffer
+                        localBuffer = [:]
+                        lastFlush = now
                         await MainActor.run {
                             guard self.currentPath == pathSnapshot else { return }
-                            self.folderSizes[path] = size
+                            self.folderSizes.merge(batch) { _, new in new }
                         }
                     }
+                    
                     if index < dirsSnapshot.count {
                         let nextDir = dirsSnapshot[index]
                         group.addTask { return (nextDir.path, await ADBManager.fetchSingleFolderSize(path: nextDir.path)) }
                         index += 1
                     }
+                }
+            }
+            
+            // Final flush — any remaining sizes
+            if !localBuffer.isEmpty {
+                let remaining = localBuffer
+                await MainActor.run {
+                    guard self.currentPath == pathSnapshot else { return }
+                    self.folderSizes.merge(remaining) { _, new in new }
                 }
             }
         }
@@ -1195,8 +1252,7 @@ struct ContentView: View {
         metadataTask?.cancel()
         metadataTask = nil
         
-        // Clear selection — UUIDs are re-generated on every listFiles call,
-        // so stale IDs would match nothing (or wrong files) in the new folder.
+        // Clear selection — navigating to a new folder means different files.
         selectedFiles.removeAll()
         
         pathHistory.append(currentPath)

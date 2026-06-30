@@ -11,7 +11,7 @@ struct FileBrowserView: View, Equatable {
     let currentPath: String
     let isLoading: Bool
     let canGoBack: Bool
-    @Binding var selectedFiles: Set<UUID>
+    @Binding var selectedFiles: Set<String>
     let onNavigate: (String) -> Void
     let onGoBack: () -> Void
     let onDownload: (UnifiedFile) -> Void
@@ -36,6 +36,10 @@ struct FileBrowserView: View, Equatable {
     
     // Sorting support
     var sortOption: ActionToolbar.SortOption = .name
+    var sortAscending: Bool = true
+    /// Monotonically increasing counter — incremented every time ContentView re-sorts.
+    /// Guarantees the Equatable detects order changes even when first/last IDs happen to be the same.
+    var sortVersion: Int = 0
     var onSortChange: ((ActionToolbar.SortOption, Bool) -> Void)? = nil
     
     // Folder sizes fetched asynchronously — keyed by folder path
@@ -49,9 +53,15 @@ struct FileBrowserView: View, Equatable {
     // Progressive loading (paginated content:// fallback)
     var isLoadingMoreFiles: Bool = false
     
-    // Equatable implementation - only compare data that affects rendering
+    // Equatable — compare data that affects rendering.
+    // sortVersion detects user-initiated sort changes.
+    // File boundary checks detect metadata enrichment and navigation changes.
     static func == (lhs: FileBrowserView, rhs: FileBrowserView) -> Bool {
-        lhs.files.map(\.id) == rhs.files.map(\.id) &&
+        lhs.files.count == rhs.files.count &&
+        lhs.sortVersion == rhs.sortVersion &&
+        lhs.files.first?.id == rhs.files.first?.id &&
+        lhs.files.last?.id == rhs.files.last?.id &&
+        lhs.files.first?.size == rhs.files.first?.size &&
         lhs.currentPath == rhs.currentPath &&
         lhs.isLoading == rhs.isLoading &&
         lhs.canGoBack == rhs.canGoBack &&
@@ -59,21 +69,36 @@ struct FileBrowserView: View, Equatable {
         lhs.isPerformingAction == rhs.isPerformingAction &&
         lhs.currentActionText == rhs.currentActionText &&
         lhs.sortOption == rhs.sortOption &&
-        lhs.folderSizes == rhs.folderSizes &&
+        lhs.sortAscending == rhs.sortAscending &&
+        lhs.folderSizes.count == rhs.folderSizes.count &&
         lhs.isLoadingMetadata == rhs.isLoadingMetadata &&
         lhs.metadataLoadedCount == rhs.metadataLoadedCount &&
         lhs.isLoadingMoreFiles == rhs.isLoadingMoreFiles
     }
     
-    // Guard against re-entrant sort loop (column header click → onChange → sortFiles → filteredFiles recompute → Table re-renders)
+    // Guard against re-entrant sort loop:
+    // Column header click → onChange(sortOrder) → onSortChange → ContentView updates displayedFiles
+    // → Table re-renders → could trigger onChange(sortOrder) again.
     @State private var isSyncingSortOrder = false
     
-    // Table sort state
+    // Table sort state — derived from sortOption/sortAscending props so it survives
+    // Table rebuilds from .id(sortVersion). Using @State would reset on rebuild.
     @State private var sortOrder: [KeyPathComparator<UnifiedFile>] = [
         .init(\.name, order: .forward)
     ]
     
-    // FIX 1: Bring back the state variable for UI feedback
+    /// Compute the expected sortOrder from current sortOption + sortAscending.
+    private var expectedSortOrder: [KeyPathComparator<UnifiedFile>] {
+        let order: SortOrder = sortAscending ? .forward : .reverse
+        switch sortOption {
+        case .name: return [.init(\.name, order: order)]
+        case .size: return [.init(\.size, order: order)]
+        case .date: return [.init(\.sortableDate, order: order)]
+        case .type: return [.init(\.sortableType, order: order)]
+        }
+    }
+    
+    // Drag-and-drop visual feedback
     @State private var isDraggingOver = false
     
     // Delete confirmation state
@@ -462,10 +487,17 @@ struct FileBrowserView: View, Equatable {
             }
             // No .width() — fills remaining space, eliminates trailing column separator
         }
+        .id(sortVersion) // Force Table rebuild when sort changes — SwiftUI Table won't re-order rows otherwise
         .tableStyle(.inset)
         .scrollContentBackground(.hidden)
+        .onAppear {
+            // Sync sortOrder when Table is (re)created by .id(sortVersion)
+            isSyncingSortOrder = true
+            sortOrder = expectedSortOrder
+            DispatchQueue.main.async { isSyncingSortOrder = false }
+        }
         .onChange(of: sortOrder) { newOrder in
-            // Guard: if we're already processing a sort change, skip to break re-entrant loop
+            // Column header was clicked → extract sort params → tell ContentView
             guard !isSyncingSortOrder else { return }
             guard let first = newOrder.first else { return }
             
@@ -476,12 +508,11 @@ struct FileBrowserView: View, Equatable {
             else if first.keyPath == \UnifiedFile.sortableDate { onSortChange?(.date, ascending) }
             else if first.keyPath == \UnifiedFile.sortableType { onSortChange?(.type, ascending) }
             
-            // Reset guard on next run loop tick so future column clicks still work
             DispatchQueue.main.async { isSyncingSortOrder = false }
         }
         // Use contextMenu with primaryAction for double-click - this is the macOS-native approach
                 // that works with selection (macOS 13+)
-                .contextMenu(forSelectionType: UUID.self, menu: { selectedIds in
+                .contextMenu(forSelectionType: String.self, menu: { selectedIds in
                     // Context menu for selected items
                     let selectedItems = files.filter { selectedIds.contains($0.id) }
                     let isSingleSelection = selectedIds.count <= 1
@@ -691,6 +722,10 @@ struct FileBrowserView: View, Equatable {
             Text("···")
                 .font(.system(.callout, design: .monospaced))
                 .foregroundStyle(.tertiary)
+        } else if file.size == 0 && file.modificationDate == nil {
+            Text("--")
+                .font(.system(.callout, design: .monospaced))
+                .foregroundColor(.secondary)
         } else {
             Text(formatBytes(file.size))
                 .font(.system(.callout, design: .monospaced))
