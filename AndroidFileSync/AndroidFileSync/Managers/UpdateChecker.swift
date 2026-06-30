@@ -12,7 +12,12 @@ class UpdateChecker: ObservableObject {
     @Published var isPreRelease = false
 
     var isBetaChannel: Bool {
-        get { UserDefaults.standard.bool(forKey: "betaChannel") }
+        get {
+            if UserDefaults.standard.object(forKey: "betaChannel") == nil {
+                return currentVersion.lowercased().contains("-beta")
+            }
+            return UserDefaults.standard.bool(forKey: "betaChannel")
+        }
         set {
             UserDefaults.standard.set(newValue, forKey: "betaChannel")
             objectWillChange.send()
@@ -121,15 +126,35 @@ class UpdateChecker: ObservableObject {
     }
 
     private func isNewer(remote: String, current: String) -> Bool {
-        let r = remote.split(separator: ".").compactMap { Int($0) }
-        let c = current.split(separator: ".").compactMap { Int($0) }
-
-        for i in 0..<max(r.count, c.count) {
-            let rv = i < r.count ? r[i] : 0
-            let cv = i < c.count ? c[i] : 0
-            if rv > cv { return true }
-            if rv < cv { return false }
+        let cleanRemote = remote.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "v"))
+        let cleanCurrent = current.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "v"))
+        
+        if cleanRemote == cleanCurrent { return false }
+        
+        let rComponents = cleanRemote.components(separatedBy: "-")
+        let cComponents = cleanCurrent.components(separatedBy: "-")
+        
+        let rVersion = rComponents[0]
+        let cVersion = cComponents[0]
+        
+        let versionComparison = rVersion.compare(cVersion, options: .numeric)
+        if versionComparison != .orderedSame {
+            return versionComparison == .orderedDescending
         }
+        
+        // A release with NO suffix is newer than a release WITH a suffix (e.g. 2.3.1 > 2.3.1-beta)
+        if rComponents.count == 1 && cComponents.count > 1 {
+            return true
+        }
+        if rComponents.count > 1 && cComponents.count == 1 {
+            return false
+        }
+        
+        // If both have suffixes, compare them numerically (e.g. "beta.2" vs "beta.1")
+        if rComponents.count > 1 && cComponents.count > 1 {
+            return rComponents[1].compare(cComponents[1], options: .numeric) == .orderedDescending
+        }
+        
         return false
     }
 
