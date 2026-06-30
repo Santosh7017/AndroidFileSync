@@ -10,31 +10,64 @@ internal import Combine
 class UploadManager: ObservableObject {
     @Published var activeUploads: [String: UploadProgress] = [:]
     
-    // Batch tracking (mirrors DownloadManager)
     @Published var batchTotal: Int = 0
     @Published var batchCompleted: Int = 0
     @Published var isBatchUploading: Bool = false
     @Published var batchCancelled: Bool = false
     
-    // Live-adjustable concurrency (1-8 slots), persisted across launches
+    @Published var isPreparing: Bool = false
+    @Published var preparingMessage: String = ""
+    
     @Published var maxConcurrent: Int {
         didSet { UserDefaults.standard.set(maxConcurrent, forKey: "maxConcurrentUploads") }
     }
     
-    // Thread-safe storage for progress updates from background
     private let progressLock = NSLock()
     private var backgroundProgress: [String: (bytes: UInt64, speed: Double)] = [:]
     
-    // Cancellation flags - thread-safe with lock
     private var cancellationFlags: [String: Bool] = [:]
     private let flagLock = NSLock()
     
-    // Timer for periodic UI updates - only runs when uploads are active
     private var updateTimer: Timer?
+    
+    private var transferActivity: NSObjectProtocol?
+    private let activityLock = NSLock()
+    
+    // Shared upload queue — new drops append here instead of starting a separate batch
+    private let queueLock = NSLock()
+    private var pendingFiles: [(localPath: String, fileName: String, fileSize: UInt64, devicePath: String)] = []
+    private var isProcessingQueue = false
+    
+    // Throttled batch counter — updated in background, flushed to @Published by timer
+    private var internalBatchCompleted: Int = 0
+    
+    // Active running tasks counter for queue processor
+    private var activeRunningCount: Int = 0
+    private let activeRunningLock = NSLock()
     
     init() {
         let saved = UserDefaults.standard.integer(forKey: "maxConcurrentUploads")
         self.maxConcurrent = saved > 0 ? min(max(saved, 1), 8) : 3
+    }
+    
+    // MARK: - Sleep Prevention
+    
+    private func beginPreventingSleep() {
+        activityLock.lock()
+        defer { activityLock.unlock() }
+        guard transferActivity == nil else { return }
+        transferActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .idleSystemSleepDisabled],
+            reason: "Uploading files to Android device via ADB"
+        )
+    }
+    
+    private func endPreventingSleep() {
+        activityLock.lock()
+        defer { activityLock.unlock() }
+        guard let activity = transferActivity else { return }
+        ProcessInfo.processInfo.endActivity(activity)
+        transferActivity = nil
     }
     
     struct UploadProgress: Identifiable {
@@ -44,7 +77,7 @@ class UploadManager: ObservableObject {
         let devicePath: String
         var bytesTransferred: UInt64 = 0
         var totalBytes: UInt64
-        var transferSpeed: Double = 0 // MB/s
+        var transferSpeed: Double = 0
         var isComplete: Bool = false
         var isCancelled: Bool = false
         var error: String?
@@ -71,19 +104,20 @@ class UploadManager: ObservableObject {
     private func startTimerIfNeeded() {
         guard updateTimer == nil else { return }
         updateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            self?.updateUIFromBackground()
+            self?.flushUIUpdates()
         }
     }
     
     private func stopTimerIfNeeded() {
-        guard activeUploads.isEmpty else { return }
+        guard activeUploads.isEmpty, !isBatchUploading else { return }
         updateTimer?.invalidate()
         updateTimer = nil
     }
     
-    private func updateUIFromBackground() {
+    private func flushUIUpdates() {
         progressLock.lock()
         let updates = backgroundProgress
+        let completedSnapshot = internalBatchCompleted
         progressLock.unlock()
         
         for (localPath, (bytes, speed)) in updates {
@@ -93,10 +127,15 @@ class UploadManager: ObservableObject {
                 activeUploads[localPath] = upload
             }
         }
+        
+        if completedSnapshot != batchCompleted {
+            batchCompleted = completedSnapshot
+        }
     }
     
     deinit {
         updateTimer?.invalidate()
+        endPreventingSleep()
     }
 
     @MainActor
@@ -126,43 +165,36 @@ class UploadManager: ObservableObject {
     }
     
     func cancelUpload(localPath: String) {
-        print("🛑 Cancelling upload: \(localPath)")
-        
-        // Set cancellation flag - this will be checked by the Shell
         setCancelled(localPath: localPath, value: true)
         
-        // Update UI state
         if var upload = activeUploads[localPath] {
             upload.isCancelled = true
             activeUploads[localPath] = upload
         }
         
-        // Remove from UI after brief delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.activeUploads.removeValue(forKey: localPath)
             self?.stopTimerIfNeeded()
             
-            // Clean up background progress
             self?.progressLock.lock()
             self?.backgroundProgress.removeValue(forKey: localPath)
             self?.progressLock.unlock()
             
-            // Clean up flag
             self?.flagLock.lock()
             self?.cancellationFlags.removeValue(forKey: localPath)
             self?.flagLock.unlock()
         }
     }
     
-    /// Cancels all active uploads
     func cancelAllUploads() {
-        print("🛑 Cancelling ALL uploads")
-        
-        // Set batch-level flag to stop the loop from enqueuing new files
         batchCancelled = true
         isBatchUploading = false
         
-        // Set all cancellation flags for currently active uploads
+        // Drain the pending queue so nothing else starts
+        queueLock.lock()
+        pendingFiles.removeAll()
+        queueLock.unlock()
+        
         flagLock.lock()
         for key in cancellationFlags.keys {
             cancellationFlags[key] = true
@@ -172,23 +204,25 @@ class UploadManager: ObservableObject {
         }
         flagLock.unlock()
         
-        // Mark all as cancelled in UI
         for key in activeUploads.keys {
             activeUploads[key]?.isCancelled = true
         }
         
-        // Clear after brief delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             self?.activeUploads.removeAll()
             self?.stopTimerIfNeeded()
             
             self?.progressLock.lock()
             self?.backgroundProgress.removeAll()
+            self?.internalBatchCompleted = 0
             self?.progressLock.unlock()
             
             self?.flagLock.lock()
             self?.cancellationFlags.removeAll()
             self?.flagLock.unlock()
+            
+            self?.batchTotal = 0
+            self?.batchCompleted = 0
         }
     }
     
@@ -198,7 +232,6 @@ class UploadManager: ObservableObject {
         fileSize: UInt64,
         to devicePath: String
     ) async throws {
-        // Early exit if batch was cancelled before this file started
         if batchCancelled { return }
         
         let (safeFileName, _) = FileNameHelper.getSafeFilename(fileName)
@@ -217,17 +250,15 @@ class UploadManager: ObservableObject {
             totalBytes: fileSize
         )
         
-        // Initialize on main thread
+        beginPreventingSleep()
+        
         await MainActor.run {
             activeUploads[localPath] = progress
             startTimerIfNeeded()
         }
         
-        // Reset cancellation flag
         setCancelled(localPath: localPath, value: false)
         
-        
-        // Use the new AsyncStream-based API (like downloads)
         let progressStream = ADBManager.pushFileWithProgress(
             localPath: localPath,
             devicePath: safeDevicePath,
@@ -237,14 +268,9 @@ class UploadManager: ObservableObject {
             }
         )
         
-        // Consume stream and update background storage
         do {
             for try await (bytesTransferred, speed) in progressStream {
-                // Check for cancellation
-                if isCancelled(localPath: localPath) {
-                    print("🛑 Upload cancelled: \(safeFileName)")
-                    return
-                }
+                if isCancelled(localPath: localPath) { return }
                 
                 progressLock.lock()
                 backgroundProgress[localPath] = (bytesTransferred, speed)
@@ -255,18 +281,12 @@ class UploadManager: ObservableObject {
             throw error
         }
         
-        // Check for cancellation
-        if isCancelled(localPath: localPath) {
-            print("🛑 Upload was cancelled: \(safeFileName)")
-            return
-        }
+        if isCancelled(localPath: localPath) { return }
         
-        // Clear background progress
         progressLock.lock()
         backgroundProgress.removeValue(forKey: localPath)
         progressLock.unlock()
         
-        // Mark complete on main thread
         await MainActor.run {
             if var upload = activeUploads[localPath] {
                 upload.isComplete = true
@@ -276,27 +296,27 @@ class UploadManager: ObservableObject {
             }
         }
         
-        // Trigger media scan so uploaded files appear in Gallery immediately
         await ADBManager.triggerMediaScan(path: safeDevicePath)
         
-        // Show 100% briefly
-        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        let delayNs: UInt64 = isBatchUploading ? 300_000_000 : 1_000_000_000
+        try? await Task.sleep(nanoseconds: delayNs)
         
         await MainActor.run {
             activeUploads.removeValue(forKey: localPath)
             stopTimerIfNeeded()
         }
         
-        // Clean up flag
         flagLock.lock()
         cancellationFlags.removeValue(forKey: localPath)
         flagLock.unlock()
+        
+        if !isBatchUploading && activeUploads.isEmpty {
+            endPreventingSleep()
+        }
     }
     
     // MARK: - Parallel Upload Support
     
-    /// Starts an upload without waiting for completion (fire-and-forget for parallel execution)
-    /// - Returns: The Task that can be used to track or cancel the upload
     @discardableResult
     func startUpload(
         localPath: String,
@@ -320,16 +340,13 @@ class UploadManager: ObservableObject {
             totalBytes: fileSize
         )
         
-        // Add to UI on main thread and start timer
         Task { @MainActor in
             activeUploads[localPath] = progress
             startTimerIfNeeded()
         }
         
-        // Reset cancellation flag
         setCancelled(localPath: localPath, value: false)
         
-        // Create the upload task
         let uploadTask = Task.detached { [weak self] in
             guard let self = self else { return }
             
@@ -342,13 +359,9 @@ class UploadManager: ObservableObject {
                 }
             )
             
-            // Consume stream and update background storage
             do {
                 for try await (bytesTransferred, speed) in progressStream {
-                    if self.isCancelled(localPath: localPath) {
-                        print("🛑 Upload cancelled: \(safeFileName)")
-                        return
-                    }
+                    if self.isCancelled(localPath: localPath) { return }
                     
                     self.progressLock.lock()
                     self.backgroundProgress[localPath] = (bytesTransferred, speed)
@@ -359,41 +372,79 @@ class UploadManager: ObservableObject {
                 return
             }
             
-            // Check for cancellation
-            if self.isCancelled(localPath: localPath) {
-                return
-            }
+            if self.isCancelled(localPath: localPath) { return }
             
-            // Clear background progress
             self.progressLock.lock()
             self.backgroundProgress.removeValue(forKey: localPath)
             self.progressLock.unlock()
             
-            // Mark complete on main thread
             await MainActor.run {
                 self.activeUploads[localPath]?.isComplete = true
                 self.activeUploads[localPath]?.bytesTransferred = fileSize
                 self.activeUploads[localPath]?.transferSpeed = 0
             }
             
-            // Trigger media scan so uploaded files appear in Gallery immediately
             await ADBManager.triggerMediaScan(path: safeDevicePath)
             
-            // Show 100% briefly
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            let batchActive = await MainActor.run { self.isBatchUploading }
+            let delayNs: UInt64 = batchActive ? 300_000_000 : 1_000_000_000
+            try? await Task.sleep(nanoseconds: delayNs)
             
             await MainActor.run {
                 self.activeUploads.removeValue(forKey: localPath)
                 self.stopTimerIfNeeded()
             }
             
-            // Clean up flag
             self.flagLock.lock()
             self.cancellationFlags.removeValue(forKey: localPath)
             self.flagLock.unlock()
+            
+            let shouldEndSleep = await MainActor.run {
+                !self.isBatchUploading && self.activeUploads.isEmpty
+            }
+            if shouldEndSleep {
+                self.endPreventingSleep()
+            }
         }
         
         return uploadTask
+    }
+    
+    // MARK: - Shared Upload Queue
+    
+    func enqueueFiles(
+        files: [(localPath: String, fileName: String, fileSize: UInt64, devicePath: String)]
+    ) {
+        guard !files.isEmpty else { return }
+        
+        queueLock.lock()
+        pendingFiles.append(contentsOf: files)
+        let shouldStart = !isProcessingQueue
+        if shouldStart { isProcessingQueue = true }
+        queueLock.unlock()
+        
+        Task { @MainActor in
+            if !self.isBatchUploading {
+                self.batchTotal = files.count
+                self.batchCompleted = 0
+                
+                self.progressLock.lock()
+                self.internalBatchCompleted = 0
+                self.progressLock.unlock()
+                
+                self.isBatchUploading = true
+                self.batchCancelled = false
+                self.startTimerIfNeeded()
+            } else {
+                self.batchTotal += files.count
+            }
+        }
+        
+        if shouldStart {
+            Task.detached(priority: .userInitiated) { [weak self] in
+                await self?.processQueue()
+            }
+        }
     }
     
     /// Uploads multiple files in parallel to the SAME directory
@@ -403,44 +454,44 @@ class UploadManager: ObservableObject {
     ) async {
         guard !files.isEmpty else { return }
         
-        // Convert to per-path format and reuse the sliding-window method
         let items = files.map { file in
             (localPath: file.localPath, fileName: file.fileName, fileSize: file.fileSize, devicePath: devicePath)
         }
-        await uploadFilesToPaths(files: items)
+        enqueueFiles(files: items)
     }
     
-    /// Uploads multiple files in parallel where each file has its OWN unique device path.
-    /// Uses a sliding window with live-adjustable concurrency (same pattern as DownloadManager).
+    /// Legacy entry point — routes through the shared queue
     func uploadFilesToPaths(
         files: [(localPath: String, fileName: String, fileSize: UInt64, devicePath: String)]
     ) async {
-        guard !files.isEmpty else { return }
-        
-        await MainActor.run {
-            batchTotal = files.count
-            batchCompleted = 0
-            isBatchUploading = true
-            batchCancelled = false
-        }
-        
-        print("📤 Starting parallel upload of \(files.count) files")
+        enqueueFiles(files: files)
+    }
+    
+    // MARK: - Queue Processor (single sliding window)
+    
+    private func processQueue() async {
+        beginPreventingSleep()
         
         await withTaskGroup(of: Void.self) { group in
-            var runningCount = 0
-            var fileIndex = 0
-            
-            while fileIndex < files.count && !batchCancelled {
-                // Re-read limit each iteration so live slider changes take effect
+            while !batchCancelled {
                 let limit = self.maxConcurrent
                 
-                // Fill up to limit slots
-                while runningCount < limit && fileIndex < files.count && !batchCancelled {
-                    let file = files[fileIndex]
-                    fileIndex += 1
-                    runningCount += 1
+                activeRunningLock.lock()
+                var running = activeRunningCount
+                activeRunningLock.unlock()
+                
+                // Try to fill slots from the pending queue
+                while running < limit && !batchCancelled {
+                    queueLock.lock()
+                    let nextFile = pendingFiles.isEmpty ? nil : pendingFiles.removeFirst()
+                    queueLock.unlock()
                     
-                    print("📤 [\(fileIndex)/\(files.count)] Starting: \(file.fileName)")
+                    guard let file = nextFile else { break }
+                    
+                    activeRunningLock.lock()
+                    activeRunningCount += 1
+                    running = activeRunningCount
+                    activeRunningLock.unlock()
                     
                     group.addTask {
                         do {
@@ -450,28 +501,46 @@ class UploadManager: ObservableObject {
                                 fileSize: file.fileSize,
                                 to: file.devicePath
                             )
-                            await MainActor.run { self.batchCompleted += 1 }
-                        } catch {
-                            print("❌ Failed to upload \(file.fileName): \(error)")
-                            await MainActor.run { self.batchCompleted += 1 }
-                        }
+                        } catch { }
+                        
+                        self.activeRunningLock.lock()
+                        self.activeRunningCount -= 1
+                        self.activeRunningLock.unlock()
+                        
+                        self.progressLock.lock()
+                        self.internalBatchCompleted += 1
+                        self.progressLock.unlock()
                     }
                 }
                 
-                // If cancelled, cancel all remaining tasks and break
                 if batchCancelled {
                     group.cancelAll()
                     break
                 }
                 
-                // Wait for one slot to free before looping
-                if runningCount >= limit && fileIndex < files.count {
+                // Check if there's more work pending or running
+                queueLock.lock()
+                let hasMore = !pendingFiles.isEmpty
+                queueLock.unlock()
+                
+                activeRunningLock.lock()
+                let finalRunning = activeRunningCount
+                activeRunningLock.unlock()
+                
+                if finalRunning == 0 && !hasMore {
+                    break
+                }
+                
+                if finalRunning >= limit {
+                    // All slots are full. Suspend until a task finishes.
                     await group.next()
-                    runningCount -= 1
+                } else {
+                    // Slots are free but queue is empty.
+                    // Sleep for 100ms to wait for new files to be enqueued.
+                    try? await Task.sleep(nanoseconds: 100_000_000)
                 }
             }
             
-            // If cancelled mid-batch, cancel remaining running tasks
             if batchCancelled {
                 group.cancelAll()
             }
@@ -479,23 +548,23 @@ class UploadManager: ObservableObject {
             await group.waitForAll()
         }
         
+        queueLock.lock()
+        isProcessingQueue = false
+        queueLock.unlock()
+        
         await MainActor.run {
-            isBatchUploading = false
+            self.flushUIUpdates()
+            self.isBatchUploading = false
         }
         
+        endPreventingSleep()
+        
         if batchCancelled {
-            print("🛑 Batch upload cancelled at \(await MainActor.run { batchCompleted })/\(files.count)")
+            let completed = await MainActor.run { batchCompleted }
+            print("🛑 Batch upload cancelled at \(completed)/\(batchTotal)")
         } else {
-            print("✅ All \(files.count) uploads completed")
-            
-            // Fire-and-forget: scan unique parent directories so Google Photos picks up new files.
-            // This runs detached so it never blocks the UI or slows down subsequent ADB ops.
-            let uniqueDirs = Set(files.map { ($0.devicePath as NSString).deletingLastPathComponent })
-            Task.detached(priority: .background) {
-                for dir in uniqueDirs {
-                    await ADBManager.triggerMediaScanForDirectory(dir)
-                }
-            }
+            let total = await MainActor.run { batchTotal }
+            print("✅ All \(total) uploads completed")
         }
     }
 }

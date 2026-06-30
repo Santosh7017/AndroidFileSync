@@ -2073,12 +2073,16 @@ class ADBManager {
             let adbPath = getADBPath()
             
             DispatchQueue.global(qos: .userInitiated).async {
-                // Create and manage the process directly for cancellation support
                 let process = Process()
                 let stdout = Pipe()
                 let stderr = Pipe()
                 process.executableURL = URL(fileURLWithPath: adbPath)
-                process.arguments = deviceArgs(["push", localPath, devicePath])
+                // LZ4 compression for files > 50 MB reduces USB bandwidth pressure
+                if totalBytes > 50 * 1024 * 1024 {
+                    process.arguments = deviceArgs(["push", "-z", "lz4", localPath, devicePath])
+                } else {
+                    process.arguments = deviceArgs(["push", localPath, devicePath])
+                }
                 process.environment = Shell.adbEnvironment
                 process.standardOutput = stdout
                 process.standardError = stderr
@@ -2099,37 +2103,48 @@ class ADBManager {
                         }
                     }
                     
-                    // Start progress polling AFTER process is running
-                    DispatchQueue.global(qos: .userInitiated).async {
-                        var lastSize: UInt64 = 0
-                        var lastCheck = Date()
-                        
-                        // Wait a moment for transfer to start
-                        Thread.sleep(forTimeInterval: 0.5)
-                        
-                        while process.isRunning && !cancellationCheck() {
-                            // Get remote file size using stat (synchronous for simplicity)
-                            let (statCode, statOutput, _) = Shell.run(
-                                adbPath,
-                                args: deviceArgs(["shell", "stat", "-c%s", devicePath])
-                            )
+                    // Start progress polling AFTER process is running — only for files >= 5 MB to avoid ADB stat command contention on small files
+                    if totalBytes >= 5 * 1024 * 1024 {
+                        DispatchQueue.global(qos: .userInitiated).async {
+                            var lastSize: UInt64 = 0
+                            var lastCheck = Date()
+                            var consecutiveFailures = 0
                             
-                            if statCode == 0, let currentSize = UInt64(statOutput.trimmingCharacters(in: .whitespacesAndNewlines)) {
-                                let now = Date()
-                                let timeDiff = now.timeIntervalSince(lastCheck)
+                            // Wait a moment for transfer to start
+                            Thread.sleep(forTimeInterval: 0.5)
+                            
+                            let escapedPath = FileNameHelper.escapeForShell(devicePath)
+                            
+                            while process.isRunning && !cancellationCheck() {
+                                // Get remote file size using stat (synchronous for simplicity)
+                                let (statCode, statOutput, _) = Shell.run(
+                                    adbPath,
+                                    args: deviceArgs(["shell", "stat", "-c%s", escapedPath])
+                                )
                                 
-                                if currentSize > lastSize && timeDiff >= 0.1 {
-                                    let bytesDiff = currentSize - lastSize
-                                    let speed = Double(bytesDiff) / timeDiff / (1024 * 1024) // MB/s
+                                if statCode == 0, let currentSize = UInt64(statOutput.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                                    consecutiveFailures = 0
+                                    let now = Date()
+                                    let timeDiff = now.timeIntervalSince(lastCheck)
                                     
-                                    continuation.yield((currentSize, speed))
-                                    
-                                    lastSize = currentSize
-                                    lastCheck = now
+                                    if currentSize > lastSize && timeDiff >= 0.1 {
+                                        let bytesDiff = currentSize - lastSize
+                                        let speed = Double(bytesDiff) / timeDiff / (1024 * 1024) // MB/s
+                                        
+                                        continuation.yield((currentSize, speed))
+                                        
+                                        lastSize = currentSize
+                                        lastCheck = now
+                                    }
+                                } else {
+                                    consecutiveFailures += 1
+                                    if consecutiveFailures >= 15 && !process.isRunning {
+                                        break
+                                    }
                                 }
+                                
+                                Thread.sleep(forTimeInterval: 1.0)
                             }
-                            
-                            Thread.sleep(forTimeInterval: 1)
                         }
                     }
                     
@@ -2148,6 +2163,33 @@ class ADBManager {
                         continuation.finish()
                     } else {
                         let message = (error.isEmpty ? output : error).trimmingCharacters(in: .whitespacesAndNewlines)
+                        
+                        // If compression isn't supported, retry without -z
+                        if (message.contains("unknown option") || message.contains("unrecognized option")),
+                           totalBytes > 50 * 1024 * 1024 {
+                            print("⚠️ ADB -z not supported, retrying without compression")
+                            let retryProcess = Process()
+                            let retryOut = Pipe()
+                            let retryErr = Pipe()
+                            retryProcess.executableURL = URL(fileURLWithPath: adbPath)
+                            retryProcess.arguments = deviceArgs(["push", localPath, devicePath])
+                            retryProcess.environment = Shell.adbEnvironment
+                            retryProcess.standardOutput = retryOut
+                            retryProcess.standardError = retryErr
+                            
+                            do {
+                                try retryProcess.run()
+                                retryProcess.waitUntilExit()
+                                if retryProcess.terminationStatus == 0 {
+                                    if !cancellationCheck() {
+                                        continuation.yield((totalBytes, 0))
+                                    }
+                                    continuation.finish()
+                                    return
+                                }
+                            } catch { }
+                        }
+                        
                         print("❌ ADB Push exited with code \(process.terminationStatus): \(message)")
                         continuation.finish(throwing: NSError(
                             domain: "ADBPush",

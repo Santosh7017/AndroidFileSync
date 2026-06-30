@@ -31,9 +31,35 @@ class DownloadManager: ObservableObject {
     private var activeTasks: [String: Task<Void, Never>] = [:]
     private let taskLock = NSLock()
     
+    // App Nap / system sleep prevention — held while any download is active.
+    // Without this, macOS may throttle or sleep the app during long transfers,
+    // causing ADB processes to stall and downloads to silently fail.
+    private var transferActivity: NSObjectProtocol?
+    private let activityLock = NSLock()
+    
     init() {
         let saved = UserDefaults.standard.integer(forKey: "maxConcurrentDownloads")
         self.maxConcurrent = saved > 0 ? min(max(saved, 1), 8) : 3
+    }
+    
+    // MARK: - Sleep Prevention
+    
+    private func beginPreventingSleep() {
+        activityLock.lock()
+        defer { activityLock.unlock() }
+        guard transferActivity == nil else { return }
+        transferActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .idleSystemSleepDisabled],
+            reason: "Downloading files from Android device via ADB"
+        )
+    }
+    
+    private func endPreventingSleep() {
+        activityLock.lock()
+        defer { activityLock.unlock() }
+        guard let activity = transferActivity else { return }
+        ProcessInfo.processInfo.endActivity(activity)
+        transferActivity = nil
     }
     
     // Thread-safe storage for progress updates from background
@@ -98,6 +124,7 @@ class DownloadManager: ObservableObject {
     
     deinit {
         updateTimer?.invalidate()
+        endPreventingSleep()
     }
     
     private func updateUIFromBackground() {
@@ -207,6 +234,9 @@ class DownloadManager: ObservableObject {
             startTimerIfNeeded()
         }
         
+        // Prevent App Nap / system sleep during transfer
+        beginPreventingSleep()
+        
         
         // Create and store the task for cancellation
         let downloadTask = Task.detached { [weak self] in
@@ -249,11 +279,20 @@ class DownloadManager: ObservableObject {
             
             
             // Show 100% briefly
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            let batchActive = await MainActor.run { self.isBatchDownloading }
+            let delayNs: UInt64 = batchActive ? 300_000_000 : 1_000_000_000
+            try? await Task.sleep(nanoseconds: delayNs)
             
             await MainActor.run {
                 self.activeDownloads.removeValue(forKey: devicePath)
                 self.stopTimerIfNeeded()
+            }
+            
+            let shouldEndSleep = await MainActor.run {
+                !self.isBatchDownloading && self.activeDownloads.isEmpty
+            }
+            if shouldEndSleep {
+                self.endPreventingSleep()
             }
         }
         
@@ -337,7 +376,9 @@ class DownloadManager: ObservableObject {
             }
             
             // Show 100% briefly
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            let batchActive = await MainActor.run { self.isBatchDownloading }
+            let delayNs: UInt64 = batchActive ? 300_000_000 : 1_000_000_000
+            try? await Task.sleep(nanoseconds: delayNs)
             
             await MainActor.run {
                 self.activeDownloads.removeValue(forKey: devicePath)
@@ -348,6 +389,13 @@ class DownloadManager: ObservableObject {
             self.taskLock.lock()
             self.activeTasks.removeValue(forKey: devicePath)
             self.taskLock.unlock()
+            
+            let shouldEndSleep = await MainActor.run {
+                !self.isBatchDownloading && self.activeDownloads.isEmpty
+            }
+            if shouldEndSleep {
+                self.endPreventingSleep()
+            }
         }
         
         // Store the task for cancellation
@@ -368,10 +416,17 @@ class DownloadManager: ObservableObject {
         
         // Initialize batch tracking
         await MainActor.run {
-            batchTotal = files.count
-            batchCompleted = 0
+            if isBatchDownloading {
+                batchTotal += files.count
+            } else {
+                batchTotal = files.count
+                batchCompleted = 0
+            }
             isBatchDownloading = true
         }
+        
+        // Prevent App Nap / system sleep for the entire batch
+        beginPreventingSleep()
         
         print("📥 Starting parallel download of \(files.count) files")
         isBatchCancelled = false
@@ -422,6 +477,9 @@ class DownloadManager: ObservableObject {
             isBatchDownloading = false
             currentFolderName = ""
         }
+        
+        // End sleep prevention now that all downloads are done
+        endPreventingSleep()
         
         print("✅ All \(files.count) downloads completed")
     }
