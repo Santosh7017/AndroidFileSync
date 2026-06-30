@@ -6,15 +6,50 @@ import Foundation
 internal import Combine
 
 class DownloadManager: ObservableObject {
-    // Store progress for each file being downloaded (Key: devicePath)
-    @Published var activeDownloads: [String: DownloadProgress] = [:]
+    @Published var activeDownloads: [String: DownloadProgress] = [:] {
+        didSet {
+            let count = activeDownloads.count
+            if count != lastActiveDownloadsCount {
+                lastActiveDownloadsCount = count
+                NotificationCenter.default.post(
+                    name: .afsTransferCountChanged,
+                    object: nil,
+                    userInfo: ["type": "download", "count": count]
+                )
+            }
+        }
+    }
+    private var lastActiveDownloadsCount = 0
+    private var internalActiveDownloads: [String: DownloadProgress] = [:]
     
     // Batch tracking for showing "X of Y completed"
     @Published var batchTotal: Int = 0
-    @Published var batchCompleted: Int = 0
-    @Published var isBatchDownloading: Bool = false
+    @Published var batchCompleted: Int = 0 {
+        didSet {
+            NotificationCenter.default.post(
+                name: .afsDownloadBatchCompleted,
+                object: nil,
+                userInfo: [
+                    "completed": batchCompleted,
+                    "total": batchTotal
+                ]
+            )
+        }
+    }
+    @Published var isBatchDownloading: Bool = false {
+        didSet {
+            NotificationCenter.default.post(
+                name: .afsDownloadBatchStateChanged,
+                object: nil,
+                userInfo: [
+                    "isDownloading": isBatchDownloading,
+                    "batchTotal": batchTotal
+                ]
+            )
+        }
+    }
     
-    // Live-adjustable concurrency (1-8 slots), persisted across launches
+    // Live-adjustable concurrency (1-10 slots), persisted across launches
     @Published var maxConcurrent: Int {
         didSet { UserDefaults.standard.set(maxConcurrent, forKey: "maxConcurrentDownloads") }
     }
@@ -39,7 +74,7 @@ class DownloadManager: ObservableObject {
     
     init() {
         let saved = UserDefaults.standard.integer(forKey: "maxConcurrentDownloads")
-        self.maxConcurrent = saved > 0 ? min(max(saved, 1), 8) : 3
+        self.maxConcurrent = saved > 0 ? min(max(saved, 1), 10) : 3
     }
     
     // MARK: - Sleep Prevention
@@ -106,7 +141,7 @@ class DownloadManager: ObservableObject {
     }
     
     private func stopTimerIfNeeded() {
-        guard activeDownloads.isEmpty else { return }
+        guard internalActiveDownloads.isEmpty else { return }
         updateTimer?.invalidate()
         updateTimer = nil
     }
@@ -118,7 +153,7 @@ class DownloadManager: ObservableObject {
     }
     
     func resumeUpdates() {
-        guard !activeDownloads.isEmpty else { return }
+        guard !internalActiveDownloads.isEmpty else { return }
         startTimerIfNeeded()
     }
     
@@ -133,9 +168,11 @@ class DownloadManager: ObservableObject {
         progressLock.unlock()
         
         for (devicePath, (bytes, speed)) in updates {
-            activeDownloads[devicePath]?.bytesTransferred = bytes
-            activeDownloads[devicePath]?.transferSpeed = speed
+            internalActiveDownloads[devicePath]?.bytesTransferred = bytes
+            internalActiveDownloads[devicePath]?.transferSpeed = speed
         }
+        
+        activeDownloads = internalActiveDownloads
     }
     
     // MARK: - Cancellation
@@ -152,9 +189,10 @@ class DownloadManager: ObservableObject {
         taskLock.unlock()
         
         // Update UI state
-        if var download = activeDownloads[devicePath] {
+        if var download = internalActiveDownloads[devicePath] {
             download.isCancelled = true
-            activeDownloads[devicePath] = download
+            internalActiveDownloads[devicePath] = download
+            activeDownloads = internalActiveDownloads
             
             // Clean up partial file
             let localPath = download.localPath
@@ -167,13 +205,15 @@ class DownloadManager: ObservableObject {
         
         // Remove from UI after brief delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.activeDownloads.removeValue(forKey: devicePath)
-            self?.stopTimerIfNeeded()
+            guard let self = self else { return }
+            self.internalActiveDownloads.removeValue(forKey: devicePath)
+            self.activeDownloads = self.internalActiveDownloads
+            self.stopTimerIfNeeded()
             
             // Clear background progress
-            self?.progressLock.lock()
-            self?.backgroundProgress.removeValue(forKey: devicePath)
-            self?.progressLock.unlock()
+            self.progressLock.lock()
+            self.backgroundProgress.removeValue(forKey: devicePath)
+            self.progressLock.unlock()
         }
     }
     
@@ -192,24 +232,27 @@ class DownloadManager: ObservableObject {
         }
         
         // Mark all as cancelled
-        for key in activeDownloads.keys {
-            activeDownloads[key]?.isCancelled = true
+        for key in internalActiveDownloads.keys {
+            internalActiveDownloads[key]?.isCancelled = true
         }
+        activeDownloads = internalActiveDownloads
         
         // Clear after brief delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.activeDownloads.removeAll()
-            self?.isBatchDownloading = false
-            self?.batchTotal = 0
-            self?.batchCompleted = 0
-            self?.currentFolderName = ""
-            self?.isScanning = false
-            self?.scanningFolderName = ""
-            self?.stopTimerIfNeeded()
+            guard let self = self else { return }
+            self.internalActiveDownloads.removeAll()
+            self.activeDownloads.removeAll()
+            self.isBatchDownloading = false
+            self.batchTotal = 0
+            self.batchCompleted = 0
+            self.currentFolderName = ""
+            self.isScanning = false
+            self.scanningFolderName = ""
+            self.stopTimerIfNeeded()
             
-            self?.progressLock.lock()
-            self?.backgroundProgress.removeAll()
-            self?.progressLock.unlock()
+            self.progressLock.lock()
+            self.backgroundProgress.removeAll()
+            self.progressLock.unlock()
         }
     }
     
@@ -230,7 +273,10 @@ class DownloadManager: ObservableObject {
         
         // Add to UI on main thread and start timer
         await MainActor.run {
-            activeDownloads[devicePath] = progress
+            internalActiveDownloads[devicePath] = progress
+            if !isBatchDownloading {
+                activeDownloads = internalActiveDownloads
+            }
             startTimerIfNeeded()
         }
         
@@ -272,9 +318,12 @@ class DownloadManager: ObservableObject {
             
             // Mark complete on main thread
             await MainActor.run {
-                self.activeDownloads[devicePath]?.isComplete = true
-                self.activeDownloads[devicePath]?.bytesTransferred = fileSize
-                self.activeDownloads[devicePath]?.transferSpeed = 0
+                self.internalActiveDownloads[devicePath]?.isComplete = true
+                self.internalActiveDownloads[devicePath]?.bytesTransferred = fileSize
+                self.internalActiveDownloads[devicePath]?.transferSpeed = 0
+                if !self.isBatchDownloading {
+                    self.activeDownloads = self.internalActiveDownloads
+                }
             }
             
             
@@ -284,7 +333,10 @@ class DownloadManager: ObservableObject {
             try? await Task.sleep(nanoseconds: delayNs)
             
             await MainActor.run {
-                self.activeDownloads.removeValue(forKey: devicePath)
+                self.internalActiveDownloads.removeValue(forKey: devicePath)
+                if !self.isBatchDownloading {
+                    self.activeDownloads = self.internalActiveDownloads
+                }
                 self.stopTimerIfNeeded()
             }
             
@@ -332,7 +384,10 @@ class DownloadManager: ObservableObject {
         
         // Add to UI on main thread and start timer
         Task { @MainActor in
-            activeDownloads[devicePath] = progress
+            internalActiveDownloads[devicePath] = progress
+            if !isBatchDownloading {
+                activeDownloads = internalActiveDownloads
+            }
             startTimerIfNeeded()
         }
         
@@ -370,9 +425,12 @@ class DownloadManager: ObservableObject {
             
             // Mark complete on main thread
             await MainActor.run {
-                self.activeDownloads[devicePath]?.isComplete = true
-                self.activeDownloads[devicePath]?.bytesTransferred = fileSize
-                self.activeDownloads[devicePath]?.transferSpeed = 0
+                self.internalActiveDownloads[devicePath]?.isComplete = true
+                self.internalActiveDownloads[devicePath]?.bytesTransferred = fileSize
+                self.internalActiveDownloads[devicePath]?.transferSpeed = 0
+                if !self.isBatchDownloading {
+                    self.activeDownloads = self.internalActiveDownloads
+                }
             }
             
             // Show 100% briefly
@@ -381,7 +439,10 @@ class DownloadManager: ObservableObject {
             try? await Task.sleep(nanoseconds: delayNs)
             
             await MainActor.run {
-                self.activeDownloads.removeValue(forKey: devicePath)
+                self.internalActiveDownloads.removeValue(forKey: devicePath)
+                if !self.isBatchDownloading {
+                    self.activeDownloads = self.internalActiveDownloads
+                }
                 self.stopTimerIfNeeded()
             }
             
@@ -391,7 +452,7 @@ class DownloadManager: ObservableObject {
             self.taskLock.unlock()
             
             let shouldEndSleep = await MainActor.run {
-                !self.isBatchDownloading && self.activeDownloads.isEmpty
+                !self.isBatchDownloading && self.internalActiveDownloads.isEmpty
             }
             if shouldEndSleep {
                 self.endPreventingSleep()

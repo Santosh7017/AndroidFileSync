@@ -156,7 +156,7 @@ struct TransferProgressView: View {
                             .font(.system(.caption, design: .monospaced, weight: .bold))
                             .frame(minWidth: 14, alignment: .center)
                         
-                        Button { binding.wrappedValue = min(8, binding.wrappedValue + 1) } label: {
+                        Button { binding.wrappedValue = min(10, binding.wrappedValue + 1) } label: {
                             Image(systemName: "plus.circle")
                         }
                         .buttonStyle(.plain)
@@ -189,9 +189,8 @@ struct TransferProgressView: View {
                 }
             }
             
-            // File list
             ScrollView {
-                VStack(spacing: 2) {
+                LazyVStack(spacing: 2) {
                     ForEach(items) { item in
                         OverlayProgressRow(item: item, onCancel: onCancel)
                     }

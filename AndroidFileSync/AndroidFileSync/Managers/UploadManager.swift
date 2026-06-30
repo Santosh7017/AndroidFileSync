@@ -8,11 +8,47 @@ import Foundation
 internal import Combine
 
 class UploadManager: ObservableObject {
-    @Published var activeUploads: [String: UploadProgress] = [:]
+    @Published var activeUploads: [String: UploadProgress] = [:] {
+        didSet {
+            let count = activeUploads.count
+            if count != lastActiveUploadsCount {
+                lastActiveUploadsCount = count
+                NotificationCenter.default.post(
+                    name: .afsTransferCountChanged,
+                    object: nil,
+                    userInfo: ["type": "upload", "count": count]
+                )
+            }
+        }
+    }
+    private var lastActiveUploadsCount = 0
+    private var internalActiveUploads: [String: UploadProgress] = [:]
     
     @Published var batchTotal: Int = 0
-    @Published var batchCompleted: Int = 0
-    @Published var isBatchUploading: Bool = false
+    @Published var batchCompleted: Int = 0 {
+        didSet {
+            NotificationCenter.default.post(
+                name: .afsUploadBatchCompleted,
+                object: nil,
+                userInfo: [
+                    "completed": batchCompleted,
+                    "total": batchTotal
+                ]
+            )
+        }
+    }
+    @Published var isBatchUploading: Bool = false {
+        didSet {
+            NotificationCenter.default.post(
+                name: .afsUploadBatchStateChanged,
+                object: nil,
+                userInfo: [
+                    "isUploading": isBatchUploading,
+                    "batchTotal": batchTotal
+                ]
+            )
+        }
+    }
     @Published var batchCancelled: Bool = false
     
     @Published var isPreparing: Bool = false
@@ -47,7 +83,7 @@ class UploadManager: ObservableObject {
     
     init() {
         let saved = UserDefaults.standard.integer(forKey: "maxConcurrentUploads")
-        self.maxConcurrent = saved > 0 ? min(max(saved, 1), 8) : 3
+        self.maxConcurrent = saved > 0 ? min(max(saved, 1), 10) : 3
     }
     
     // MARK: - Sleep Prevention
@@ -121,12 +157,15 @@ class UploadManager: ObservableObject {
         progressLock.unlock()
         
         for (localPath, (bytes, speed)) in updates {
-            if var upload = activeUploads[localPath] {
+            if var upload = internalActiveUploads[localPath] {
                 upload.bytesTransferred = bytes
                 upload.transferSpeed = speed
-                activeUploads[localPath] = upload
+                internalActiveUploads[localPath] = upload
             }
         }
+        
+        // Single batch update to @Published property to minimize SwiftUI updates
+        activeUploads = internalActiveUploads
         
         if completedSnapshot != batchCompleted {
             batchCompleted = completedSnapshot
@@ -140,10 +179,13 @@ class UploadManager: ObservableObject {
 
     @MainActor
     private func markUploadFailed(localPath: String, error: Error) {
-        if var upload = activeUploads[localPath] {
+        if var upload = internalActiveUploads[localPath] {
             upload.error = error.localizedDescription
             upload.transferSpeed = 0
-            activeUploads[localPath] = upload
+            internalActiveUploads[localPath] = upload
+            if !isBatchUploading {
+                activeUploads = internalActiveUploads
+            }
         }
         progressLock.lock()
         backgroundProgress.removeValue(forKey: localPath)
@@ -167,22 +209,25 @@ class UploadManager: ObservableObject {
     func cancelUpload(localPath: String) {
         setCancelled(localPath: localPath, value: true)
         
-        if var upload = activeUploads[localPath] {
+        if var upload = internalActiveUploads[localPath] {
             upload.isCancelled = true
-            activeUploads[localPath] = upload
+            internalActiveUploads[localPath] = upload
+            activeUploads = internalActiveUploads
         }
         
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            self?.activeUploads.removeValue(forKey: localPath)
-            self?.stopTimerIfNeeded()
+            guard let self = self else { return }
+            self.internalActiveUploads.removeValue(forKey: localPath)
+            self.activeUploads = self.internalActiveUploads
+            self.stopTimerIfNeeded()
             
-            self?.progressLock.lock()
-            self?.backgroundProgress.removeValue(forKey: localPath)
-            self?.progressLock.unlock()
+            self.progressLock.lock()
+            self.backgroundProgress.removeValue(forKey: localPath)
+            self.progressLock.unlock()
             
-            self?.flagLock.lock()
-            self?.cancellationFlags.removeValue(forKey: localPath)
-            self?.flagLock.unlock()
+            self.flagLock.lock()
+            self.cancellationFlags.removeValue(forKey: localPath)
+            self.flagLock.unlock()
         }
     }
     
@@ -199,30 +244,33 @@ class UploadManager: ObservableObject {
         for key in cancellationFlags.keys {
             cancellationFlags[key] = true
         }
-        for key in activeUploads.keys {
+        for key in internalActiveUploads.keys {
             cancellationFlags[key] = true
         }
         flagLock.unlock()
         
-        for key in activeUploads.keys {
-            activeUploads[key]?.isCancelled = true
+        for key in internalActiveUploads.keys {
+            internalActiveUploads[key]?.isCancelled = true
         }
+        activeUploads = internalActiveUploads
         
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.activeUploads.removeAll()
-            self?.stopTimerIfNeeded()
+            guard let self = self else { return }
+            self.internalActiveUploads.removeAll()
+            self.activeUploads.removeAll()
+            self.stopTimerIfNeeded()
             
-            self?.progressLock.lock()
-            self?.backgroundProgress.removeAll()
-            self?.internalBatchCompleted = 0
-            self?.progressLock.unlock()
+            self.progressLock.lock()
+            self.backgroundProgress.removeAll()
+            self.internalBatchCompleted = 0
+            self.progressLock.unlock()
             
-            self?.flagLock.lock()
-            self?.cancellationFlags.removeAll()
-            self?.flagLock.unlock()
+            self.flagLock.lock()
+            self.cancellationFlags.removeAll()
+            self.flagLock.unlock()
             
-            self?.batchTotal = 0
-            self?.batchCompleted = 0
+            self.batchTotal = 0
+            self.batchCompleted = 0
         }
     }
     
@@ -253,7 +301,10 @@ class UploadManager: ObservableObject {
         beginPreventingSleep()
         
         await MainActor.run {
-            activeUploads[localPath] = progress
+            internalActiveUploads[localPath] = progress
+            if !isBatchUploading {
+                activeUploads = internalActiveUploads
+            }
             startTimerIfNeeded()
         }
         
@@ -288,11 +339,14 @@ class UploadManager: ObservableObject {
         progressLock.unlock()
         
         await MainActor.run {
-            if var upload = activeUploads[localPath] {
+            if var upload = internalActiveUploads[localPath] {
                 upload.isComplete = true
                 upload.bytesTransferred = fileSize
                 upload.transferSpeed = 0
-                activeUploads[localPath] = upload
+                internalActiveUploads[localPath] = upload
+                if !isBatchUploading {
+                    activeUploads = internalActiveUploads
+                }
             }
         }
         
@@ -302,7 +356,8 @@ class UploadManager: ObservableObject {
         try? await Task.sleep(nanoseconds: delayNs)
         
         await MainActor.run {
-            activeUploads.removeValue(forKey: localPath)
+            internalActiveUploads.removeValue(forKey: localPath)
+            activeUploads = internalActiveUploads
             stopTimerIfNeeded()
         }
         
@@ -341,7 +396,10 @@ class UploadManager: ObservableObject {
         )
         
         Task { @MainActor in
-            activeUploads[localPath] = progress
+            internalActiveUploads[localPath] = progress
+            if !isBatchUploading {
+                activeUploads = internalActiveUploads
+            }
             startTimerIfNeeded()
         }
         
@@ -379,9 +437,12 @@ class UploadManager: ObservableObject {
             self.progressLock.unlock()
             
             await MainActor.run {
-                self.activeUploads[localPath]?.isComplete = true
-                self.activeUploads[localPath]?.bytesTransferred = fileSize
-                self.activeUploads[localPath]?.transferSpeed = 0
+                self.internalActiveUploads[localPath]?.isComplete = true
+                self.internalActiveUploads[localPath]?.bytesTransferred = fileSize
+                self.internalActiveUploads[localPath]?.transferSpeed = 0
+                if !self.isBatchUploading {
+                    self.activeUploads = self.internalActiveUploads
+                }
             }
             
             await ADBManager.triggerMediaScan(path: safeDevicePath)
@@ -391,7 +452,10 @@ class UploadManager: ObservableObject {
             try? await Task.sleep(nanoseconds: delayNs)
             
             await MainActor.run {
-                self.activeUploads.removeValue(forKey: localPath)
+                self.internalActiveUploads.removeValue(forKey: localPath)
+                if !self.isBatchUploading {
+                    self.activeUploads = self.internalActiveUploads
+                }
                 self.stopTimerIfNeeded()
             }
             
