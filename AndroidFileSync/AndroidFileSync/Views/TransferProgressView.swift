@@ -56,159 +56,151 @@ struct TransferProgressView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            if isCollapsed {
-                // Minimized view - just a thin bar
-                minimizedBar
-            } else {
-                // Full panel
-                expandedPanel
-            }
-        }
-    }
-    
-    // MARK: - Minimized Bar (when collapsed)
-    
-    private var minimizedBar: some View {
-        VStack(spacing: 0) {
-            // Drag handle to expand
-            dragHandle
-            
-            // Single line with overall progress
-            HStack(spacing: 8) {
-                Image(systemName: "arrow.down.circle.fill")
-                    .font(.system(size: 10))
-                    .foregroundColor(.blue)
-                
-                // Overall progress bar filling behind
-                GeometryReader { geometry in
-                    ZStack(alignment: .leading) {
-                        // Background
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(Color.secondary.opacity(0.15))
-                        
-                        // Progress fill
-                        RoundedRectangle(cornerRadius: 3)
-                            .fill(Color.blue.opacity(0.4))
-                            .frame(width: geometry.size.width * overallProgress)
-                        
-                        // Text overlay
-                        HStack {
-                            Text("\(completedCount)/\(totalCount) transfers")
-                                .font(.system(.caption2, weight: .medium))
-                            Spacer()
-                            Text("\(Int(overallProgress * 100))%")
-                                .font(.system(.caption2, weight: .bold))
-                                .foregroundColor(.blue)
-                        }
-                        .padding(.horizontal, 6)
-                    }
-                }
-                .frame(height: 18)
-            }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 4)
-        }
-        .background(Color(NSColor.windowBackgroundColor))
-    }
-    
-    // MARK: - Expanded Panel
-    
-    private var expandedPanel: some View {
-        VStack(spacing: 0) {
             Divider()
             
             // Drag handle
             dragHandle
             
-            VStack(alignment: .leading, spacing: 4) {
-                // Header
-                HStack(spacing: 6) {
-                    Image(systemName: isScanning ? "magnifyingglass.circle" : (folderName.isEmpty ? "arrow.down.circle.fill" : "folder.badge.gearshape"))
-                        .font(.system(size: 12))
-                        .foregroundColor(isScanning ? .orange : .blue)
-                        
+            if isCollapsed {
+                minimizedContent
+            } else {
+                expandedContent
+            }
+        }
+        .frame(height: isCollapsed ? 34 : panelHeight)
+        .background(
+            NonDraggableBackground()
+                .background(Color(NSColor.controlBackgroundColor))
+        )
+    }
+    
+    // MARK: - Minimized Content
+    
+    private var minimizedContent: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.system(size: 10))
+                .foregroundColor(.blue)
+            
+            // Overall progress bar filling behind
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    // Background
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color.secondary.opacity(0.15))
                     
-                    if isScanning {
-                        Text("Scanning \(scanningFolderName)…")
-                            .font(.system(.caption, weight: .semibold))
-                            .foregroundColor(.orange)
-                    } else if !folderName.isEmpty {
-                        Text("\(folderName) — \(title)")
-                            .font(.system(.caption, weight: .semibold))
-                    } else {
-                        Text(title)
-                            .font(.system(.caption, weight: .semibold))
+                    // Progress fill
+                    RoundedRectangle(cornerRadius: 3)
+                        .fill(Color.blue.opacity(0.4))
+                        .frame(width: geometry.size.width * fileFractionProgress)
+                    
+                    // Text overlay
+                    HStack {
+                        Text("\(completedCount)/\(totalCount) transfers")
+                            .font(.system(.caption2, weight: .medium))
+                        Spacer()
+                        Text("\(Int(fileFractionProgress * 100))%")
+                            .font(.system(.caption2, weight: .bold))
+                            .foregroundColor(.blue)
                     }
-                    
-                    Spacer()
-                    
-                    if let batch = batchInfo {
-                        Text("\(batch.completed)/\(batch.total)")
-                            .font(.system(.caption2, design: .monospaced, weight: .bold))
-                            .foregroundColor(.green)
-                    }
-                    
-                    // Live concurrency stepper
-                    if let binding = concurrencyBinding {
-                        Divider().frame(height: 12)
-                        HStack(spacing: 4) {
-                            Button { binding.wrappedValue = max(1, binding.wrappedValue - 1) } label: {
-                                Image(systemName: "minus.circle")
-                            }
-                            .buttonStyle(.plain)
-                            .help("Fewer simultaneous downloads")
-                            
-                            Text("\(binding.wrappedValue)")
-                                .font(.system(.caption, design: .monospaced, weight: .bold))
-                                .frame(minWidth: 14, alignment: .center)
-                            
-                            Button { binding.wrappedValue = min(8, binding.wrappedValue + 1) } label: {
-                                Image(systemName: "plus.circle")
-                            }
-                            .buttonStyle(.plain)
-                            .help("More simultaneous downloads")
-                        }
-                        .foregroundColor(.secondary)
-                        
-                        // Wireless hint
-                        if isWirelessConnection {
-                            Text("Best: 1–5 on WiFi")
-                                .font(.system(size: 9, weight: .medium))
-                                .foregroundColor(.orange.opacity(0.8))
-                        }
-                    }
-                    
-                    // Cancel All button
-                    if items.count > 1 || batchInfo != nil {
-                        Divider().frame(height: 12)
-                        Button(action: { onCancelAll?() }) {
-                            HStack(spacing: 2) {
-                                Image(systemName: "xmark.circle.fill")
-                                    .font(.system(size: 10))
-                                Text("Cancel All")
-                                    .font(.system(size: 10, weight: .medium))
-                            }
-                            .foregroundColor(.red.opacity(0.8))
+                    .padding(.horizontal, 6)
+                }
+            }
+            .frame(height: 18)
+        }
+        .padding(.horizontal, 10)
+        .padding(.bottom, 4)
+    }
+    
+    // MARK: - Expanded Content
+    
+    private var expandedContent: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            // Header
+            HStack(spacing: 6) {
+                Image(systemName: isScanning ? "magnifyingglass.circle" : (folderName.isEmpty ? "arrow.down.circle.fill" : "folder.badge.gearshape"))
+                    .font(.system(size: 12))
+                    .foregroundColor(isScanning ? .orange : .blue)
+                
+                if isScanning {
+                    Text("Scanning \(scanningFolderName)…")
+                        .font(.system(.caption, weight: .semibold))
+                        .foregroundColor(.orange)
+                } else if !folderName.isEmpty {
+                    Text("\(folderName) — \(title)")
+                        .font(.system(.caption, weight: .semibold))
+                } else {
+                    Text(title)
+                        .font(.system(.caption, weight: .semibold))
+                }
+                
+                Spacer()
+                
+                if let batch = batchInfo {
+                    Text("\(batch.completed)/\(batch.total)")
+                        .font(.system(.caption2, design: .monospaced, weight: .bold))
+                        .foregroundColor(.green)
+                }
+                
+                // Live concurrency stepper
+                if let binding = concurrencyBinding {
+                    Divider().frame(height: 12)
+                    HStack(spacing: 4) {
+                        Button { binding.wrappedValue = max(1, binding.wrappedValue - 1) } label: {
+                            Image(systemName: "minus.circle")
                         }
                         .buttonStyle(.plain)
-                        .help("Cancel all active transfers")
+                        .help("Fewer simultaneous downloads")
+                        
+                        Text("\(binding.wrappedValue)")
+                            .font(.system(.caption, design: .monospaced, weight: .bold))
+                            .frame(minWidth: 14, alignment: .center)
+                        
+                        Button { binding.wrappedValue = min(8, binding.wrappedValue + 1) } label: {
+                            Image(systemName: "plus.circle")
+                        }
+                        .buttonStyle(.plain)
+                        .help("More simultaneous downloads")
+                    }
+                    .foregroundColor(.secondary)
+                    
+                    // Wireless hint
+                    if isWirelessConnection {
+                        Text("Best: 1–5 on WiFi")
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundColor(.orange.opacity(0.8))
                     }
                 }
                 
-                // File list
-                ScrollView {
-                    VStack(spacing: 2) {
-                        ForEach(items) { item in
-                            OverlayProgressRow(item: item, onCancel: onCancel)
+                // Cancel All button
+                if items.count > 1 || batchInfo != nil {
+                    Divider().frame(height: 12)
+                    Button(action: { onCancelAll?() }) {
+                        HStack(spacing: 2) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 10))
+                            Text("Cancel All")
+                                .font(.system(size: 10, weight: .medium))
                         }
+                        .foregroundColor(.red.opacity(0.8))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Cancel all active transfers")
+                }
+            }
+            
+            // File list
+            ScrollView {
+                VStack(spacing: 2) {
+                    ForEach(items) { item in
+                        OverlayProgressRow(item: item, onCancel: onCancel)
                     }
                 }
-                .frame(height: max(panelHeight - 40, 30))
             }
-            .padding(.horizontal, 10)
-            .padding(.bottom, 6)
-            .background(Color(NSColor.windowBackgroundColor))
+            .frame(maxHeight: .infinity)
         }
+        .padding(.horizontal, 10)
+        .padding(.bottom, 6)
     }
     
     // MARK: - Drag Handle
@@ -225,9 +217,11 @@ struct TransferProgressView: View {
         .gesture(
             DragGesture()
                 .onChanged { value in
-                    let newHeight = panelHeight - value.translation.height
+                    let baseHeight = isCollapsed ? 34 : panelHeight
+                    let newHeight = baseHeight - value.translation.height
                     if newHeight < collapsedThreshold {
                         isCollapsed = true
+                        panelHeight = 34
                     } else {
                         isCollapsed = false
                         panelHeight = min(max(newHeight, 60), maxHeight)
@@ -239,7 +233,16 @@ struct TransferProgressView: View {
                 isCollapsed.toggle()
                 if !isCollapsed {
                     panelHeight = 120
+                } else {
+                    panelHeight = 34
                 }
+            }
+        }
+        .onHover { isHovered in
+            if isHovered {
+                NSCursor.resizeUpDown.push()
+            } else {
+                NSCursor.pop()
             }
         }
     }
@@ -247,17 +250,25 @@ struct TransferProgressView: View {
     // MARK: - Computed Properties
     
     private var completedCount: Int {
-        items.filter { $0.isComplete }.count
+        if let batch = batchInfo { return batch.completed }
+        return items.filter { $0.isComplete }.count
     }
     
     private var totalCount: Int {
-        items.count
+        if let batch = batchInfo { return batch.total }
+        return items.count
     }
     
     private var overallProgress: Double {
         guard !items.isEmpty else { return 0 }
         let totalProgress = items.reduce(0.0) { $0 + $1.progress }
         return totalProgress / Double(items.count)
+    }
+    
+    private var fileFractionProgress: Double {
+        let total = totalCount
+        guard total > 0 else { return 0 }
+        return Double(completedCount) / Double(total)
     }
 }
 
@@ -326,7 +337,7 @@ struct OverlayProgressRow: View {
                 Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
             } else if item.error != nil {
                 Image(systemName: "exclamationmark.circle.fill").foregroundColor(.red)
-            } else if item.percentage == 0 {
+            } else if item.percentage == 0 && item.bytesTransferred == 0 {
                 Image(systemName: "clock").foregroundColor(.secondary)
             } else {
                 Image(systemName: item.isUpload ? "arrow.up.circle" : "arrow.down.circle")
@@ -339,15 +350,33 @@ struct OverlayProgressRow: View {
     private var statusText: String {
         if item.isComplete { return "Done" }
         if item.error != nil { return "Error" }
-        if item.percentage == 0 { return "Starting…" }
         if !item.speed.isEmpty { return item.speed }
+        if item.percentage == 0 {
+            return item.bytesTransferred > 0 ? "<1%" : "Starting…"
+        }
         return "\(item.percentage)%"
     }
     
     private var statusColor: Color {
         if item.isComplete { return .green }
         if item.error != nil { return .red }
-        if item.percentage == 0 { return .secondary }
+        if item.percentage == 0 && item.bytesTransferred == 0 { return .secondary }
         return .blue
     }
+}
+
+// MARK: - Non-Draggable Background (stops AppKit window background dragging)
+
+class NonDraggableNSView: NSView {
+    override var mouseDownCanMoveWindow: Bool {
+        return false
+    }
+}
+
+struct NonDraggableBackground: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        return NonDraggableNSView()
+    }
+    
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }

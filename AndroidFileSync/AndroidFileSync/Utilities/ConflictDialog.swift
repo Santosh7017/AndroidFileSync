@@ -73,7 +73,16 @@ enum ConflictDialog {
         scrollView.wantsLayer            = true
         scrollView.layer?.cornerRadius   = 6
 
-        let listText = conflictNames.map { "  \($0)" }.joined(separator: "\n")
+        let displayLimit = 15
+        let listText: String
+        if conflictNames.count > displayLimit {
+            let visibleNames = conflictNames.prefix(displayLimit).map { "  \($0)" }
+            let remainingCount = conflictNames.count - displayLimit
+            listText = (visibleNames + ["  ... and \(remainingCount) more files"]).joined(separator: "\n")
+        } else {
+            listText = conflictNames.map { "  \($0)" }.joined(separator: "\n")
+        }
+        
         let textView = NSTextView()
         textView.string        = listText
         textView.isEditable    = false

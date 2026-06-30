@@ -13,8 +13,18 @@ struct TransferProgressContainer: View {
     @ObservedObject var deviceManager: DeviceManager
     
     var body: some View {
-        if downloadManager.isScanning {
-            // Show scanning placeholder when enumerating a folder
+        if uploadManager.isPreparing {
+            HStack(spacing: 8) {
+                ProgressView().scaleEffect(0.7)
+                Text(uploadManager.preparingMessage)
+                    .font(.system(.callout, weight: .medium))
+                    .foregroundColor(.orange)
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(.regularMaterial)
+        } else if downloadManager.isScanning {
             HStack(spacing: 8) {
                 ProgressView().scaleEffect(0.7)
                 Text("Scanning \(downloadManager.scanningFolderName)...")
@@ -28,7 +38,7 @@ struct TransferProgressContainer: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .background(.regularMaterial)
-        } else if !downloadManager.activeDownloads.isEmpty || !uploadManager.activeUploads.isEmpty {
+        } else if downloadManager.isBatchDownloading || uploadManager.isBatchUploading || !downloadManager.activeDownloads.isEmpty || !uploadManager.activeUploads.isEmpty {
             TransferProgressView(
                 title: "Active Transfers",
                 items: getTransferItems(),

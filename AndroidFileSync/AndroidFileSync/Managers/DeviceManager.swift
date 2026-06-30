@@ -24,6 +24,8 @@ class DeviceManager: ObservableObject {
     @Published var sdCardPath: String? = nil
     /// Storage stats keyed by path (internal / SD card)
     @Published var storageStats: [String: StorageInfo] = [:]
+    /// True when there is an active file transfer — prevents false USB disconnects from ADB contention
+    @Published var isTransferActive = false
 
     struct StorageInfo {
         let usedBytes: Int64
@@ -670,6 +672,10 @@ class DeviceManager: ObservableObject {
         // USB device plugged in — poll for ADB to register the new device
         monitor.onDeviceAdded = { [weak self] in
             guard let self else { return }
+            guard !self.isTransferActive else {
+                print("📱 DeviceManager: USB added event ignored during active transfer")
+                return
+            }
             Task {
                 // Cancel any running wireless hunt or stale diagnostics from prior disconnect
                 self.cancelWirelessReconnectHunt()
@@ -719,6 +725,10 @@ class DeviceManager: ObservableObject {
         // USB device unplugged — instant UI response, then confirm with ADB
         monitor.onDeviceRemoved = { [weak self] in
             guard let self else { return }
+            guard !self.isTransferActive else {
+                print("📱 DeviceManager: USB removed event ignored during active transfer")
+                return
+            }
             Task {
                 // Cancel stale diagnostics so they don't query a disconnected serial
                 self.diagnosticsTask?.cancel()
@@ -828,7 +838,9 @@ class DeviceManager: ObservableObject {
         let adbPath = ADBManager.getADBPath()
         guard !adbPath.isEmpty else { return }
 
-        // Fetch internal storage and SD card in parallel
+        // Flush filesystem buffers so df reports accurate values after deletes
+        let _ = await Shell.runAsync(adbPath, args: ADBManager.deviceArgs(["shell", "sync"]))
+
         async let internalFetch = Shell.runAsync(
             adbPath,
             args: ADBManager.deviceArgs(["shell", "df", "-k", "/storage/emulated/0"])

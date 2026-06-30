@@ -355,6 +355,11 @@ struct ContentView: View {
                     pendingDiagnosticUpload = false
                     showDiagnosticUploadAlert = false
                     showUploadSuccessToast = false
+                } else {
+                    // Reconnected! Reload files to restore list from empty state
+                    Task {
+                        await loadFiles()
+                    }
                 }
             }
             .onChange(of: downloadManager.batchCompleted) { completed in
@@ -364,6 +369,26 @@ struct ContentView: View {
             .onChange(of: uploadManager.batchCompleted) { completed in
                 guard completed > 0, completed == uploadManager.batchTotal else { return }
                 supportPromptManager.recordSuccessfulTransfer(count: completed)
+            }
+            .onChange(of: uploadManager.isBatchUploading) { isUploading in
+                deviceManager.isTransferActive = isUploading || downloadManager.isBatchDownloading
+                // Refresh files and storage only when the batch finishes (transitions to false)
+                if !isUploading && uploadManager.batchTotal > 0 {
+                    Task {
+                        ADBManager.invalidateFolderSizeCache()
+                        await loadFiles()
+                        await deviceManager.fetchStorageInfo()
+                    }
+                }
+            }
+            .onChange(of: downloadManager.isBatchDownloading) { isDownloading in
+                deviceManager.isTransferActive = isDownloading || uploadManager.isBatchUploading
+                if !isDownloading && downloadManager.batchTotal > 0 {
+                    Task {
+                        await loadFiles()
+                        await deviceManager.fetchStorageInfo()
+                    }
+                }
             }
             .onChange(of: diagnosticsControl.isEnabled) { enabled in
                 deviceManager.setDiagnosticsEnabled(enabled)
@@ -660,6 +685,7 @@ struct ContentView: View {
                             metadataTotalCount: metadataTotalCount,
                             isLoadingMoreFiles: isLoadingMoreFiles
                         )
+                        .equatable()
                     }
                 }
 
@@ -675,7 +701,7 @@ struct ContentView: View {
                 }
             }
             .navigationTitle(deviceManager.isConnected ? "AndroidFileSync" : "")
-            .navigationSubtitle(deviceManager.statusMessage)
+            .navigationSubtitle(customSubtitle)
             .toolbar {
                 // ── Left side: New Folder + New File ─────────────────────────
                 ToolbarItemGroup(placement: .automatic) {
@@ -784,24 +810,6 @@ struct ContentView: View {
                     }
 
                 }
-
-                // ── Status: transfer count ────────────────────────────────────
-                if !downloadManager.activeDownloads.isEmpty || !uploadManager.activeUploads.isEmpty {
-                    ToolbarItem(placement: .status) {
-                        HStack(spacing: 6) {
-                            if !downloadManager.activeDownloads.isEmpty {
-                                Label("\(downloadManager.activeDownloads.count)", systemImage: "arrow.down")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundColor(.blue)
-                            }
-                            if !uploadManager.activeUploads.isEmpty {
-                                Label("\(uploadManager.activeUploads.count)", systemImage: "arrow.up")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundColor(.green)
-                            }
-                        }
-                    }
-                }
             }
             .searchable(text: $searchQuery, placement: .toolbar, prompt: "Search files...")
             }
@@ -809,6 +817,29 @@ struct ContentView: View {
     }
 
         // MARK: - Computed Properties for Alerts
+    
+    private var customSubtitle: String {
+        var status = deviceManager.statusMessage
+        
+        if deviceManager.isConnected {
+            let downloadsCount = downloadManager.activeDownloads.count
+            let uploadsCount = uploadManager.activeUploads.count
+            
+            var transfers: [String] = []
+            if downloadsCount > 0 {
+                transfers.append("\(downloadsCount) download\(downloadsCount > 1 ? "s" : "")")
+            }
+            if uploadsCount > 0 {
+                transfers.append("\(uploadsCount) upload\(uploadsCount > 1 ? "s" : "")")
+            }
+            
+            if !transfers.isEmpty {
+                status += " • " + transfers.joined(separator: ", ")
+            }
+        }
+        
+        return status
+    }
     
     private var pasteConflictTitle: String {
         let count = fileActionManager.pasteConflicts.count
@@ -1088,7 +1119,13 @@ struct ContentView: View {
             }
         } catch {
             AppLogger.log("❌ [loadFiles] listFiles threw error: \(error.localizedDescription)", level: .error)
-            newFiles = []
+            // Restore loading state and keep the existing file list intact instead of clearing it
+            await MainActor.run {
+                isLoading = false
+                isLoadingMoreFiles = false
+                downloadManager.resumeUpdates()
+            }
+            return
         }
         AppLogger.log("📂 [loadFiles] Finished fetching files. Count: \(newFiles.count)\(receivedProgressiveUpdates ? " (progressive mode)" : "")")
         
@@ -1423,15 +1460,19 @@ struct ContentView: View {
         let manager = self.uploadManager
         let path = self.currentPath
 
+        // Show immediate feedback so the user doesn't stare at a blank screen
+        Task { @MainActor in
+            manager.isPreparing = true
+            manager.preparingMessage = "Preparing upload…"
+        }
+
         Task {
-            // ── Build upload list ───────────────────────────────────────────
             var allItems: [(localPath: String, fileName: String, fileSize: UInt64, devicePath: String)] = []
             var remoteDirsToCreate: Set<String> = []
 
             for url in urls {
                 var isDir: ObjCBool = false
                 guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
-                    print("⚠️ File does not exist: \(url.lastPathComponent)")
                     continue
                 }
 
@@ -1462,19 +1503,19 @@ struct ContentView: View {
                 } else {
                     guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
                           let size = attrs[.size] as? UInt64 else {
-                        print("⚠️ Could not get file size for: \(url.lastPathComponent)")
                         continue
                     }
                     allItems.append((localPath: url.path, fileName: url.lastPathComponent, fileSize: size, devicePath: path))
                 }
             }
 
-            guard !allItems.isEmpty else { return }
+            guard !allItems.isEmpty else {
+                await MainActor.run { manager.isPreparing = false }
+                return
+            }
 
-            // ── Conflict check: probe device in parallel ────────────────────
             let adb = ADBManager.getADBPath()
 
-            // Build full device paths for each item
             func fullDevicePath(_ item: (localPath: String, fileName: String, fileSize: UInt64, devicePath: String)) -> String {
                 let (safeName, _) = FileNameHelper.getSafeFilename(item.fileName)
                 return item.devicePath.hasSuffix("/")
@@ -1482,33 +1523,41 @@ struct ContentView: View {
                     : item.devicePath + "/" + safeName
             }
 
-            // Run all existence checks concurrently
+            await MainActor.run {
+                manager.preparingMessage = "Checking for conflicts (\(allItems.count) files)…"
+            }
+
             var conflictingPaths = Set<String>()
-            await withTaskGroup(of: (String, Bool).self) { group in
-                for item in allItems {
-                    let devPath = fullDevicePath(item)
-                    let escaped = devPath.replacingOccurrences(of: "'", with: "'\\''")
-                    group.addTask {
-                        let (_, out, _) = await Shell.runAsync(
-                            adb,
-                            args: ADBManager.deviceArgs(["shell", "[ -e '\(escaped)' ] && echo 1 || echo 0"])
-                        )
-                        let exists = out.trimmingCharacters(in: .whitespacesAndNewlines) == "1"
-                        return (devPath, exists)
+            let allDevicePaths = allItems.map { fullDevicePath($0) }
+            let chunkSize = 50
+            for chunkStart in stride(from: 0, to: allDevicePaths.count, by: chunkSize) {
+                let chunkEnd = min(chunkStart + chunkSize, allDevicePaths.count)
+                let chunk = Array(allDevicePaths[chunkStart..<chunkEnd])
+                
+                let checks = chunk.map { path in
+                    let escaped = path.replacingOccurrences(of: "'", with: "'\\''")
+                    return "[ -e '\(escaped)' ] && echo '\(escaped)'"
+                }.joined(separator: "; ")
+                
+                let (code, out, _) = await Shell.runAsync(
+                    adb,
+                    args: ADBManager.deviceArgs(["shell", checks])
+                )
+                if code == 0 {
+                    for line in out.split(separator: "\n") {
+                        let path = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !path.isEmpty { conflictingPaths.insert(path) }
                     }
-                }
-                for await (devPath, exists) in group {
-                    if exists { conflictingPaths.insert(devPath) }
                 }
             }
 
-            // ── If conflicts exist, ask user ────────────────────────────────
+            await MainActor.run { manager.isPreparing = false }
+
             if !conflictingPaths.isEmpty {
                 let conflictNames = allItems
                     .filter { conflictingPaths.contains(fullDevicePath($0)) }
                     .map { $0.fileName }
 
-                // Brief pause so macOS finishes the drag-and-drop animation
                 try? await Task.sleep(nanoseconds: 350_000_000)
 
                 let choice = await MainActor.run {
@@ -1516,27 +1565,51 @@ struct ContentView: View {
                 }
 
                 switch choice {
-                case .replace: break   // keep allItems as-is, overwrite
-                case .skip:            // remove conflicting items
+                case .replace: break
+                case .skip:
                     allItems = allItems.filter { !conflictingPaths.contains(fullDevicePath($0)) }
-                case .cancel: return   // abort entirely
+                case .cancel: return
+                }
+            }
+
+            guard !allItems.isEmpty else { return }
+
+            let totalBytes = allItems.reduce(UInt64(0)) { $0 + $1.fileSize }
+            
+            // Storage Capacity Pre-flight Check
+            let rootPath = path.hasPrefix("/storage/emulated") ? "/storage/emulated/0" : (path.components(separatedBy: "/").dropLast(path.components(separatedBy: "/").count - 3).joined(separator: "/"))
+            let resolvedStorageRoot = rootPath.isEmpty ? "/storage/emulated/0" : rootPath
+            
+            if let stats = await MainActor.run(body: { self.deviceManager.storageStats[resolvedStorageRoot] }) {
+                let freeBytes = UInt64(stats.totalBytes - stats.usedBytes)
+                if totalBytes > freeBytes {
+                    let requiredSize = formatBytes(totalBytes)
+                    let availableSize = formatBytes(freeBytes)
+                    let deficit = formatBytes(totalBytes - freeBytes)
+                    
+                    // Let macOS finish drag-and-drop cleanup before blocking with modal
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    
+                    await MainActor.run {
+                        let alert = NSAlert()
+                        alert.messageText = "Not Enough Storage"
+                        alert.informativeText = "You are trying to upload \(requiredSize), but only \(availableSize) is available on the device.\n\nPlease free up at least \(deficit) before uploading."
+                        alert.alertStyle = .critical
+                        alert.addButton(withTitle: "OK")
+                        alert.runModal()
+                    }
+                    return
                 }
             }
 
 
-            guard !allItems.isEmpty else { return }
-
-            // ── Create remote dirs then upload ──────────────────────────────
             if !remoteDirsToCreate.isEmpty {
                 await ADBManager.batchCreateFolders(paths: Array(remoteDirsToCreate))
+                // Refresh list immediately so the newly created folders appear on screen
+                await loadFiles()
             }
 
-            await manager.uploadFilesToPaths(files: allItems)
-
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
-            ADBManager.invalidateFolderSizeCache()
-            await loadFiles()
-            await deviceManager.fetchStorageInfo()
+            manager.enqueueFiles(files: allItems)
         }
     }
 
