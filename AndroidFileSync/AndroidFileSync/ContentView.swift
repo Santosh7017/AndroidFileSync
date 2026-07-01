@@ -90,11 +90,7 @@ struct ContentView: View {
     @State private var showTrashConfirmation = false
     @State private var trashConfirmCount = 0
 
-    // Diagnostic log upload state
-    @ObservedObject private var logUploader = LogUploader.shared
-    @State private var showDiagnosticUploadAlert = false
-    @State private var showUploadSuccessToast = false
-    @State private var pendingDiagnosticUpload = false
+
     @State private var showReportIssuePopover = false
 
     // App browser state
@@ -357,9 +353,6 @@ struct ContentView: View {
                     _folderSizesBuffer = [:]
                     isLoading = false
                     isLoadingMetadata = false
-                    pendingDiagnosticUpload = false
-                    showDiagnosticUploadAlert = false
-                    showUploadSuccessToast = false
                 } else {
                     // Reconnected! Reload files to restore list from empty state
                     Task {
@@ -422,18 +415,6 @@ struct ContentView: View {
             }
             .onChange(of: diagnosticsControl.isEnabled) { enabled in
                 deviceManager.setDiagnosticsEnabled(enabled)
-                if !enabled {
-                    pendingDiagnosticUpload = false
-                    showDiagnosticUploadAlert = false
-                    showUploadSuccessToast = false
-                }
-            }
-            .onChange(of: deviceManager.diagnosticsComplete) { complete in
-                guard diagnosticsControl.isEnabled, complete else { return }
-                if pendingDiagnosticUpload {
-                    pendingDiagnosticUpload = false
-                    maybeTriggerDiagnosticUpload()
-                }
             }
             // ── displayedFiles sync ─────────────────────────────────
             // Rebuild the sorted/filtered list when data or search changes.
@@ -444,26 +425,7 @@ struct ContentView: View {
                     updateDisplayedFiles()
                 }
             }
-            .alert("Camera folder issue logs", isPresented: $showDiagnosticUploadAlert) {
-                Button("Yes, Upload") {
-                    guard diagnosticsControl.isEnabled else { return }
-                    logUploader.uploadLogs()
-                }
-                Button("No", role: .cancel) {
-                    UserDefaults.standard.set(true, forKey: "diagnosticUploadDeclined")
-                }
-            } message: {
-                Text("Share your diagnostic logs to help fix this issue.\n\nNo private data is uploaded — only system diagnostic logs. You can check them at:\nhttps://github.com/Santosh7017/AndroidFileSync/issues/11")
-            }
-            .onChange(of: logUploader.uploadSuccess) { success in
-                guard diagnosticsControl.isEnabled else { return }
-                if success {
-                    showUploadSuccessToast = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                        showUploadSuccessToast = false
-                    }
-                }
-            }
+
     }
 
     // Level 3: layout + input modifiers
@@ -535,29 +497,7 @@ struct ContentView: View {
                 .zIndex(100)
             }
         }
-        .overlay(alignment: .top) {
-            if showUploadSuccessToast {
-                HStack(spacing: 8) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.white)
-                        .font(.system(size: 14, weight: .semibold))
-                    Text("Report uploaded! Thank you.")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.white)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(
-                    Capsule()
-                        .fill(Color.green)
-                        .shadow(color: .black.opacity(0.2), radius: 6, y: 3)
-                )
-                .padding(.top, 8)
-                .transition(.move(edge: .top).combined(with: .opacity))
-                .animation(.spring(response: 0.4, dampingFraction: 0.8), value: showUploadSuccessToast)
-                .zIndex(101)
-            }
-        }
+
         .frame(minWidth: 800, minHeight: 600)
         .onAppear {
             updateChecker.checkForUpdates()
@@ -1187,9 +1127,7 @@ struct ContentView: View {
             AppLogger.log("📂 [loadFiles] ✅ UI updated with \(newFiles.count) files for path: \(pathSnapshot)")
         }
 
-        if DiagnosticsControl.isEnabled {
-            checkDiagnosticUploadAfterLoad(path: pathSnapshot)
-        }
+
         
         // Now that files are loaded, fetch SD card and storage info in the background.
         // Doing this here prevents ADB contention during the critical file loading phase!
@@ -1403,39 +1341,7 @@ struct ContentView: View {
     
     // MARK: - Diagnostic Upload Helpers
 
-    private func isCameraPath(_ path: String) -> Bool {
-        path.uppercased().contains("/DCIM/CAMERA")
-    }
 
-    private func checkDiagnosticUploadAfterLoad(path: String) {
-        guard DiagnosticsControl.isEnabled else { return }
-        guard LogUploader.isBetaBuild else { return }
-        guard !logUploader.hasUploadedThisSession else { return }
-        guard isCameraPath(path) else {
-            pendingDiagnosticUpload = false
-            return
-        }
-
-        if deviceManager.diagnosticsComplete {
-            maybeTriggerDiagnosticUpload()
-        } else {
-            pendingDiagnosticUpload = true
-            AppLogger.log("📋 [DiagUpload] In Camera path but diagnostics not yet complete, waiting...")
-        }
-    }
-
-    private func maybeTriggerDiagnosticUpload() {
-        guard DiagnosticsControl.isEnabled else { return }
-        guard LogUploader.isBetaBuild else { return }
-        guard !logUploader.hasUploadedThisSession else { return }
-        guard !UserDefaults.standard.bool(forKey: "diagnosticUploadDeclined") else { return }
-        guard isCameraPath(currentPath) else { return }
-        guard deviceManager.diagnosticsComplete else { return }
-        guard !showDiagnosticUploadAlert else { return }
-
-        AppLogger.log("📋 [DiagUpload] All conditions met — showing upload prompt")
-        showDiagnosticUploadAlert = true
-    }
 
     // MARK: - Directory Cache Helpers
     

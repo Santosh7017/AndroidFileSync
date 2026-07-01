@@ -37,7 +37,6 @@
 				Managers/DownloadManager.swift,
 				Managers/FileActionManager.swift,
 				Managers/FilePreviewManager.swift,
-				Managers/LogUploader.swift,
 				Managers/SidebarManager.swift,
 				Managers/SupportPromptManager.swift,
 				Managers/UpdateChecker.swift,
