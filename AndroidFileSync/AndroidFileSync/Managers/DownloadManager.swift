@@ -537,6 +537,8 @@ class DownloadManager: ObservableObject {
         await MainActor.run {
             isBatchDownloading = false
             currentFolderName = ""
+            activeDownloads = internalActiveDownloads
+            stopTimerIfNeeded()
         }
         
         // End sleep prevention now that all downloads are done

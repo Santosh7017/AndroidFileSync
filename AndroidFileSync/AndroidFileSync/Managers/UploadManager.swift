@@ -619,6 +619,7 @@ class UploadManager: ObservableObject {
         await MainActor.run {
             self.flushUIUpdates()
             self.isBatchUploading = false
+            self.stopTimerIfNeeded()
         }
         
         endPreventingSleep()
