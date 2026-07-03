@@ -729,6 +729,9 @@ struct ContentView: View {
             // Rebuild the sorted/filtered list when data or search changes.
             .onChange(of: files) { _ in updateDisplayedFiles() }
             .onChange(of: searchQuery) { _ in updateDisplayedFiles() }
+            .onChange(of: activeAppFilter) { _ in
+                searchQuery = ""
+            }
             .onChange(of: folderSizes) { _ in
                 if sortOption == .size {
                     updateDisplayedFiles()
@@ -880,7 +883,7 @@ struct ContentView: View {
                 ZStack {
                 if let appFilter = activeAppFilter {
                     // ── App Browser ───────────────────────────────────────────
-                    AppBrowserView(appManager: appManager, initialFilter: appFilter, deviceName: deviceManager.deviceName)
+                    AppBrowserView(appManager: appManager, initialFilter: appFilter, deviceName: deviceManager.deviceName, searchQuery: $searchQuery)
                         .transition(.opacity)
                 } else {
                     // ── File Browser ──────────────────────────────────────────
@@ -1064,7 +1067,7 @@ struct ContentView: View {
 
                 }
             }
-            .searchable(text: $searchQuery, placement: .toolbar, prompt: "Search files...")
+            .searchable(text: $searchQuery, placement: .toolbar, prompt: activeAppFilter != nil ? "Search apps..." : "Search files...")
             }
         }
     }
