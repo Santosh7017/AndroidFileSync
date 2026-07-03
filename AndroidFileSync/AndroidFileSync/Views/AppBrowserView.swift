@@ -345,7 +345,11 @@ struct AppBrowserView: View {
     private func pickAndInstallAPK() async {
         let panel = NSOpenPanel()
         panel.title = "Select APK to Install"
-        panel.allowedContentTypes = [UTType(filenameExtension: "apk") ?? .data]
+        let apkType = UTType(tag: "apk", tagClass: .filenameExtension, conformingTo: .data) ?? .data
+        let xapkType = UTType(tag: "xapk", tagClass: .filenameExtension, conformingTo: .data) ?? .data
+        let apksType = UTType(tag: "apks", tagClass: .filenameExtension, conformingTo: .data) ?? .data
+        let apkmType = UTType(tag: "apkm", tagClass: .filenameExtension, conformingTo: .data) ?? .data
+        panel.allowedContentTypes = [apkType, xapkType, apksType, apkmType, .zip]
         panel.allowsMultipleSelection = false
 
         guard await panel.beginSheetModal(for: NSApp.keyWindow ?? NSWindow()) == .OK,
@@ -378,6 +382,13 @@ struct AppBrowserView: View {
                     Text("To successfully install APKs, ensure USB Debugging and Install via USB (if available) are enabled in your device's Developer Options.")
                         .font(.body)
                         .foregroundColor(.secondary)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
+                    
+                    Text("Additionally, a confirmation popup will appear on your device screen. You must tap 'Install' or 'Accept' on the device to complete the installation.")
+                        .font(.body)
+                        .foregroundColor(.primary)
+                        .fontWeight(.semibold)
                         .lineLimit(nil)
                         .fixedSize(horizontal: false, vertical: true)
                     

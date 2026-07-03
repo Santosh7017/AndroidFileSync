@@ -825,7 +825,21 @@ struct ContentView: View {
                 }
             }
             group.notify(queue: .main) {
-                if !fileURLs.isEmpty { handleUpload(urls: fileURLs) }
+                if !fileURLs.isEmpty {
+                    if let filter = activeAppFilter {
+                        // User is in the App Manager!
+                        // Install any dropped app package formats
+                        for url in fileURLs {
+                            let ext = url.pathExtension.lowercased()
+                            if ext == "apk" || ext == "xapk" || ext == "apks" || ext == "zip" || ext == "apkm" {
+                                appManager.queueInstall(url: url, currentFilter: filter)
+                            }
+                        }
+                    } else {
+                        // User is in the File Browser!
+                        handleUpload(urls: fileURLs)
+                    }
+                }
             }
             return true
         }
