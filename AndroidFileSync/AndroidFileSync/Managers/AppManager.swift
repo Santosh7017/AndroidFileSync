@@ -810,6 +810,14 @@ class AppManager: ObservableObject {
 
     /// Install an APK from the Mac onto the device.
     func installAPK(from url: URL) async -> (Bool, String) {
+        let ext = url.pathExtension.lowercased()
+        if ext == "apkm" {
+            return (false, "APKMirror (.apkm) files are proprietary and encrypted by APKMirror. Please download the standard APK or XAPK format instead.")
+        }
+        if ext == "xapk" || ext == "apks" || ext == "zip" {
+            return await installSplitAPK(from: url)
+        }
+        
         let adbPath = ADBManager.getADBPath()
         let (_, output, err) = await Shell.runAsync(
             adbPath,
@@ -818,6 +826,103 @@ class AppManager: ObservableObject {
         let success = output.contains("Success")
         let message = success ? "Installed successfully." : (err.isEmpty ? output : err)
         return (success, message)
+    }
+    
+    /// Extract and install XAPK, APKS, or ZIP Split APK packages.
+    func installSplitAPK(from url: URL) async -> (Bool, String) {
+        let fileManager = FileManager.default
+        let tempDirName = "apk_extract_\(UUID().uuidString)"
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(tempDirName)
+        
+        do {
+            try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true, attributes: nil)
+        } catch {
+            return (false, "Failed to create temporary directory for extraction.")
+        }
+        
+        defer {
+            // Ensure cleanup
+            try? fileManager.removeItem(at: tempDir)
+        }
+        
+        // Extract archive using macOS native unzip
+        let unzipPath = "/usr/bin/unzip"
+        _ = await Shell.runAsync(
+            unzipPath,
+            args: ["-o", url.path, "-d", tempDir.path]
+        )
+        
+        // Find all extracted .apk files recursively
+        var apkPaths: [String] = []
+        if let enumerator = fileManager.enumerator(at: tempDir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
+            for case let fileURL as URL in enumerator {
+                if fileURL.pathExtension.lowercased() == "apk" {
+                    apkPaths.append(fileURL.path)
+                }
+            }
+        }
+        
+        guard !apkPaths.isEmpty else {
+            return (false, "No APK files found inside the package.")
+        }
+        
+        let adbPath = ADBManager.getADBPath()
+        let installOutput: String
+        let installErr: String
+        
+        if apkPaths.count == 1 {
+            // Single APK inside archive
+            let (_, out, err) = await Shell.runAsync(
+                adbPath,
+                args: ADBManager.deviceArgs(["install", "-r", apkPaths[0]])
+            )
+            installOutput = out
+            installErr = err
+        } else {
+            // Multiple split APKs
+            let (_, out, err) = await Shell.runAsync(
+                adbPath,
+                args: ADBManager.deviceArgs(["install-multiple", "-r"] + apkPaths)
+            )
+            installOutput = out
+            installErr = err
+        }
+        
+        let success = installOutput.contains("Success")
+        if !success {
+            let message = installErr.isEmpty ? installOutput : installErr
+            return (false, "Installation failed: \(message)")
+        }
+        
+        // Look for OBB folders (Android/obb/<package_name>/*) and copy them to device
+        let obbSearchPath = tempDir.appendingPathComponent("Android/obb")
+        if fileManager.fileExists(atPath: obbSearchPath.path) {
+            if let subdirs = try? fileManager.contentsOfDirectory(at: obbSearchPath, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+                for subdir in subdirs {
+                    let packageName = subdir.lastPathComponent
+                    let deviceObbDir = "/storage/emulated/0/Android/obb/\(packageName)"
+                    
+                    // Create OBB directory on device
+                    _ = await Shell.runAsync(
+                        adbPath,
+                        args: ADBManager.deviceArgs(["shell", "mkdir", "-p", deviceObbDir])
+                    )
+                    
+                    // Push each OBB file in the subdirectory to device
+                    if let contents = try? fileManager.contentsOfDirectory(at: subdir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+                        for file in contents {
+                            let deviceFile = "\(deviceObbDir)/\(file.lastPathComponent)"
+                            _ = await Shell.runAsync(
+                                adbPath,
+                                args: ADBManager.deviceArgs(["push", file.path, deviceFile])
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        
+        return (true, "Installed successfully.")
     }
 
     // MARK: - Clear App Data
