@@ -41,10 +41,28 @@ class AppManager: ObservableObject {
     init() {
         operationEngine.setGroupCompleteHandler { [weak self] groupId in
             guard let self = self else { return }
-            let filter = self.lastFilter
-            await self.fetchApps(filter: filter)
             
-            if let group = self.operationEngine.groups.first(where: { $0.id == groupId }) {
+            let group = self.operationEngine.groups.first(where: { $0.id == groupId })
+            let needsReload: Bool
+            if let group = group {
+                needsReload = group.operations.contains { op in
+                    switch op.actionType {
+                    case .uninstall, .disable, .enable, .clearData, .clearCache, .install:
+                        return true
+                    case .backup, .forceStop:
+                        return false
+                    }
+                }
+            } else {
+                needsReload = true
+            }
+            
+            if needsReload {
+                let filter = self.lastFilter
+                await self.fetchApps(filter: filter)
+            }
+            
+            if let group = group {
                 if group.totalCount > 1 {
                     self.globalResultMessage = "Batch operation completed: processed \(group.completedCount) apps."
                 } else if let firstOp = group.operations.first, case .completed(_, let msg) = firstOp.state {
@@ -438,11 +456,17 @@ class AppManager: ObservableObject {
         async let allUFetch = Shell.runAsync(adbPath, args: ADBManager.deviceArgs(["shell", "pm", "list", "packages", "-u"])) // everything
         async let disFetch  = Shell.runAsync(adbPath, args: ADBManager.deviceArgs(["shell", "pm", "list", "packages", "-d"])) // explicitly disabled
 
-        let (_, mainOut, _) = await mainFetch
+        let (mainCode, mainOut, mainErr) = await mainFetch
         let (_, sysOut,  _) = await sysFetch
         let (_, allOut,  _) = await allFetch
         let (_, allUOut, _) = await allUFetch
         let (_, disOut,  _) = await disFetch
+
+        if mainCode != 0 {
+            let errorMsg = mainErr.trimmingCharacters(in: .whitespacesAndNewlines)
+            await setError(errorMsg.isEmpty ? "Failed to retrieve package list from device." : errorMsg)
+            return
+        }
 
         let systemPackages = parsePackageList(sysOut)
         let installedPackages = parsePackageList(allOut)
@@ -457,6 +481,8 @@ class AppManager: ObservableObject {
 
         if filter == .disabled {
             packageNames = disabledPackages
+        } else if filter == .system || filter == .user {
+            packageNames.subtract(disabledPackages)
         }
 
         guard !packageNames.isEmpty else {
@@ -695,12 +721,38 @@ class AppManager: ObservableObject {
 
     func enableApp(package: String) async -> (Bool, String) {
         let adbPath = ADBManager.getADBPath()
-        let (_, output, _) = await Shell.runAsync(
+        
+        // 1. Try enabling via pm enable (for packages disabled via pm disable/disable-user)
+        let (_, enableOut, _) = await Shell.runAsync(
+            adbPath,
+            args: ADBManager.deviceArgs(["shell", "pm", "enable", package])
+        )
+        
+        let enableSuccess = enableOut.lowercased().contains("new state") ||
+                            enableOut.lowercased().contains("enabled")
+        
+        if enableSuccess {
+            return (true, "App enabled.")
+        }
+        
+        // 2. Fallback: Try restoring via pm install-existing (for packages uninstalled via --user 0)
+        let (_, installOut, _) = await Shell.runAsync(
             adbPath,
             args: ADBManager.deviceArgs(["shell", "pm", "install-existing", package])
         )
-        let success = output.lowercased().contains("success") || output.lowercased().contains("installed")
-        return (success, success ? "App enabled." : output.trimmingCharacters(in: .whitespacesAndNewlines))
+        
+        let installSuccess = installOut.lowercased().contains("success") ||
+                             installOut.lowercased().contains("installed")
+        
+        if installSuccess {
+            return (true, "App enabled.")
+        }
+        
+        let cleanEnable = enableOut.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanInstall = installOut.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalMessage = "Failed to enable app:\n\(cleanEnable)\n\(cleanInstall)"
+        
+        return (false, finalMessage)
     }
 
     // MARK: - APK Backup
