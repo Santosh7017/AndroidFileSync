@@ -475,12 +475,33 @@ class DownloadManager: ObservableObject {
     ) async {
         guard !files.isEmpty else { return }
         
+        var itemsToDownload = files
+        
+        // Native Mac check: identify files that already exist on the local destination
+        let conflictingItems = files.filter { FileManager.default.fileExists(atPath: $0.localPath) }
+        if !conflictingItems.isEmpty {
+            let conflictNames = conflictingItems.map { $0.fileName }
+            let choice = await MainActor.run {
+                ConflictDialog.show(conflictNames: conflictNames, totalCount: files.count)
+            }
+            switch choice {
+            case .replace:
+                break // Proceed with all files (will overwrite)
+            case .skip:
+                itemsToDownload = files.filter { !FileManager.default.fileExists(atPath: $0.localPath) }
+            case .cancel:
+                return
+            }
+        }
+        
+        guard !itemsToDownload.isEmpty else { return }
+        
         // Initialize batch tracking
         await MainActor.run {
             if isBatchDownloading {
-                batchTotal += files.count
+                batchTotal += itemsToDownload.count
             } else {
-                batchTotal = files.count
+                batchTotal = itemsToDownload.count
                 batchCompleted = 0
             }
             isBatchDownloading = true
@@ -489,24 +510,24 @@ class DownloadManager: ObservableObject {
         // Prevent App Nap / system sleep for the entire batch
         beginPreventingSleep()
         
-        print("📥 Starting parallel download of \(files.count) files")
+        print("📥 Starting parallel download of \(itemsToDownload.count) files")
         isBatchCancelled = false
         
         await withTaskGroup(of: Void.self) { group in
             var runningCount = 0
             var fileIndex = 0
             
-            while fileIndex < files.count && !isBatchCancelled {
+            while fileIndex < itemsToDownload.count && !isBatchCancelled {
                 // Re-read limit each iteration so live slider changes take effect
                 let limit = fixedMax ?? self.maxConcurrent
                 
                 // Fill up to limit slots
-                while runningCount < limit && fileIndex < files.count {
-                    let file = files[fileIndex]
+                while runningCount < limit && fileIndex < itemsToDownload.count {
+                    let file = itemsToDownload[fileIndex]
                     fileIndex += 1
                     runningCount += 1
                     
-                    print("📥 [\(fileIndex)/\(files.count)] Starting: \(file.fileName)")
+                    print("📥 [\(fileIndex)/\(itemsToDownload.count)] Starting: \(file.fileName)")
                     
                     group.addTask {
                         do {
@@ -525,7 +546,7 @@ class DownloadManager: ObservableObject {
                 }
                 
                 // Wait for ONE slot to free before looping
-                if runningCount >= limit && fileIndex < files.count {
+                if runningCount >= limit && fileIndex < itemsToDownload.count {
                     await group.next()
                     runningCount -= 1
                 }
@@ -544,7 +565,7 @@ class DownloadManager: ObservableObject {
         // End sleep prevention now that all downloads are done
         endPreventingSleep()
         
-        print("✅ All \(files.count) downloads completed")
+        print("✅ All \(itemsToDownload.count) downloads completed")
     }
     
     // MARK: - Folder Download

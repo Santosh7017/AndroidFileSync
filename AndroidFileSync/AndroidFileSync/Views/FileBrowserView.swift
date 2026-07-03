@@ -34,6 +34,12 @@ struct FileBrowserView: View, Equatable {
     /// Called when the user chooses "Delete Permanently" from the selection toolbar
     var onPermanentDelete: (() -> Void)? = nil
     
+    // Clipboard support
+    var clipboardCount: Int = 0
+    var clipboardOperation: FileActionManager.ClipboardOperation = .none
+    var onPaste: (() -> Void)? = nil
+    var onClearClipboard: (() -> Void)? = nil
+    
     // Sorting support
     var sortOption: ActionToolbar.SortOption = .name
     var sortAscending: Bool = true
@@ -73,7 +79,9 @@ struct FileBrowserView: View, Equatable {
         lhs.folderSizes.count == rhs.folderSizes.count &&
         lhs.isLoadingMetadata == rhs.isLoadingMetadata &&
         lhs.metadataLoadedCount == rhs.metadataLoadedCount &&
-        lhs.isLoadingMoreFiles == rhs.isLoadingMoreFiles
+        lhs.isLoadingMoreFiles == rhs.isLoadingMoreFiles &&
+        lhs.clipboardCount == rhs.clipboardCount &&
+        lhs.clipboardOperation == rhs.clipboardOperation
     }
     
     // Guard against re-entrant sort loop:
@@ -196,7 +204,10 @@ struct FileBrowserView: View, Equatable {
                 .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                 .clipped()
 
-            inlineActionStatus
+            HStack(spacing: 8) {
+                clipboardStatus
+                inlineActionStatus
+            }
             
             // Item count
             if isLoading {
@@ -376,6 +387,50 @@ struct FileBrowserView: View, Equatable {
         .padding(.trailing, isPerformingAction ? 10 : 0)
     }
     
+    private var clipboardStatus: some View {
+        HStack(spacing: 4) {
+            if clipboardCount > 0 && !isPerformingAction {
+                HStack(spacing: 6) {
+                    Image(systemName: clipboardOperation == .cut ? "scissors" : "doc.on.clipboard")
+                        .font(.system(size: 10))
+                        .foregroundColor(.blue)
+                    
+                    Text("\(clipboardCount) ready")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.blue.opacity(0.85))
+                    
+                    Button {
+                        onPaste?()
+                    } label: {
+                        HStack(spacing: 2) {
+                            Image(systemName: "doc.on.doc")
+                                .font(.system(size: 9))
+                            Text("Paste")
+                                .font(.system(size: 11, weight: .bold))
+                        }
+                        .foregroundColor(.blue)
+                    }
+                    .buttonStyle(.borderless)
+                    
+                    Button {
+                        onClearClipboard?()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary.opacity(0.7))
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.vertical, 3)
+                .padding(.horizontal, 8)
+                .background(
+                    Capsule()
+                        .fill(Color.blue.opacity(0.08))
+                )
+            }
+        }
+    }
+    
     @ViewBuilder
     private var fileListOrEmptyState: some View {
         ZStack {
@@ -395,13 +450,11 @@ struct FileBrowserView: View, Equatable {
                 var urls: [URL] = []
                 for provider in providers {
                     do {
-                        // Try loading as Data first (most common case)
-                        if let data = try await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) as? Data,
-                           let url = URL(dataRepresentation: data, relativeTo: nil) {
+                        let item = try await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier)
+                        if let url = item as? URL {
                             urls.append(url)
-                        }
-                        // Fallback: try loading as URL directly
-                        else if let url = try await provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier) as? URL {
+                        } else if let data = item as? Data,
+                                  let url = URL(dataRepresentation: data, relativeTo: nil) {
                             urls.append(url)
                         }
                     } catch {

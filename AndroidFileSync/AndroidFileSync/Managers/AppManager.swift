@@ -16,11 +16,80 @@ class AppManager: ObservableObject {
     @Published var isLoading = false
     @Published var errorMessage: String? = nil
     @Published var statusMessage: String = ""
-    @Published var isGlobalOperationInProgress = false
-    @Published var globalOperationMessage: String = ""
-    @Published var globalOperationShowsSpinner = false
-    @Published var globalOperationIsError = false
     @Published var globalResultMessage: String? = nil
+
+    // MARK: - Operation Engine and State
+    @Published var operationEngine = OperationEngine()
+    @Published var lastFilter: AppFilter = .all
+
+    // MARK: - Centralized Operation Dialogs & State
+    @Published var alertMessage = ""
+    @Published var showAlert = false
+    
+    @Published var showBatchConfirm = false
+    @Published var batchAction: AppBrowserView.BatchAction = .uninstall
+    @Published var batchPackages: [String] = []
+    
+    @Published var showActionConfirm = false
+    @Published var pendingAction: AppBrowserView.AppAction? = nil
+    @Published var pendingApp: AppInfo? = nil
+
+    init() {
+        operationEngine.setGroupCompleteHandler { [weak self] groupId in
+            guard let self = self else { return }
+            let filter = self.lastFilter
+            await self.fetchApps(filter: filter)
+            
+            if let group = self.operationEngine.groups.first(where: { $0.id == groupId }) {
+                if group.totalCount > 1 {
+                    self.globalResultMessage = "Batch operation completed: processed \(group.completedCount) apps."
+                } else if let firstOp = group.operations.first, case .completed(_, let msg) = firstOp.state {
+                    self.globalResultMessage = msg
+                }
+            }
+        }
+    }
+
+    enum AppOperationType {
+        case uninstall
+        case disable
+        case enable
+        case clearData
+        case clearCache
+        case backup(destinationFolder: URL)
+        case forceStop
+        case install(URL)
+        
+        var actionVerb: String {
+            switch self {
+            case .uninstall:  return "Uninstalling"
+            case .disable:    return "Disabling"
+            case .enable:     return "Enabling"
+            case .clearData:  return "Clearing data for"
+            case .clearCache: return "Clearing cache for"
+            case .backup(_):  return "Backing up"
+            case .forceStop:  return "Stopping"
+            case .install(_): return "Installing"
+            }
+        }
+        
+        var completedVerb: String {
+            switch self {
+            case .uninstall:  return "uninstalled"
+            case .disable:    return "disabled"
+            case .enable:     return "enabled"
+            case .clearData:  return "data cleared"
+            case .clearCache: return "cache cleared"
+            case .backup(_):  return "backed up"
+            case .forceStop:  return "stopped"
+            case .install(_): return "installed"
+            }
+        }
+    }
+
+    func isPackageBusy(_ package: String) -> Bool {
+        operationEngine.isPackageBusy(package)
+    }
     /// Per-package size info — populated lazily after list loads
     @Published var appSizes: [String: AppSizeInfo] = [:]
     @Published var isFetchingSizes = false
@@ -600,10 +669,7 @@ class AppManager: ObservableObject {
 
     // MARK: - Uninstall
     
-    /// Uninstall a user-installed app completely.
     func uninstall(package: String) async -> (Bool, String) {
-        beginGlobalOperation("Uninstalling app…")
-        defer { endGlobalOperation() }
         let adbPath = ADBManager.getADBPath()
         let (_, output, _) = await Shell.runAsync(
             adbPath,
@@ -613,11 +679,7 @@ class AppManager: ObservableObject {
         return (success, success ? "Uninstalled successfully." : output.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
-    /// Disable a system app for the current user (does not require root).
-    /// The app is hidden/removed from launcher but not deleted from the system partition.
     func disableSystemApp(package: String) async -> (Bool, String) {
-        beginGlobalOperation("Disabling app…")
-        defer { endGlobalOperation() }
         let adbPath = ADBManager.getADBPath()
         let (_, output, _) = await Shell.runAsync(
             adbPath,
@@ -627,48 +689,17 @@ class AppManager: ObservableObject {
         return (success, success ? "App disabled for current user." : output.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
-    /// Re-enable a previously disabled system app.
     func enableApp(package: String) async -> (Bool, String) {
-        beginGlobalOperation("Enabling app…")
-        defer { endGlobalOperation() }
         let adbPath = ADBManager.getADBPath()
         let (_, output, _) = await Shell.runAsync(
             adbPath,
             args: ADBManager.deviceArgs(["shell", "pm", "install-existing", package])
         )
         let success = output.lowercased().contains("success") || output.lowercased().contains("installed")
-        return (success, success ? "App re-enabled." : output.trimmingCharacters(in: .whitespacesAndNewlines))
+        return (success, success ? "App enabled." : output.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     // MARK: - APK Backup
-
-    private func beginGlobalOperation(_ message: String) {
-        isGlobalOperationInProgress = true
-        globalOperationMessage = message
-        globalOperationShowsSpinner = true
-        globalOperationIsError = false
-    }
-
-    private func endGlobalOperation() {
-        isGlobalOperationInProgress = false
-        globalOperationMessage = ""
-        globalOperationShowsSpinner = false
-        globalOperationIsError = false
-    }
-
-    private func showGlobalOperationCompletion(_ message: String, isError: Bool = false) {
-        isGlobalOperationInProgress = true
-        globalOperationMessage = message
-        globalOperationShowsSpinner = false
-        globalOperationIsError = isError
-
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            if !globalOperationShowsSpinner && globalOperationMessage == message {
-                endGlobalOperation()
-            }
-        }
-    }
 
     private func postCompletionNotification(title: String, body: String) {
         let center = UNUserNotificationCenter.current()
@@ -700,10 +731,7 @@ class AppManager: ObservableObject {
         }
     }
 
-    /// Extracts the APK of a given package from the device and saves it to a Mac folder.
-    func backupAPK(package: String, displayName: String) async -> (Bool, String) {
-        beginGlobalOperation("Backing up app…")
-        defer { endGlobalOperation() }
+    func backupAPK(package: String, displayName: String, destinationFolder: URL) async -> (Bool, String) {
         let adbPath = ADBManager.getADBPath()
 
         // Step 1: Get the APK path on device
@@ -711,18 +739,26 @@ class AppManager: ObservableObject {
             adbPath,
             args: ADBManager.deviceArgs(["shell", "pm", "path", package])
         )
-        // Output: "package:/data/app/....apk"
-        guard let apkDevicePath = pathOut
-            .components(separatedBy: "package:")
-            .last?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !apkDevicePath.isEmpty else {
+        
+        var apkDevicePath = ""
+        let lines = pathOut.components(separatedBy: .newlines)
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("package:") {
+                let path = String(trimmed.dropFirst("package:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !path.isEmpty {
+                    if path.hasSuffix("base.apk") || apkDevicePath.isEmpty {
+                        apkDevicePath = path
+                    }
+                }
+            }
+        }
+
+        guard !apkDevicePath.isEmpty else {
             return (false, "Could not find APK path on device.")
         }
 
-        // Step 2: Ask user where to save
-        let panel = NSSavePanel()
-        panel.title = "Save APK Backup"
+        // Step 2: Form destination file URL
         var baseName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         while baseName.lowercased().hasSuffix(".apk") {
             baseName = String(baseName.dropLast(4)).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -730,14 +766,8 @@ class AppManager: ObservableObject {
         if baseName.isEmpty {
             baseName = package.components(separatedBy: ".").last ?? "app-backup"
         }
-        // Leave extension out of the typed name. SavePanel appends .apk from allowedContentTypes.
-        panel.nameFieldStringValue = baseName
-        panel.allowedContentTypes = [.init(filenameExtension: "apk") ?? .data]
-
-        guard await panel.beginSheetModal(for: NSApp.keyWindow ?? NSWindow()) == .OK,
-              let saveURL = panel.url else {
-            return (false, "Backup cancelled.")
-        }
+        
+        let saveURL = destinationFolder.appendingPathComponent("\(baseName).apk")
 
         // Step 3: Pull the file
         let (code, pullOut, pullErr) = await Shell.runAsync(
@@ -759,7 +789,7 @@ class AppManager: ObservableObject {
             if let attrs = try? FileManager.default.attributesOfItem(atPath: saveURL.path),
                let bytes = attrs[.size] as? NSNumber {
                 let formatter = ByteCountFormatter()
-                formatter.allowedUnits = [.useKB, .useMB, .useGB]
+                formatter.allowedUnits = [.useAll]
                 formatter.countStyle = .file
                 return formatter.string(fromByteCount: bytes.int64Value)
             }
@@ -769,7 +799,6 @@ class AppManager: ObservableObject {
         let sizeSuffix = fileSizeText.isEmpty ? "" : " (\(fileSizeText))"
         let message = "Backup completed: \(saveURL.lastPathComponent)\(sizeSuffix)."
         postCompletionNotification(title: "APK backup complete", body: message)
-        globalResultMessage = message
         return (true, message)
     }
 
@@ -777,7 +806,6 @@ class AppManager: ObservableObject {
 
     /// Install an APK from the Mac onto the device.
     func installAPK(from url: URL) async -> (Bool, String) {
-        beginGlobalOperation("Installing APK…")
         let adbPath = ADBManager.getADBPath()
         let (_, output, err) = await Shell.runAsync(
             adbPath,
@@ -785,16 +813,12 @@ class AppManager: ObservableObject {
         )
         let success = output.contains("Success")
         let message = success ? "Installed successfully." : (err.isEmpty ? output : err)
-        showGlobalOperationCompletion(success ? "Installation completed" : "Installation failed", isError: !success)
         return (success, message)
     }
 
     // MARK: - Clear App Data
 
-    /// Clears all app data AND cache (equivalent to Settings → App Info → Clear Data).
     func clearData(package: String) async -> (Bool, String) {
-        beginGlobalOperation("Clearing app data…")
-        defer { endGlobalOperation() }
         let adbPath = ADBManager.getADBPath()
         let (_, output, _) = await Shell.runAsync(
             adbPath,
@@ -804,20 +828,13 @@ class AppManager: ObservableObject {
         return (success, success ? "Data & cache cleared." : output)
     }
 
-    /// Clears only the external cache directory (no root required).
-    /// Note: internal cache (/data/data/<pkg>/cache) requires root to clear individually;
-    /// use clearData() to wipe everything including internal cache.
     func clearCache(package: String) async -> (Bool, String) {
-        beginGlobalOperation("Clearing app cache…")
-        defer { endGlobalOperation() }
         let adbPath = ADBManager.getADBPath()
-        // External cache is accessible without root
         let extCache = "/storage/emulated/0/Android/data/\(package)/cache"
         let (_, out, _) = await Shell.runAsync(
             adbPath,
             args: ADBManager.deviceArgs(["shell", "rm", "-rf", extCache])
         )
-        // rm -rf has no output on success
         let hadError = out.lowercased().contains("permission denied") || out.lowercased().contains("error")
         if hadError {
             return (false, "Could not clear cache: \(out.trimmingCharacters(in: .whitespacesAndNewlines))")
@@ -828,8 +845,6 @@ class AppManager: ObservableObject {
     // MARK: - Force Stop
 
     func forceStop(package: String) async -> (Bool, String) {
-        beginGlobalOperation("Stopping app…")
-        defer { endGlobalOperation() }
         let adbPath = ADBManager.getADBPath()
         let (code, _, _) = await Shell.runAsync(
             adbPath,
@@ -864,6 +879,286 @@ class AppManager: ObservableObject {
     }
 
 
+
+    // MARK: - Queue Management and Execution
+    
+    private func submitToEngine(operations: [OperationEngine.LiveOperation], groupId: UUID, actionVerb: String) {
+        operationEngine.submit(operations: operations, groupId: groupId, actionVerb: actionVerb) { [weak self] op in
+            guard let self = self else { return (false, "Manager deallocated") }
+            switch op.actionType {
+            case .uninstall:
+                return await self.uninstall(package: op.packageName)
+            case .disable:
+                return await self.disableSystemApp(package: op.packageName)
+            case .enable:
+                return await self.enableApp(package: op.packageName)
+            case .clearData:
+                return await self.clearData(package: op.packageName)
+            case .clearCache:
+                return await self.clearCache(package: op.packageName)
+            case .backup(let destFolder):
+                return await self.backupAPK(package: op.packageName, displayName: op.displayName, destinationFolder: destFolder)
+            case .forceStop:
+                return await self.forceStop(package: op.packageName)
+            case .install(let url):
+                return await self.installAPK(from: url)
+            }
+        }
+    }
+
+    func queueSingleAction(_ action: AppBrowserView.AppAction, app: AppInfo, currentFilter: AppFilter) {
+        if action == .backupAPK {
+            return
+        }
+        
+        let type: AppOperationType
+        switch action {
+        case .uninstall:  type = .uninstall
+        case .disable:    type = .disable
+        case .enable:     type = .enable
+        case .clearData:  type = .clearData
+        case .clearCache: type = .clearCache
+        case .forceStop:  type = .forceStop
+        case .backupAPK:
+            return
+        }
+        
+        let groupId = UUID()
+        let op = OperationEngine.LiveOperation(packageName: app.packageName, displayName: app.displayName, actionType: type, groupId: groupId)
+        self.lastFilter = currentFilter
+        submitToEngine(operations: [op], groupId: groupId, actionVerb: type.actionVerb)
+    }
+    
+    func queueBatchAction(_ action: AppBrowserView.BatchAction, packages: [String], appsList: [AppInfo], currentFilter: AppFilter) {
+        let appsMap = Dictionary(uniqueKeysWithValues: appsList.map { ($0.packageName, $0) })
+        let groupId = UUID()
+        var operations: [OperationEngine.LiveOperation] = []
+        var actionVerb = "Processing"
+        
+        for pkg in packages {
+            let displayName = appsMap[pkg]?.displayName ?? AppInfo.smartLabel(from: pkg)
+            let type: AppOperationType
+            switch action {
+            case .uninstall:
+                type = .uninstall
+                actionVerb = "Uninstalling"
+            case .disable:
+                type = .disable
+                actionVerb = "Disabling"
+            case .enable:
+                type = .enable
+                actionVerb = "Enabling"
+            case .mixed:
+                if let app = appsMap[pkg] {
+                    if !app.isEnabled { type = .enable }
+                    else if app.isSystemApp { type = .disable }
+                    else { type = .uninstall }
+                } else {
+                    type = .uninstall
+                }
+                actionVerb = "Uninstalling/Disabling"
+            }
+            operations.append(OperationEngine.LiveOperation(packageName: pkg, displayName: displayName, actionType: type, groupId: groupId))
+        }
+        
+        self.lastFilter = currentFilter
+        submitToEngine(operations: operations, groupId: groupId, actionVerb: actionVerb)
+    }
+    
+    func queueInstall(url: URL, currentFilter: AppFilter) {
+        let groupId = UUID()
+        let type: AppOperationType = .install(url)
+        let op = OperationEngine.LiveOperation(packageName: url.lastPathComponent, displayName: url.lastPathComponent, actionType: type, groupId: groupId)
+        self.lastFilter = currentFilter
+        submitToEngine(operations: [op], groupId: groupId, actionVerb: type.actionVerb)
+    }
+    
+    @MainActor
+    func triggerBackup(packages: [String], currentFilter: AppFilter) async {
+        let panel = NSOpenPanel()
+        panel.title = "Select Backup Folder"
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        
+        guard await panel.beginSheetModal(for: NSApp.keyWindow ?? NSWindow()) == .OK,
+              let folderURL = panel.url else {
+            return
+        }
+        
+        let appsMap = Dictionary(uniqueKeysWithValues: apps.map { ($0.packageName, $0) })
+        let groupId = UUID()
+        var operations: [OperationEngine.LiveOperation] = []
+        for pkg in packages {
+            let displayName = appsMap[pkg]?.displayName ?? AppInfo.smartLabel(from: pkg)
+            operations.append(OperationEngine.LiveOperation(packageName: pkg, displayName: displayName, actionType: .backup(destinationFolder: folderURL), groupId: groupId))
+        }
+        
+        self.lastFilter = currentFilter
+        submitToEngine(operations: operations, groupId: groupId, actionVerb: "Backing up")
+    }
+
+    // MARK: - Centralized Dialog Helper Computed Properties and Actions
+    
+    var batchConfirmTitle: String {
+        let n = batchPackages.count
+        let item = n == 1 ? "1 app" : "\(n) apps"
+        switch batchAction {
+        case .disable:   return "Disable \(item)?"
+        case .enable:    return "Enable \(item)?"
+        case .uninstall: return "Uninstall \(item)?"
+        case .mixed:     return "Uninstall/Disable \(item)?"
+        }
+    }
+
+    var batchConfirmActionLabel: String {
+        let n = batchPackages.count
+        switch batchAction {
+        case .disable:   return n == 1 ? "Disable"   : "Disable All"
+        case .enable:    return n == 1 ? "Enable"    : "Enable All"
+        case .uninstall: return n == 1 ? "Uninstall" : "Uninstall All"
+        case .mixed:     return n == 1 ? "Remove"    : "Remove All"
+        }
+    }
+
+    var batchConfirmMessage: String {
+        switch batchAction {
+        case .disable:   return "The selected system apps will be disabled for the current user. They can be re-enabled later."
+        case .enable:    return "The selected apps will be enabled and restored for the current user."
+        case .uninstall: return "This will permanently remove the selected apps from your device."
+        case .mixed:     return "This will permanently remove the user apps and disable the system apps in your selection."
+        }
+    }
+
+    var confirmTitle: String {
+        guard let action = pendingAction, let app = pendingApp else { return "Are you sure?" }
+        switch action {
+        case .uninstall:  return "Uninstall \(app.displayName)?"
+        case .disable:    return "Disable \(app.displayName)?"
+        case .clearData:  return "Clear data for \(app.displayName)?"
+        case .clearCache: return "Clear cache for \(app.displayName)?"
+        default:          return "Are you sure?"
+        }
+    }
+
+    var confirmLabel: String {
+        guard let action = pendingAction else { return "Confirm" }
+        switch action {
+        case .uninstall:  return "Uninstall"
+        case .disable:    return "Disable App"
+        case .clearData:  return "Clear Data"
+        case .clearCache: return "Clear Cache"
+        default:          return "Confirm"
+        }
+    }
+
+    var confirmMessage: String {
+        guard let action = pendingAction, let app = pendingApp else { return "" }
+        switch action {
+        case .uninstall:  return "\"\(app.displayName)\" will be permanently removed from the device."
+        case .disable:    return "\"\(app.displayName)\" will be hidden and disabled for the current user."
+        case .clearData:  return "All data (accounts, settings, files) for \"\(app.displayName)\" will be erased. This cannot be undone."
+        case .clearCache: return "The cached data for \"\(app.displayName)\" will be cleared."
+        default:          return ""
+        }
+    }
+
+    func handleAction(_ action: AppBrowserView.AppAction, app: AppInfo, selectedPackages: Set<String>, currentFilter: AppFilter) {
+        self.lastFilter = currentFilter
+        let isPartOfSelection = selectedPackages.contains(app.packageName)
+        let isMultiSelection  = selectedPackages.count > 1
+
+        if isPartOfSelection && isMultiSelection && (action == .uninstall || action == .disable || action == .enable) {
+            let appsList = apps.filter { selectedPackages.contains($0.packageName) }
+            guard !appsList.isEmpty else { return }
+            
+            let allDisabled = appsList.allSatisfy { !$0.isEnabled }
+            let solvedAction: AppBrowserView.BatchAction
+            if allDisabled {
+                solvedAction = .enable
+            } else {
+                let systemApps = appsList.filter { $0.isSystemApp }
+                let userApps = appsList.filter { !$0.isSystemApp }
+                if userApps.isEmpty {
+                    let hasEnabled = appsList.contains { $0.isEnabled }
+                    solvedAction = hasEnabled ? .disable : .enable
+                } else if systemApps.isEmpty {
+                    let hasEnabled = appsList.contains { $0.isEnabled }
+                    solvedAction = hasEnabled ? .uninstall : .enable
+                } else {
+                    let hasEnabled = appsList.contains { $0.isEnabled }
+                    solvedAction = hasEnabled ? .mixed : .enable
+                }
+            }
+            
+            self.batchAction = solvedAction
+            self.batchPackages = Array(selectedPackages)
+            self.showBatchConfirm = true
+        } else if action == .enable {
+            queueSingleAction(.enable, app: app, currentFilter: currentFilter)
+        } else if action == .backupAPK {
+            let packages = isPartOfSelection && isMultiSelection ? Array(selectedPackages) : [app.packageName]
+            Task {
+                await triggerBackup(packages: packages, currentFilter: currentFilter)
+            }
+        } else if action == .forceStop {
+            queueSingleAction(.forceStop, app: app, currentFilter: currentFilter)
+        } else {
+            self.pendingAction = action
+            self.pendingApp = app
+            self.showActionConfirm = true
+        }
+    }
+
+    func handleBatchToolbarClick(selectedPackages: Set<String>, currentFilter: AppFilter) {
+        self.lastFilter = currentFilter
+        let appsList = apps.filter { selectedPackages.contains($0.packageName) }
+        guard !appsList.isEmpty else { return }
+        
+        let allDisabled = appsList.allSatisfy { !$0.isEnabled }
+        let solvedAction: AppBrowserView.BatchAction
+        if allDisabled {
+            solvedAction = .enable
+        } else {
+            let systemApps = appsList.filter { $0.isSystemApp }
+            let userApps = appsList.filter { !$0.isSystemApp }
+            if userApps.isEmpty {
+                let hasEnabled = appsList.contains { $0.isEnabled }
+                solvedAction = hasEnabled ? .disable : .enable
+            } else if systemApps.isEmpty {
+                let hasEnabled = appsList.contains { $0.isEnabled }
+                solvedAction = hasEnabled ? .uninstall : .enable
+            } else {
+                let hasEnabled = appsList.contains { $0.isEnabled }
+                solvedAction = hasEnabled ? .mixed : .enable
+            }
+        }
+        
+        self.batchAction = solvedAction
+        self.batchPackages = Array(selectedPackages)
+        self.showBatchConfirm = true
+    }
+
+    func confirmBatchAction() {
+        showBatchConfirm = false
+        queueBatchAction(batchAction, packages: batchPackages, appsList: apps, currentFilter: lastFilter)
+        batchPackages = []
+    }
+
+    func confirmSingleAction() {
+        showActionConfirm = false
+        if let action = pendingAction, let app = pendingApp {
+            queueSingleAction(action, app: app, currentFilter: lastFilter)
+        }
+        pendingAction = nil
+        pendingApp = nil
+    }
+
+    func showResult(_ msg: String) {
+        alertMessage = msg
+        showAlert = true
+    }
 
     private func setError(_ msg: String) async {
         await MainActor.run {

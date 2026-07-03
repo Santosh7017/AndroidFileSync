@@ -179,6 +179,7 @@ class UploadManager: ObservableObject {
 
     @MainActor
     private func markUploadFailed(localPath: String, error: Error) {
+        AppLogger.log("❌ Upload failed for \(localPath): \(error.localizedDescription)", level: .error)
         if var upload = internalActiveUploads[localPath] {
             upload.error = error.localizedDescription
             upload.transferSpeed = 0
@@ -337,6 +338,8 @@ class UploadManager: ObservableObject {
         progressLock.lock()
         backgroundProgress.removeValue(forKey: localPath)
         progressLock.unlock()
+        
+        AppLogger.log("✅ File uploaded successfully: \(fileName) (\(fileSize) bytes)")
         
         await MainActor.run {
             if var upload = internalActiveUploads[localPath] {
@@ -595,13 +598,8 @@ class UploadManager: ObservableObject {
                     break
                 }
                 
-                if finalRunning >= limit {
-                    // All slots are full. Suspend until a task finishes.
+                if finalRunning >= limit || (!hasMore && finalRunning > 0) {
                     await group.next()
-                } else {
-                    // Slots are free but queue is empty.
-                    // Sleep for 100ms to wait for new files to be enqueued.
-                    try? await Task.sleep(nanoseconds: 100_000_000)
                 }
             }
             
@@ -626,10 +624,10 @@ class UploadManager: ObservableObject {
         
         if batchCancelled {
             let completed = await MainActor.run { batchCompleted }
-            print("🛑 Batch upload cancelled at \(completed)/\(batchTotal)")
+            AppLogger.log("🛑 Batch upload cancelled at \(completed)/\(batchTotal)", level: .warning)
         } else {
             let total = await MainActor.run { batchTotal }
-            print("✅ All \(total) uploads completed")
+            AppLogger.log("✅ All \(total) uploads completed", level: .info)
         }
     }
 }
