@@ -27,11 +27,80 @@ struct TrashedItem: Identifiable, Codable {
     }
 }
 
+struct LiveDeletion: Identifiable, Equatable {
+    let id: UUID
+    let fileName: String
+    let filePath: String
+    let isPermanent: Bool
+    var isRunning: Bool = false
+    var isComplete: Bool = false
+    var isCancelled: Bool = false
+    var error: String? = nil
+}
+
 class FileActionManager: ObservableObject {
     // Track ongoing operations
     @Published var isPerformingAction: Bool = false
     @Published var currentAction: String = ""
     @Published var lastError: String?
+    
+    // Deletion tracking
+    @Published var activeDeletions: [LiveDeletion] = []
+    
+    var isDeleting: Bool {
+        !activeDeletions.filter { !$0.isComplete }.isEmpty
+    }
+    
+    var deletingActionText: String {
+        let active = activeDeletions.filter { !$0.isComplete }
+        if active.isEmpty { return "" }
+        if active.count == 1 {
+            let del = active[0]
+            return (del.isPermanent ? "Deleting " : "Trashing ") + del.fileName
+        } else {
+            return "Deleting \(active.count) items..."
+        }
+    }
+    
+    @MainActor
+    func cancelDeletion(id: UUID) {
+        if let idx = activeDeletions.firstIndex(where: { $0.id == id }) {
+            activeDeletions[idx].isCancelled = true
+            if !activeDeletions[idx].isRunning {
+                activeDeletions[idx].isComplete = true
+            }
+        }
+        updatePerformingActionState()
+        NotificationCenter.default.post(name: .afsDeletionsChanged, object: nil)
+    }
+    
+    @MainActor
+    func cancelAllDeletions() {
+        for idx in activeDeletions.indices {
+            if !activeDeletions[idx].isComplete {
+                activeDeletions[idx].isCancelled = true
+                if !activeDeletions[idx].isRunning {
+                    activeDeletions[idx].isComplete = true
+                }
+            }
+        }
+        updatePerformingActionState()
+        NotificationCenter.default.post(name: .afsDeletionsChanged, object: nil)
+    }
+    
+    @MainActor
+    func updatePerformingActionState() {
+        let activeDel = activeDeletions.filter { !$0.isComplete }
+        if !activeDel.isEmpty {
+            isPerformingAction = true
+            currentAction = deletingActionText
+        } else {
+            if currentAction.starts(with: "Deleting") || currentAction.starts(with: "Trashing") || currentAction.starts(with: "Moving") {
+                isPerformingAction = false
+                currentAction = ""
+            }
+        }
+    }
     
     // Cancellation support
     @Published var cancellationRequested: Bool = false
@@ -39,6 +108,7 @@ class FileActionManager: ObservableObject {
     /// Request cancellation of the current operation
     func requestCancellation() {
         cancellationRequested = true
+        cancelAllDeletions()
     }
     
     /// Reset cancellation flag (called at the start of each new operation)
@@ -115,99 +185,119 @@ class FileActionManager: ObservableObject {
     /// - Parameter file: The file to delete
     /// - Parameter permanent: If true, permanently deletes instead of moving to trash
     func deleteFile(_ file: UnifiedFile, permanent: Bool = false) async throws {
-        await MainActor.run {
-            isPerformingAction = true
-            currentAction = permanent ? "Permanently deleting \(file.name)..." : "Moving \(file.name) to Trash..."
-            lastError = nil
-        }
-        
-        do {
-            try await performDelete(file, permanent: permanent)
-            await MainActor.run {
-                isPerformingAction = false
-                currentAction = ""
-            }
-        } catch {
-            await MainActor.run {
-                isPerformingAction = false
-                currentAction = ""
-                lastError = error.localizedDescription
-            }
-            throw error
-        }
+        try await deleteFiles([file], permanent: permanent)
     }
 
     func deleteFiles(_ files: [UnifiedFile], permanent: Bool = false) async throws {
         guard !files.isEmpty else { return }
-        let action = permanent ? "Permanently deleting" : "Moving to Trash"
-
-        await MainActor.run {
-            resetCancellation()
-            isPerformingAction = true
-            currentAction = "\(action) \(files.count) item\(files.count == 1 ? "" : "s")..."
-            lastError = nil
+        
+        let newDeletions = files.map { file in
+            LiveDeletion(
+                id: UUID(),
+                fileName: file.name,
+                filePath: file.path,
+                isPermanent: permanent
+            )
         }
-
-        do {
-            for (index, file) in files.enumerated() {
-                // Check for cancellation
-                if await MainActor.run(body: { cancellationRequested }) {
-                    await MainActor.run {
-                        isPerformingAction = false
-                        currentAction = ""
-                        lastError = "Cancelled after \(index) of \(files.count) items"
-                    }
-                    return
-                }
-                await MainActor.run {
-                    currentAction = "\(action) \(index + 1) of \(files.count): \(file.name)"
-                }
-                try await performDelete(file, permanent: permanent)
+        
+        await MainActor.run {
+            self.activeDeletions.append(contentsOf: newDeletions)
+            self.updatePerformingActionState()
+        }
+        
+        // Process each deletion in the background without blocking the UI
+        for deletion in newDeletions {
+            Task {
+                await self.processDeletion(deletion)
             }
-
+        }
+    }
+    
+    private func processDeletion(_ deletion: LiveDeletion) async {
+        await MainActor.run {
+            if let idx = activeDeletions.firstIndex(where: { $0.id == deletion.id }) {
+                if activeDeletions[idx].isCancelled { return }
+                activeDeletions[idx].isRunning = true
+            }
+            updatePerformingActionState()
+        }
+        
+        do {
+            let cancelCheck = { [weak self] in
+                guard let self = self else { return true }
+                return self.activeDeletions.first(where: { $0.id == deletion.id })?.isCancelled ?? false
+            }
+            
+            if cancelCheck() {
+                throw NSError(domain: "FileAction", code: -999, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+            }
+            
+            try await performDelete(
+                path: deletion.filePath,
+                name: deletion.fileName,
+                isDirectory: false,
+                permanent: deletion.isPermanent,
+                cancellationCheck: cancelCheck
+            )
+            
             await MainActor.run {
-                isPerformingAction = false
-                currentAction = ""
+                if let idx = activeDeletions.firstIndex(where: { $0.id == deletion.id }) {
+                    activeDeletions[idx].isComplete = true
+                    activeDeletions[idx].isRunning = false
+                }
+                updatePerformingActionState()
+                NotificationCenter.default.post(name: .afsDeletionsChanged, object: nil)
             }
         } catch {
             await MainActor.run {
-                isPerformingAction = false
-                currentAction = ""
-                lastError = error.localizedDescription
+                if let idx = activeDeletions.firstIndex(where: { $0.id == deletion.id }) {
+                    if (error as NSError).code == -999 || activeDeletions[idx].isCancelled {
+                        activeDeletions[idx].isCancelled = true
+                    } else {
+                        activeDeletions[idx].error = error.localizedDescription
+                    }
+                    activeDeletions[idx].isComplete = true
+                    activeDeletions[idx].isRunning = false
+                }
+                updatePerformingActionState()
+                NotificationCenter.default.post(name: .afsDeletionsChanged, object: nil)
             }
-            throw error
         }
     }
 
-    private func performDelete(_ file: UnifiedFile, permanent: Bool) async throws {
-        let cancelCheck = { [weak self] in self?.cancellationRequested ?? false }
-        
-        if cancellationRequested {
-            throw NSError(domain: "FileAction", code: -1, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+    private func performDelete(path: String, name: String, isDirectory: Bool, permanent: Bool, cancellationCheck: @escaping () -> Bool) async throws {
+        if cancellationCheck() {
+            throw NSError(domain: "FileAction", code: -999, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
         }
         
         if permanent {
-            try await ADBManager.deleteFile(devicePath: file.path, cancellationCheck: cancelCheck)
+            try await ADBManager.deleteFile(devicePath: path, cancellationCheck: cancellationCheck)
             return
         }
 
         try await ensureTrashFolder()
         
-        if cancellationRequested {
-            throw NSError(domain: "FileAction", code: -1, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+        if cancellationCheck() {
+            throw NSError(domain: "FileAction", code: -999, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
         }
 
         let timestamp = Int(Date().timeIntervalSince1970)
-        let trashName = "\(timestamp)_\(UUID().uuidString)_\(file.name)"
+        let trashName = "\(timestamp)_\(UUID().uuidString)_\(name)"
         let trashPath = "\(trashFolderPath)/\(trashName)"
 
         do {
-            try await ADBManager.renameFile(oldPath: file.path, newPath: trashPath)
+            try await ADBManager.renameFile(oldPath: path, newPath: trashPath)
+            
+            let adbPath = ADBManager.getADBPath()
+            let escPath = trashPath.replacingOccurrences(of: "'", with: "'\\''")
+            let (_, testOut, _) = await Shell.runAsync(adbPath, args: ADBManager.deviceArgs(["shell", "[ -d '\(escPath)' ] && echo 1 || echo 0"]))
+            let isDir = testOut.trimmingCharacters(in: .whitespacesAndNewlines) == "1"
+            
             let trashedItem = TrashedItem(
-                originalPath: file.path,
+                originalPath: path,
                 trashPath: trashPath,
-                name: file.name,
-                isDirectory: file.isDirectory
+                name: name,
+                isDirectory: isDir
             )
 
             await MainActor.run {
@@ -215,11 +305,11 @@ class FileActionManager: ObservableObject {
                 saveTrashedItems()
             }
         } catch {
-            print("❌ Move to trash failed for '\(file.name)': \(error.localizedDescription)")
+            print("❌ Move to trash failed for '\(name)': \(error.localizedDescription)")
             throw NSError(
                 domain: "FileAction",
                 code: (error as NSError).code,
-                userInfo: [NSLocalizedDescriptionKey: "Cannot move '\(file.name)' to trash: \(error.localizedDescription)"]
+                userInfo: [NSLocalizedDescriptionKey: "Cannot move '\(name)' to trash: \(error.localizedDescription)"]
             )
         }
     }
@@ -665,10 +755,25 @@ class FileActionManager: ObservableObject {
                 }
                 print("\u{1F4CB} Paste: copy '\(file.path)' \u{2192} '\(destFile)'")
                 do {
-                    try await ADBManager.copyFile(from: file.path, to: destFile, isDirectory: file.isDirectory)
+                    try await ADBManager.copyFile(
+                        from: file.path,
+                        to: destFile,
+                        isDirectory: file.isDirectory,
+                        cancellationCheck: { [weak self] in self?.cancellationRequested ?? false }
+                    )
                     successPaths.append(destFile)
                     successCount += 1
                 } catch {
+                    if (error as NSError).code == -999 || (self.cancellationRequested) {
+                        print("🛑 Paste loop: cancellation detected, breaking early.")
+                        await MainActor.run {
+                            isPerformingAction = false
+                            currentAction = ""
+                            lastError = "Cancelled after \(successCount) of \(n) items"
+                            if successCount > 0 { clipboard.removeAll(); clipboardOperation = .none }
+                        }
+                        return
+                    }
                     print("\u{274C} Failed to paste \(file.name): \(error.localizedDescription)")
                     failedItems.append((file.name, error.localizedDescription))
                 }

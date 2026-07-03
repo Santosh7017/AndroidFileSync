@@ -10,6 +10,7 @@ extension Notification.Name {
     static let afsUploadBatchCompleted = Notification.Name("afsUploadBatchCompleted")
     static let afsDownloadBatchStateChanged = Notification.Name("afsDownloadBatchStateChanged")
     static let afsUploadBatchStateChanged = Notification.Name("afsUploadBatchStateChanged")
+    static let afsDeletionsChanged = Notification.Name("afsDeletionsChanged")
 }
 
 @main

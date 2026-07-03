@@ -2585,13 +2585,21 @@ class ADBManager {
     ///   - sourcePath: Source path
     ///   - destinationPath: Destination path
     ///   - isDirectory: Whether source is a directory
-    static func copyFile(from sourcePath: String, to destinationPath: String, isDirectory: Bool = false) async throws {
+    static func copyFile(
+        from sourcePath: String,
+        to destinationPath: String,
+        isDirectory: Bool = false,
+        cancellationCheck: @escaping () -> Bool = { false }
+    ) async throws {
         let adbPath = getADBPath()
         let escapedSource = sourcePath.replacingOccurrences(of: "'", with: "'\\''")
         let escapedDest = destinationPath.replacingOccurrences(of: "'", with: "'\\''")
         
         if isDirectory {
             // Step 1: Create the directory (fast)
+            if cancellationCheck() {
+                throw NSError(domain: "ADB", code: -999, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+            }
             let mkdirCmd = "mkdir -p '\(escapedDest)'"
             let (mkdirCode, _, mkdirError) = await Shell.runAsync(adbPath, args: deviceArgs(["shell", mkdirCmd]))
             
@@ -2600,14 +2608,38 @@ class ADBManager {
             }
             
             // Step 2: Copy contents if any exist (separate call, only if needed)
+            if cancellationCheck() {
+                throw NSError(domain: "ADB", code: -999, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+            }
             let cpCmd = "cp -r '\(escapedSource)/.' '\(escapedDest)/' 2>/dev/null || true"
-            let (_, _, _) = await Shell.runAsync(adbPath, args: deviceArgs(["shell", cpCmd]))
-            // Ignore result - empty folder will fail but that's OK
+            let (code, _, _, _) = await Shell.runWithProgressCancellable(
+                adbPath,
+                args: deviceArgs(["shell", cpCmd]),
+                progressCallback: { _ in },
+                cancellationCheck: cancellationCheck
+            )
+            
+            if cancellationCheck() {
+                throw NSError(domain: "ADB", code: -999, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+            }
+            // Ignore result - empty folder might fail but that's OK
             
         } else {
             // Regular file copy
+            if cancellationCheck() {
+                throw NSError(domain: "ADB", code: -999, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+            }
             let command = "cp '\(escapedSource)' '\(escapedDest)'"
-            let (code, output, error) = await Shell.runAsync(adbPath, args: deviceArgs(["shell", command]))
+            let (code, output, error, _) = await Shell.runWithProgressCancellable(
+                adbPath,
+                args: deviceArgs(["shell", command]),
+                progressCallback: { _ in },
+                cancellationCheck: cancellationCheck
+            )
+            
+            if cancellationCheck() {
+                throw NSError(domain: "ADB", code: -999, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+            }
             
             if code != 0 {
                 print("❌ Copy failed: code=\(code), error=\(error), output=\(output)")
@@ -2621,7 +2653,6 @@ class ADBManager {
                     throw NSError(domain: "ADB", code: Int(code), userInfo: [NSLocalizedDescriptionKey: error.isEmpty ? "Failed to copy" : error])
                 }
             }
-            
         }
     }
     

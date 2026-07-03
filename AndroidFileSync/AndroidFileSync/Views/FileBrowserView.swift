@@ -40,6 +40,11 @@ struct FileBrowserView: View, Equatable {
     var onPaste: (() -> Void)? = nil
     var onClearClipboard: (() -> Void)? = nil
     
+    // Deletion support
+    var activeDeletions: [LiveDeletion] = []
+    var onCancelDeletion: ((UUID) -> Void)? = nil
+    var onCancelAllDeletions: (() -> Void)? = nil
+    
     // Sorting support
     var sortOption: ActionToolbar.SortOption = .name
     var sortAscending: Bool = true
@@ -81,13 +86,18 @@ struct FileBrowserView: View, Equatable {
         lhs.metadataLoadedCount == rhs.metadataLoadedCount &&
         lhs.isLoadingMoreFiles == rhs.isLoadingMoreFiles &&
         lhs.clipboardCount == rhs.clipboardCount &&
-        lhs.clipboardOperation == rhs.clipboardOperation
+        lhs.clipboardOperation == rhs.clipboardOperation &&
+        lhs.activeDeletions == rhs.activeDeletions
     }
     
     // Guard against re-entrant sort loop:
     // Column header click → onChange(sortOrder) → onSortChange → ContentView updates displayedFiles
     // → Table re-renders → could trigger onChange(sortOrder) again.
     @State private var isSyncingSortOrder = false
+    
+    // Deletion Popover States
+    @State private var showDeletionPopover = false
+    @State private var dismissTask: Task<Void, Never>? = nil
     
     // Table sort state — derived from sortOption/sortAscending props so it survives
     // Table rebuilds from .id(sortVersion). Using @State would reset on rebuild.
@@ -360,13 +370,21 @@ struct FileBrowserView: View, Equatable {
                     .foregroundColor(inlineActionAccentColor.opacity(0.85))
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .frame(maxWidth: 156, alignment: .trailing)
+                    .frame(maxWidth: 156, alignment: currentActionText.count > 18 ? .leading : .center)
                     .padding(.vertical, 2)
                     .padding(.horizontal, 6)
                     .background(
                         Capsule()
                             .fill(inlineActionAccentColor.opacity(0.08))
                     )
+                    .onHover { hovering in
+                        if isDeletionAction {
+                            updateHoverState(isHovering: hovering)
+                        }
+                    }
+                    .popover(isPresented: $showDeletionPopover, arrowEdge: .bottom) {
+                        deletionDetailsPopover
+                    }
                 
                 // Stop button
                 if onCancelAction != nil {
@@ -387,26 +405,117 @@ struct FileBrowserView: View, Equatable {
         .padding(.trailing, isPerformingAction ? 10 : 0)
     }
     
+    private var isDeletionAction: Bool {
+        let action = currentActionText.lowercased()
+        return action.contains("delete") || action.contains("deleting") || action.contains("trash")
+    }
+    
+    private func updateHoverState(isHovering: Bool) {
+        if isHovering {
+            dismissTask?.cancel()
+            dismissTask = nil
+            showDeletionPopover = true
+        } else {
+            dismissTask?.cancel()
+            dismissTask = Task {
+                try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
+                if !Task.isCancelled {
+                    showDeletionPopover = false
+                }
+            }
+        }
+    }
+    
+    private var deletionDetailsPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Deletion Progress")
+                .font(.system(size: 13, weight: .bold))
+                .padding(.bottom, 4)
+            
+            let deletions = activeDeletions.filter { !$0.isComplete }
+            if deletions.isEmpty {
+                Text("No active deletions")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(deletions) { deletion in
+                            HStack(spacing: 8) {
+                                Image(systemName: deletion.isPermanent ? "trash.slash.fill" : "trash.fill")
+                                    .foregroundColor(.red)
+                                    .font(.system(size: 11))
+                                
+                                Text(deletion.fileName)
+                                    .font(.system(size: 11))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .frame(maxWidth: 160, alignment: .leading)
+                                
+                                Spacer()
+                                
+                                if deletion.isRunning {
+                                    ProgressView()
+                                        .scaleEffect(0.5)
+                                        .frame(width: 10, height: 10)
+                                } else {
+                                    Text("Pending")
+                                        .font(.system(size: 9))
+                                        .foregroundColor(.secondary)
+                                }
+                                
+                                Button {
+                                    onCancelDeletion?(deletion.id)
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(.secondary)
+                                        .font(.system(size: 10))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 200)
+                
+                Divider()
+                
+                Button(role: .destructive) {
+                    onCancelAllDeletions?()
+                    showDeletionPopover = false
+                } label: {
+                    Text("Cancel All Deletions")
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+        }
+        .padding(12)
+        .frame(width: 250)
+        .onHover { hovering in
+            updateHoverState(isHovering: hovering)
+        }
+    }
+    
     private var clipboardStatus: some View {
         HStack(spacing: 4) {
             if clipboardCount > 0 && !isPerformingAction {
                 HStack(spacing: 6) {
-                    Image(systemName: clipboardOperation == .cut ? "scissors" : "doc.on.clipboard")
-                        .font(.system(size: 10))
-                        .foregroundColor(.blue)
-                    
-                    Text("\(clipboardCount) ready")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.blue.opacity(0.85))
-                    
+             
                     Button {
                         onPaste?()
                     } label: {
                         HStack(spacing: 2) {
-                            Image(systemName: "doc.on.doc")
-                                .font(.system(size: 9))
-                            Text("Paste")
-                                .font(.system(size: 11, weight: .bold))
+                         
+                            Image(systemName: clipboardOperation == .cut ? "scissors" : "doc.on.clipboard")
+                        .font(.system(size: 10))
+                        .foregroundColor(.blue)
+                    
+                    Text("\(clipboardCount) ")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.blue.opacity(0.85))
                         }
                         .foregroundColor(.blue)
                     }

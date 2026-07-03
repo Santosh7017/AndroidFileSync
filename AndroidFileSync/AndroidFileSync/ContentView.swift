@@ -534,6 +534,13 @@ struct ContentView: View {
             .onReceive(NotificationCenter.default.publisher(for: .afsPermanentDeleteShortcut)) { _ in
                 handlePermanentDeleteShortcut()
             }
+            .onReceive(NotificationCenter.default.publisher(for: .afsDeletionsChanged)) { _ in
+                Task {
+                    ADBManager.invalidateFolderSizeCache()
+                    await loadFiles()
+                    await deviceManager.fetchStorageInfo()
+                }
+            }
             .sheet(item: $infoFile, onDismiss: {
                 fileInfoTask?.cancel()
                 fileInfoTask = nil
@@ -904,6 +911,9 @@ struct ContentView: View {
                                 }
                             },
                             onClearClipboard: { fileActionManager.clearClipboard() },
+                            activeDeletions: fileActionManager.activeDeletions,
+                            onCancelDeletion: { id in fileActionManager.cancelDeletion(id: id) },
+                            onCancelAllDeletions: { fileActionManager.cancelAllDeletions() },
                             sortOption: sortOption,
                             sortAscending: sortAscending,
                             sortVersion: sortVersion,
