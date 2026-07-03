@@ -11,7 +11,7 @@ struct AppBrowserView: View {
     let deviceName: String
 
     @State private var selectedFilter: AppFilter
-    @State private var searchQuery = ""
+    @Binding var searchQuery: String
     @State private var selectedPackages: Set<String> = []
     @State private var sortOption: AppSortOption = .name
     
@@ -24,11 +24,12 @@ struct AppBrowserView: View {
         case package = "Package"
     }
 
-    init(appManager: AppManager, initialFilter: AppFilter, deviceName: String) {
+    init(appManager: AppManager, initialFilter: AppFilter, deviceName: String, searchQuery: Binding<String>) {
         self.appManager = appManager
         self.initialFilter = initialFilter
         self.deviceName = deviceName
         _selectedFilter = State(initialValue: initialFilter)
+        _searchQuery = searchQuery
     }
 
     // MARK: - Filtered + Sorted apps
@@ -198,28 +199,6 @@ struct AppBrowserView: View {
         } else {
             // ── Loaded — always show search + status + list ──────────────────
             VStack(spacing: 0) {
-
-                // Search bar — ALWAYS visible once apps are loaded
-                HStack(spacing: 6) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundColor(.secondary)
-                    TextField("Search apps...", text: $searchQuery)
-                        .textFieldStyle(.plain)
-                    if !searchQuery.isEmpty {
-                        Button { searchQuery = "" } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color(NSColor.textBackgroundColor))
-                .cornerRadius(8)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-
                 // Status bar
                 HStack {
                     Text(appManager.statusMessage)
@@ -233,7 +212,8 @@ struct AppBrowserView: View {
                     }
                 }
                 .padding(.horizontal, 12)
-                .padding(.bottom, 4)
+                .padding(.top, 8)
+                .padding(.bottom, 6)
 
                 Divider()
 
