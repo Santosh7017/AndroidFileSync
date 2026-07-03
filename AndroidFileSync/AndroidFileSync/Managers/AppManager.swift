@@ -34,6 +34,10 @@ class AppManager: ObservableObject {
     @Published var pendingAction: AppBrowserView.AppAction? = nil
     @Published var pendingApp: AppInfo? = nil
 
+    
+    // Session-level state to track if we already warned the user about enabling Install via USB setting
+    static var hasShownADBInstallWarningInSession = false
+
     init() {
         operationEngine.setGroupCompleteHandler { [weak self] groupId in
             guard let self = self else { return }

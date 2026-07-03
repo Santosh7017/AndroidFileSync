@@ -14,6 +14,10 @@ struct AppBrowserView: View {
     @State private var searchQuery = ""
     @State private var selectedPackages: Set<String> = []
     @State private var sortOption: AppSortOption = .name
+    
+    // Warning popup state variables
+    @State private var showADBInstallWarning = false
+    @State private var dontShowWarningAgainLocal = false
 
     enum AppSortOption: String, CaseIterable {
         case name    = "Name"
@@ -89,6 +93,9 @@ struct AppBrowserView: View {
         } message: {
             Text(appManager.alertMessage)
         }
+        .sheet(isPresented: $showADBInstallWarning) {
+            adbInstallWarningSheet
+        }
     }
 
     // MARK: - Toolbar
@@ -108,7 +115,7 @@ struct AppBrowserView: View {
 
             // Install APK button
             Button {
-                Task { await pickAndInstallAPK() }
+                Task { await handleInstallClick() }
             } label: {
                 Label("Install APK", systemImage: "plus.app")
                     .font(.system(size: 12))
@@ -345,6 +352,74 @@ struct AppBrowserView: View {
               let url = panel.url else { return }
 
         appManager.queueInstall(url: url, currentFilter: selectedFilter)
+    }
+    
+    private func handleInstallClick() async {
+        let dontShowAgain = UserDefaults.standard.bool(forKey: "ADBInstallWarningDontShowAgain")
+        if dontShowAgain || AppManager.hasShownADBInstallWarningInSession {
+            await pickAndInstallAPK()
+        } else {
+            dontShowWarningAgainLocal = false
+            showADBInstallWarning = true
+        }
+    }
+    
+    private var adbInstallWarningSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 28))
+                    .foregroundColor(.orange)
+                
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Enable 'Install via USB'")
+                        .font(.headline)
+                    
+                    Text("To successfully install APKs, ensure USB Debugging and Install via USB (if available) are enabled in your device's Developer Options.")
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
+                    
+                    Text("On brand-specific devices (such as Xiaomi, OnePlus, Realme, etc.), you must explicitly accept the security prompt that appears on your phone screen during the installation process.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.top, 4)
+            
+            Divider()
+            
+            HStack {
+                Toggle("Don't show this warning again", isOn: $dontShowWarningAgainLocal)
+                    .toggleStyle(.checkbox)
+                    .font(.subheadline)
+                
+                Spacer()
+                
+                Button("Cancel") {
+                    showADBInstallWarning = false
+                }
+                .keyboardShortcut(.cancelAction)
+                
+                Button("Proceed") {
+                    showADBInstallWarning = false
+                    AppManager.hasShownADBInstallWarningInSession = true
+                    if dontShowWarningAgainLocal {
+                        UserDefaults.standard.set(true, forKey: "ADBInstallWarningDontShowAgain")
+                    }
+                    Task {
+                        await pickAndInstallAPK()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
     }
 }
 
