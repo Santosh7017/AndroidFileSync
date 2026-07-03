@@ -104,20 +104,14 @@ struct SidebarView: View {
             // Subtle native footer
             VStack(spacing: 0) {
                 Divider()
-                HStack(spacing: 12) {
-                    // FooterLink(
-                    //     icon: Image(systemName: "cup.and.saucer.fill").font(.system(size: 11)),
-                    //     title: "Buy me a coffee",
-                    //     destination: URL(string: "https://www.buymeacoffee.com/Santosh7017")!
-                    // )
-                    
+                HStack {
                     Spacer()
-                    
                     FooterLink(
-                        icon: GitHubIcon(size: 11, color: .secondary),
+                        icon: GitHubIcon(size: 13, color: .secondary),
                         title: "GitHub",
                         destination: URL(string: "https://github.com/Santosh7017/AndroidFileSync")!
                     )
+                    Spacer()
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
