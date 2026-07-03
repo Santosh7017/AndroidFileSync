@@ -2095,7 +2095,7 @@ class ADBManager {
                     DispatchQueue.global(qos: .userInitiated).async {
                         while process.isRunning {
                             if cancellationCheck() {
-                                print("🛑 Upload: Cancellation detected! Killing PID \(pid)...")
+                                AppLogger.log("🛑 Upload: Cancellation detected! Killing PID \(pid)...", level: .warning)
                                 kill(pid, SIGKILL)
                                 break
                             }
@@ -2165,9 +2165,14 @@ class ADBManager {
                         let message = (error.isEmpty ? output : error).trimmingCharacters(in: .whitespacesAndNewlines)
                         
                         // If compression isn't supported, retry without -z
-                        if (message.contains("unknown option") || message.contains("unrecognized option")),
-                           totalBytes > 50 * 1024 * 1024 {
-                            print("⚠️ ADB -z not supported, retrying without compression")
+                        let lowerMsg = message.lowercased()
+                        let isCompressionError = lowerMsg.contains("unknown option") ||
+                                                 lowerMsg.contains("unrecognized option") ||
+                                                 lowerMsg.contains("unknown flags") ||
+                                                 lowerMsg.contains("compression")
+                        
+                        if isCompressionError, totalBytes > 50 * 1024 * 1024 {
+                            AppLogger.log("⚠️ ADB push compression not supported (error: \(message)), retrying without compression", level: .warning)
                             let retryProcess = Process()
                             let retryOut = Pipe()
                             let retryErr = Pipe()
@@ -2186,11 +2191,29 @@ class ADBManager {
                                     }
                                     continuation.finish()
                                     return
+                                } else {
+                                    let retryOutputData = retryOut.fileHandleForReading.readDataToEndOfFile()
+                                    let retryErrorData = retryErr.fileHandleForReading.readDataToEndOfFile()
+                                    let retryOutMsg = String(data: retryOutputData, encoding: .utf8) ?? ""
+                                    let retryErrMsg = String(data: retryErrorData, encoding: .utf8) ?? ""
+                                    let retryFinalMsg = (retryErrMsg.isEmpty ? retryOutMsg : retryErrMsg).trimmingCharacters(in: .whitespacesAndNewlines)
+                                    
+                                    AppLogger.log("❌ Retry push failed: \(retryFinalMsg)", level: .error)
+                                    continuation.finish(throwing: NSError(
+                                        domain: "ADBPush",
+                                        code: Int(retryProcess.terminationStatus),
+                                        userInfo: [NSLocalizedDescriptionKey: retryFinalMsg.isEmpty ? "Upload failed" : retryFinalMsg]
+                                    ))
+                                    return
                                 }
-                            } catch { }
+                            } catch {
+                                AppLogger.log("❌ Retry push process throw: \(error)", level: .error)
+                                continuation.finish(throwing: error)
+                                return
+                            }
                         }
                         
-                        print("❌ ADB Push exited with code \(process.terminationStatus): \(message)")
+                        AppLogger.log("❌ ADB Push exited with code \(process.terminationStatus): \(message)", level: .error)
                         continuation.finish(throwing: NSError(
                             domain: "ADBPush",
                             code: Int(process.terminationStatus),
@@ -2199,7 +2222,7 @@ class ADBManager {
                     }
                     
                 } catch {
-                    print("❌ ADB Push Error: \(error)")
+                    AppLogger.log("❌ ADB Push Error: \(error)", level: .error)
                     continuation.finish(throwing: error)
                 }
             }

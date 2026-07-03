@@ -10,7 +10,7 @@ final class SupportPromptManager: ObservableObject {
 
     private let firstUseDateKey = "supportPromptFirstUseDate"
     private let sessionCountKey = "supportPromptSessionCount"
-    private let successfulTransferCountKey = "supportPromptSuccessfulTransferCount"
+    private let successfulBatchCountKey = "supportPromptSuccessfulBatchCount"
     private let lastPromptDateKey = "supportPromptLastPromptDate"
     private let feedbackSnoozedUntilSessionKey = "supportPromptFeedbackSnoozedUntilSession"
     private let completedKey = "supportPromptCompleted"
@@ -22,8 +22,8 @@ final class SupportPromptManager: ObservableObject {
     private let snoozeInterval: TimeInterval = 7 * 24 * 60 * 60
     private let feedbackSnoozeSessions = 10
     // Do not ask on first-use behavior; wait for repeated real usage.
-    private let minimumTransferCount = 4
-    private let minimumSessionCount = 4
+    private let minimumBatchCount = 3
+    private let minimumSessionCount = 3
     private var scheduledPromptTask: Task<Void, Never>?
 
     private init() {
@@ -34,10 +34,9 @@ final class SupportPromptManager: ObservableObject {
         schedulePromptIfEligible()
     }
 
-    func recordSuccessfulTransfer(count: Int) {
-        guard count > 0 else { return }
-        let current = UserDefaults.standard.integer(forKey: successfulTransferCountKey)
-        UserDefaults.standard.set(current + count, forKey: successfulTransferCountKey)
+    func recordSuccessfulBatch() {
+        let current = UserDefaults.standard.integer(forKey: successfulBatchCountKey)
+        UserDefaults.standard.set(current + 1, forKey: successfulBatchCountKey)
         schedulePromptIfEligible()
     }
 
@@ -91,8 +90,8 @@ final class SupportPromptManager: ObservableObject {
             return false
         }
 
-        let transfers = UserDefaults.standard.integer(forKey: successfulTransferCountKey)
-        return transfers >= minimumTransferCount || sessions >= minimumSessionCount
+        let batches = UserDefaults.standard.integer(forKey: successfulBatchCountKey)
+        return batches >= minimumBatchCount || (sessions >= minimumSessionCount && batches >= 1)
     }
 
     private func incrementInteger(forKey key: String) {

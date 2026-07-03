@@ -14,16 +14,6 @@ struct AppBrowserView: View {
     @State private var searchQuery = ""
     @State private var selectedPackages: Set<String> = []
     @State private var sortOption: AppSortOption = .name
-    @State private var alertMessage = ""
-    @State private var showAlert = false
-    @State private var showBatchConfirm = false
-
-    @State private var pendingAction: AppAction? = nil
-    @State private var pendingApp: AppInfo? = nil
-    @State private var showActionConfirm = false
-
-    @State private var batchProgress: (current: Int, total: Int)? = nil
-    @State private var progressActionLabelOverride: String? = nil
 
     enum AppSortOption: String, CaseIterable {
         case name    = "Name"
@@ -62,51 +52,42 @@ struct AppBrowserView: View {
     var body: some View {
         VStack(spacing: 0) {
             toolbar
+                .confirmationDialog(
+                    appManager.batchConfirmTitle,
+                    isPresented: $appManager.showBatchConfirm,
+                    titleVisibility: .visible
+                ) {
+                    Button(appManager.batchConfirmActionLabel, role: .destructive) {
+                        appManager.confirmBatchAction()
+                        selectedPackages = []
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text(appManager.batchConfirmMessage)
+                }
             Divider()
-            // Progress banner — shown for both batch and single-app operations
-            if let progress = batchProgress {
-                batchProgressBanner(progress)
-            }
             content
+                .confirmationDialog(
+                    appManager.confirmTitle,
+                    isPresented: $appManager.showActionConfirm,
+                    titleVisibility: .visible
+                ) {
+                    Button(appManager.confirmLabel, role: .destructive) {
+                        appManager.confirmSingleAction()
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text(appManager.confirmMessage)
+                }
         }
         .task(id: selectedFilter.rawValue + "|" + deviceName) {
             await appManager.fetchApps(filter: selectedFilter)
             selectedPackages = []
         }
-        .alert("Result", isPresented: $showAlert) {
+        .alert("Result", isPresented: $appManager.showAlert) {
             Button("OK", role: .cancel) {}
         } message: {
-            Text(alertMessage)
-        }
-        .confirmationDialog(
-            batchConfirmTitle,
-            isPresented: $showBatchConfirm,
-            titleVisibility: .visible
-        ) {
-            Button(batchConfirmActionLabel, role: .destructive) {
-                Task { await performBatchAction() }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(batchConfirmMessage)
-        }
-        // Single-app destructive action confirmation
-        .confirmationDialog(
-            confirmTitle,
-            isPresented: $showActionConfirm,
-            titleVisibility: .visible
-        ) {
-            Button(confirmLabel, role: .destructive) {
-                if let action = pendingAction, let app = pendingApp {
-                    Task { await executeAction(action, app: app) }
-                }
-                pendingAction = nil; pendingApp = nil
-            }
-            Button("Cancel", role: .cancel) {
-                pendingAction = nil; pendingApp = nil
-            }
-        } message: {
-            Text(confirmMessage)
+            Text(appManager.alertMessage)
         }
     }
 
@@ -135,16 +116,17 @@ struct AppBrowserView: View {
             .buttonStyle(.bordered)
             .help("Install an APK file from your Mac")
 
-            // Batch action button — label and action depend on current filter
             if !selectedPackages.isEmpty {
+                let hasBusySelected = selectedPackages.contains { appManager.isPackageBusy($0) }
                 Button {
-                    showBatchConfirm = true
+                    appManager.handleBatchToolbarClick(selectedPackages: selectedPackages, currentFilter: selectedFilter)
                 } label: {
                     Label(batchButtonLabel, systemImage: batchButtonIcon)
                         .font(.system(size: 12))
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(batchButtonTint)
+                .disabled(hasBusySelected)
             }
 
             // Sort
@@ -266,8 +248,8 @@ struct AppBrowserView: View {
                     Spacer()
                 } else {
                     List(displayedApps, id: \.id, selection: $selectedPackages) { app in
-                        AppRowView(app: app, appManager: appManager) { action in
-                            Task { await handleAction(action, app: app) }
+                        AppRowView(app: app, appManager: appManager, selectedPackages: selectedPackages) { action in
+                            appManager.handleAction(action, app: app, selectedPackages: selectedPackages, currentFilter: selectedFilter)
                         }
                     }
                     .listStyle(.inset)
@@ -288,262 +270,69 @@ struct AppBrowserView: View {
         case forceStop
     }
 
-    private func handleAction(_ action: AppAction, app: AppInfo) async {
-        switch action {
-        case .uninstall, .disable, .clearData, .clearCache:
-            // If user right-clicks an app that's part of a multi-selection,
-            // treat it as a batch operation on ALL selected apps (not just the one clicked).
-            let isPartOfSelection = selectedPackages.contains(app.packageName)
-            let isMultiSelection  = selectedPackages.count > 1
 
-            if isPartOfSelection && isMultiSelection && (action == .uninstall || action == .disable) {
-                // Route to batch — show batch confirmation for all selected
-                await MainActor.run { showBatchConfirm = true }
-            } else {
-                // Single-app destructive action — ask for confirmation
-                await MainActor.run {
-                    // Ensure only this app is "pending" even if others are highlighted
-                    pendingAction = action
-                    pendingApp = app
-                    showActionConfirm = true
-                }
-            }
-
-        case .enable:
-            let (ok, msg) = await appManager.enableApp(package: app.packageName)
-            if ok { await appManager.fetchApps(filter: selectedFilter) }
-            showResult(msg)
-
-        case .backupAPK:
-            // Single-app backup uses the global progress banner from AppManager.
-            // Avoid local batchProgress here to prevent duplicate/stale banners.
-            let (_, msg) = await appManager.backupAPK(package: app.packageName, displayName: app.displayName)
-            showResult(msg)
-
-        case .forceStop:
-            let (_, msg) = await appManager.forceStop(package: app.packageName)
-            showResult(msg)
-        }
-    }
-
-    /// Executes the action after user confirms.
-    private func executeAction(_ action: AppAction, app: AppInfo) async {
-        switch action {
-        case .uninstall:
-            let (ok, msg) = await appManager.uninstall(package: app.packageName)
-            if ok { await appManager.fetchApps(filter: selectedFilter) }
-            showResult(msg)
-
-        case .disable:
-            let (ok, msg) = await appManager.disableSystemApp(package: app.packageName)
-            if ok { await appManager.fetchApps(filter: selectedFilter) }
-            showResult(msg)
-
-        case .clearData:
-            let (_, msg) = await appManager.clearData(package: app.packageName)
-            showResult(msg)
-
-        case .clearCache:
-            let (_, msg) = await appManager.clearCache(package: app.packageName)
-            showResult(msg)
-
-        default:
-            break
-        }
-    }
-
-    // Helpers for the confirmation dialog text
-    private var confirmTitle: String {
-        guard let action = pendingAction, let app = pendingApp else { return "Are you sure?" }
-        switch action {
-        case .uninstall:  return "Uninstall \(app.displayName)?"
-        case .disable:    return "Disable \(app.displayName)?"
-        case .clearData:  return "Clear data for \(app.displayName)?"
-        case .clearCache: return "Clear cache for \(app.displayName)?"
-        default:          return "Are you sure?"
-        }
-    }
-
-    private var confirmLabel: String {
-        guard let action = pendingAction else { return "Confirm" }
-        switch action {
-        case .uninstall:  return "Uninstall"
-        case .disable:    return "Disable App"
-        case .clearData:  return "Clear Data"
-        case .clearCache: return "Clear Cache"
-        default:          return "Confirm"
-        }
-    }
-
-    private var confirmMessage: String {
-        guard let action = pendingAction, let app = pendingApp else { return "" }
-        switch action {
-        case .uninstall:  return "\"\(app.displayName)\" will be permanently removed from the device."
-        case .disable:    return "\"\(app.displayName)\" will be hidden and disabled for the current user."
-        case .clearData:  return "All data (accounts, settings, files) for \"\(app.displayName)\" will be erased. This cannot be undone."
-        case .clearCache: return "The cached data for \"\(app.displayName)\" will be cleared."
-        default:          return ""
-        }
-    }
 
     // MARK: - Batch confirmation helpers (context-aware by filter & count)
 
+    private var selectedApps: [AppInfo] {
+        appManager.apps.filter { selectedPackages.contains($0.packageName) }
+    }
+
+    enum BatchAction {
+        case uninstall
+        case disable
+        case enable
+        case mixed
+    }
+
+    private var currentBatchAction: BatchAction {
+        let apps = selectedApps
+        guard !apps.isEmpty else { return .uninstall }
+        
+        let allDisabled = apps.allSatisfy { !$0.isEnabled }
+        if allDisabled { return .enable }
+        
+        let systemApps = apps.filter { $0.isSystemApp }
+        let userApps = apps.filter { !$0.isSystemApp }
+        
+        if userApps.isEmpty {
+            let hasEnabled = apps.contains { $0.isEnabled }
+            return hasEnabled ? .disable : .enable
+        } else if systemApps.isEmpty {
+            let hasEnabled = apps.contains { $0.isEnabled }
+            return hasEnabled ? .uninstall : .enable
+        } else {
+            let hasEnabled = apps.contains { $0.isEnabled }
+            return hasEnabled ? .mixed : .enable
+        }
+    }
+
     private var batchButtonLabel: String {
         let n = selectedPackages.count
-        switch selectedFilter {
-        case .system:   return n == 1 ? "Disable (1)" : "Disable (\(n))"
-        case .disabled: return n == 1 ? "Enable (1)"  : "Enable (\(n))"
-        default:        return n == 1 ? "Uninstall (1)" : "Uninstall (\(n))"
+        switch currentBatchAction {
+        case .disable:   return n == 1 ? "Disable (1)" : "Disable (\(n))"
+        case .enable:    return n == 1 ? "Enable (1)"  : "Enable (\(n))"
+        case .uninstall: return n == 1 ? "Uninstall (1)" : "Uninstall (\(n))"
+        case .mixed:     return n == 1 ? "Uninstall/Disable (1)" : "Uninstall/Disable (\(n))"
         }
     }
 
     private var batchButtonIcon: String {
-        switch selectedFilter {
-        case .system:   return "nosign"
-        case .disabled: return "checkmark.circle"
-        default:        return "trash"
+        switch currentBatchAction {
+        case .disable:   return "nosign"
+        case .enable:    return "checkmark.circle"
+        case .uninstall: return "trash"
+        case .mixed:     return "trash.slash"
         }
     }
 
     private var batchButtonTint: Color {
-        switch selectedFilter {
-        case .system:   return .orange
-        case .disabled: return .green
-        default:        return .red
+        switch currentBatchAction {
+        case .disable:   return .orange
+        case .enable:    return .green
+        case .uninstall: return .red
+        case .mixed:     return .red
         }
-    }
-
-    private var batchConfirmTitle: String {
-        let n = selectedPackages.count
-        let item = n == 1 ? "1 app" : "\(n) apps"
-        switch selectedFilter {
-        case .system:   return "Disable \(item)?"
-        case .disabled: return "Enable \(item)?"
-        default:        return "Uninstall \(item)?"
-        }
-    }
-
-    private var batchConfirmActionLabel: String {
-        let n = selectedPackages.count
-        switch selectedFilter {
-        case .system:   return n == 1 ? "Disable"   : "Disable All"
-        case .disabled: return n == 1 ? "Enable"    : "Enable All"
-        default:        return n == 1 ? "Uninstall" : "Uninstall All"
-        }
-    }
-
-    private var batchConfirmMessage: String {
-        switch selectedFilter {
-        case .system:   return "The selected system apps will be disabled for the current user. They can be re-enabled later."
-        case .disabled: return "The selected apps will be re-enabled and restored for the current user."
-        default:        return "This will permanently remove the selected apps from your device."
-        }
-    }
-
-    private func performBatchAction() async {
-        let total = selectedPackages.count
-        var current = 0
-        progressActionLabelOverride = nil
-        batchProgress = (current, total)
-        
-        switch selectedFilter {
-        case .system:
-            var failed: [String] = []
-            for pkg in selectedPackages {
-                let (ok, _) = await appManager.disableSystemApp(package: pkg)
-                if !ok { failed.append(pkg) }
-                current += 1
-                batchProgress = (current, total)
-            }
-            selectedPackages = []
-            batchProgress = nil
-            await appManager.fetchApps(filter: selectedFilter)
-            showResult(failed.isEmpty
-                ? "All selected system apps disabled."
-                : "Some apps could not be disabled: \(failed.joined(separator: ", "))")
-
-        case .disabled:
-            var failed: [String] = []
-            for pkg in selectedPackages {
-                let (ok, _) = await appManager.enableApp(package: pkg)
-                if !ok { failed.append(pkg) }
-                current += 1
-                batchProgress = (current, total)
-            }
-            selectedPackages = []
-            batchProgress = nil
-            await appManager.fetchApps(filter: selectedFilter)
-            showResult(failed.isEmpty
-                ? "All selected apps re-enabled."
-                : "Some apps could not be enabled: \(failed.joined(separator: ", "))")
-
-        default:
-            var failed: [String] = []
-            for pkg in selectedPackages {
-                let (ok, _) = await appManager.uninstall(package: pkg)
-                if !ok { failed.append(pkg) }
-                current += 1
-                batchProgress = (current, total)
-            }
-            selectedPackages = []
-            batchProgress = nil
-            await appManager.fetchApps(filter: selectedFilter)
-            showResult(failed.isEmpty
-                ? "All selected apps uninstalled successfully."
-                : "Some apps could not be uninstalled: \(failed.joined(separator: ", "))")
-        }
-        progressActionLabelOverride = nil
-    }
-
-    private func batchActionStyle() -> (action: String, color: Color) {
-        if let override = progressActionLabelOverride {
-            return (override, .blue)
-        }
-        switch selectedFilter {
-        case .system:   return ("Disabling",    .orange)
-        case .disabled: return ("Enabling",     .green)
-        default:        return ("Uninstalling", .red)
-        }
-    }
-
-    @ViewBuilder
-    private func batchProgressBanner(_ progress: (current: Int, total: Int)) -> some View {
-        let style = batchActionStyle()
-        let fraction = progress.total > 0 ? Double(progress.current) / Double(progress.total) : 0.0
-
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                ProgressView()
-                    .scaleEffect(0.75)
-                    .frame(width: 16, height: 16)
-                Text("\(style.action) apps... \(progress.current) of \(progress.total)")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.primary)
-                Spacer()
-                Text("\(Int(fraction * 100))%")
-                    .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    .foregroundColor(style.color)
-            }
-            .padding(.horizontal, 14)
-            .padding(.top, 8)
-            .padding(.bottom, 6)
-
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Rectangle()
-                        .fill(style.color.opacity(0.15))
-                        .frame(height: 3)
-                    Rectangle()
-                        .fill(style.color)
-                        .frame(width: geo.size.width * fraction, height: 3)
-                        .animation(.linear(duration: 0.3), value: fraction)
-                }
-            }
-            .frame(height: 3)
-
-            Divider()
-        }
-        .background(style.color.opacity(0.08))
     }
 
     private func pickAndInstallAPK() async {
@@ -555,14 +344,7 @@ struct AppBrowserView: View {
         guard await panel.beginSheetModal(for: NSApp.keyWindow ?? NSWindow()) == .OK,
               let url = panel.url else { return }
 
-        let (ok, msg) = await appManager.installAPK(from: url)
-        if ok { await appManager.fetchApps(filter: selectedFilter) }
-        showResult(msg)
-    }
-
-    private func showResult(_ msg: String) {
-        alertMessage = msg
-        showAlert = true
+        appManager.queueInstall(url: url, currentFilter: selectedFilter)
     }
 }
 
@@ -571,7 +353,32 @@ struct AppBrowserView: View {
 struct AppRowView: View {
     let app: AppInfo
     @ObservedObject var appManager: AppManager
+    let selectedPackages: Set<String>
     let onAction: (AppBrowserView.AppAction) -> Void
+
+    private var batchActionType: AppBrowserView.BatchAction? {
+        guard selectedPackages.contains(app.packageName), selectedPackages.count > 1 else { return nil }
+        
+        let apps = appManager.apps.filter { selectedPackages.contains($0.packageName) }
+        guard !apps.isEmpty else { return nil }
+        
+        let allDisabled = apps.allSatisfy { !$0.isEnabled }
+        if allDisabled { return .enable }
+        
+        let systemApps = apps.filter { $0.isSystemApp }
+        let userApps = apps.filter { !$0.isSystemApp }
+        
+        if userApps.isEmpty {
+            let hasEnabled = apps.contains { $0.isEnabled }
+            return hasEnabled ? .disable : .enable
+        } else if systemApps.isEmpty {
+            let hasEnabled = apps.contains { $0.isEnabled }
+            return hasEnabled ? .uninstall : .enable
+        } else {
+            let hasEnabled = apps.contains { $0.isEnabled }
+            return hasEnabled ? .mixed : .enable
+        }
+    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -639,30 +446,70 @@ struct AppRowView: View {
             }
 
             Spacer()
+
+            if appManager.operationEngine.isPackageBusy(app.packageName) {
+                ProgressView()
+                    .controlSize(.small)
+                    .scaleEffect(0.7)
+            }
         }
-        .padding(.vertical, 2)
         .contextMenu {
-            // ── Primary destructive action depends on app state ───────────────
-            if !app.isEnabled {
-                // Disabled app → only action is to re-enable
-                Button {
-                    onAction(.enable)
-                } label: {
-                    Label("Re-enable App", systemImage: "checkmark.circle")
+            if appManager.isPackageBusy(app.packageName) {
+                Button {} label: {
+                    Label("Operation in progress…", systemImage: "hourglass")
                 }
-            } else if app.isSystemApp {
-                // Enabled system app → can disable (soft-remove for user)
-                Button(role: .destructive) {
-                    onAction(.disable)
-                } label: {
-                    Label("Disable System App", systemImage: "nosign")
+                .disabled(true)
+            } else if let batchAction = batchActionType {
+                // ── Batch selection primary action ─────────────────────────────────
+                switch batchAction {
+                case .enable:
+                    Button {
+                        onAction(.enable)
+                    } label: {
+                        Label("Enable Apps", systemImage: "checkmark.circle")
+                    }
+                case .disable:
+                    Button(role: .destructive) {
+                        onAction(.disable)
+                    } label: {
+                        Label("Disable System Apps", systemImage: "nosign")
+                    }
+                case .uninstall:
+                    Button(role: .destructive) {
+                        onAction(.uninstall)
+                    } label: {
+                        Label("Uninstall Apps", systemImage: "trash")
+                    }
+                case .mixed:
+                    Button(role: .destructive) {
+                        onAction(.uninstall)
+                    } label: {
+                        Label("Uninstall/Disable Apps", systemImage: "trash.slash")
+                    }
                 }
             } else {
-                // Regular user app → can uninstall
-                Button(role: .destructive) {
-                    onAction(.uninstall)
-                } label: {
-                    Label("Uninstall", systemImage: "trash")
+                // ── Single app primary action ──────────────────────────────────────
+                if !app.isEnabled {
+                    // Disabled app → only action is to enable
+                    Button {
+                        onAction(.enable)
+                    } label: {
+                        Label("Enable App", systemImage: "checkmark.circle")
+                    }
+                } else if app.isSystemApp {
+                    // Enabled system app → can disable (soft-remove for user)
+                    Button(role: .destructive) {
+                        onAction(.disable)
+                    } label: {
+                        Label("Disable System App", systemImage: "nosign")
+                    }
+                } else {
+                    // Regular user app → can uninstall
+                    Button(role: .destructive) {
+                        onAction(.uninstall)
+                    } label: {
+                        Label("Uninstall", systemImage: "trash")
+                    }
                 }
             }
 

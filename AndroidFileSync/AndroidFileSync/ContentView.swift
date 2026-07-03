@@ -96,6 +96,7 @@ struct ContentView: View {
     // App browser state
     @StateObject private var appManager = AppManager()
     @State private var activeAppFilter: AppFilter? = nil
+    @State private var showOperationDetails = false
     
     // Search and sort state
     @State private var searchQuery = ""
@@ -167,13 +168,314 @@ struct ContentView: View {
         updateDisplayedFiles()
     }
 
-    private var globalOperationAccentColor: Color {
-        let message = appManager.globalOperationMessage.lowercased()
-        if message.contains("uninstall") || message.contains("delete") { return .red }
-        if message.contains("install") { return .green }
-        if message.contains("backup") || message.contains("download") { return .blue }
-        if message.contains("disable") || message.contains("clear") { return .orange }
-        return .secondary
+    private var isAnyOperationActive: Bool {
+        appManager.operationEngine.isBusy ||
+        uploadManager.isBatchUploading ||
+        downloadManager.isBatchDownloading ||
+        !uploadManager.activeUploads.isEmpty ||
+        !downloadManager.activeDownloads.isEmpty ||
+        uploadManager.isPreparing ||
+        downloadManager.isScanning
+    }
+
+    private var unifiedStatusText: String {
+        let activeGroups = appManager.operationEngine.activeGroups
+        let hasAppOps = !activeGroups.isEmpty
+        
+        let uploadsCount = uploadManager.activeUploads.count
+        let downloadsCount = downloadManager.activeDownloads.count
+        let hasTransfers = uploadsCount > 0 || downloadsCount > 0
+        
+        if hasAppOps && hasTransfers {
+            let appVerb = activeGroups.first?.actionVerb ?? "Processing"
+            let appCount = activeGroups.count
+            let transferText = uploadsCount > 0 ? "\(uploadsCount) upload\(uploadsCount > 1 ? "s" : "")" : "\(downloadsCount) download\(downloadsCount > 1 ? "s" : "")"
+            return "\(appVerb) apps (\(appCount) active) • Copying files (\(transferText))"
+        } else if hasAppOps {
+            let isMultiGroup = activeGroups.count > 1
+            let group = activeGroups.first
+            let completed = group?.completedCount ?? 0
+            let total = group?.totalCount ?? 0
+            let verb = group?.actionVerb ?? "Processing"
+            let currentApp = group?.currentRunningName ?? ""
+            
+            if isMultiGroup {
+                return "Multiple operations executing... (\(activeGroups.count) active)"
+            } else if total > 1 {
+                return "\(verb) apps... \(completed + 1) of \(total) (\(currentApp))"
+            } else {
+                return "\(verb) \(currentApp)…"
+            }
+        } else if hasTransfers {
+            if uploadManager.isPreparing {
+                return uploadManager.preparingMessage
+            }
+            if downloadManager.isScanning {
+                return "Scanning \(downloadManager.scanningFolderName)..."
+            }
+            
+            let uploads = uploadsCount > 0 ? "\(uploadsCount) upload\(uploadsCount > 1 ? "s" : "")" : ""
+            let downloads = downloadsCount > 0 ? "\(downloadsCount) download\(downloadsCount > 1 ? "s" : "")" : ""
+            let parts = [uploads, downloads].filter { !$0.isEmpty }
+            return "Copying files... " + parts.joined(separator: ", ")
+        }
+        
+        return ""
+    }
+
+    private var unifiedProgressFraction: Double {
+        let activeGroups = appManager.operationEngine.activeGroups
+        let totalOps = activeGroups.reduce(0) { $0 + $1.totalCount }
+        let completedOps = activeGroups.reduce(0) { $0 + $1.completedCount }
+        let opFraction = totalOps > 0 ? Double(completedOps) / Double(totalOps) : 0.0
+        
+        let uploadTotal = uploadManager.batchTotal
+        let uploadCompleted = uploadManager.batchCompleted
+        let uploadFraction = uploadTotal > 0 ? Double(uploadCompleted) / Double(uploadTotal) : 0.0
+        
+        let downloadTotal = downloadManager.batchTotal
+        let downloadCompleted = downloadManager.batchCompleted
+        let downloadFraction = downloadTotal > 0 ? Double(downloadCompleted) / Double(downloadTotal) : 0.0
+        
+        var totalFractions: [Double] = []
+        if totalOps > 0 { totalFractions.append(opFraction) }
+        
+        if uploadTotal > 0 {
+            totalFractions.append(uploadFraction)
+        } else if !uploadManager.activeUploads.isEmpty {
+            let sum = uploadManager.activeUploads.values.reduce(0.0) { $0 + $1.progress }
+            totalFractions.append(sum / Double(uploadManager.activeUploads.count))
+        }
+        
+        if downloadTotal > 0 {
+            totalFractions.append(downloadFraction)
+        } else if !downloadManager.activeDownloads.isEmpty {
+            let sum = downloadManager.activeDownloads.values.reduce(0.0) { $0 + $1.progress }
+            totalFractions.append(sum / Double(downloadManager.activeDownloads.count))
+        }
+        
+        return totalFractions.isEmpty ? 0.0 : totalFractions.reduce(0.0, +) / Double(totalFractions.count)
+    }
+
+    private var unifiedStatusColor: Color {
+        let activeGroups = appManager.operationEngine.activeGroups
+        if !activeGroups.isEmpty {
+            return activeGroups.first?.color ?? .blue
+        }
+        return .blue
+    }
+
+    @ViewBuilder
+    private var unifiedStatusBanner: some View {
+        if isAnyOperationActive {
+            let color = unifiedStatusColor
+            let fraction = unifiedProgressFraction
+            let statusText = unifiedStatusText
+            
+            VStack(spacing: 0) {
+                HStack(spacing: 12) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 16, height: 16)
+                    
+                    Text(statusText)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.primary)
+                    
+                    Spacer()
+                    
+                    Button {
+                        showOperationDetails.toggle()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("Details")
+                            Image(systemName: showOperationDetails ? "chevron.up" : "chevron.down")
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(.secondary)
+                    .popover(isPresented: $showOperationDetails, arrowEdge: .bottom) {
+                        unifiedDetailsPopoverView
+                    }
+                    
+                    Text("\(Int(fraction * 100))%")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundColor(color)
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
+                .padding(.bottom, 6)
+
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Rectangle()
+                            .fill(color.opacity(0.15))
+                            .frame(height: 3)
+                        Rectangle()
+                            .fill(color)
+                            .frame(width: geo.size.width * fraction, height: 3)
+                            .animation(.linear(duration: 0.3), value: fraction)
+                    }
+                }
+                .frame(height: 3)
+                Divider()
+            }
+            .background(color.opacity(0.08))
+        }
+    }
+
+    private var unifiedDetailsPopoverView: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Active Tasks")
+                .font(.system(size: 13, weight: .bold))
+                .padding(.bottom, 4)
+            
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    let activeGroups = appManager.operationEngine.activeGroups
+                    if !activeGroups.isEmpty {
+                        Text("App Operations")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.secondary)
+                        
+                        ForEach(activeGroups, id: \OperationEngine.OperationGroup.id) { group in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text(group.actionVerb)
+                                        .font(.system(size: 11, weight: .medium))
+                                    Spacer()
+                                    Text("\(group.completedCount)/\(group.totalCount)")
+                                        .font(.system(size: 10, design: .monospaced))
+                                    
+                                    Button {
+                                        appManager.operationEngine.cancelPending(in: group.id)
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .foregroundColor(.secondary)
+                                            .font(.system(size: 10))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                
+                                let fraction = group.totalCount > 0 ? Double(group.completedCount) / Double(group.totalCount) : 0.0
+                                GeometryReader { geo in
+                                    RoundedRectangle(cornerRadius: 2)
+                                        .fill(group.color.opacity(0.2))
+                                        .frame(height: 4)
+                                        .overlay(alignment: .leading) {
+                                            RoundedRectangle(cornerRadius: 2)
+                                                .fill(group.color)
+                                                .frame(width: geo.size.width * fraction)
+                                        }
+                                }
+                                .frame(height: 4)
+                                
+                                ForEach(group.operations, id: \OperationEngine.LiveOperation.id) { op in
+                                    LiveOperationRow(op: op)
+                                }
+                            }
+                            .padding(.bottom, 8)
+                        }
+                        Divider()
+                    }
+                    
+                    let uploads = uploadManager.activeUploads.values
+                    let downloads = downloadManager.activeDownloads.values
+                    if !uploads.isEmpty || !downloads.isEmpty {
+                        Text("File Transfers")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.secondary)
+                        
+                        ForEach(Array(uploads)) { upload in
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack {
+                                    Image(systemName: "arrow.up.circle.fill")
+                                        .foregroundColor(.blue)
+                                    Text(upload.fileName)
+                                        .font(.system(size: 11))
+                                    Spacer()
+                                    Text(upload.speedText)
+                                        .font(.system(size: 10))
+                                    
+                                    Button {
+                                        uploadManager.cancelUpload(localPath: upload.localPath)
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .foregroundColor(.secondary)
+                                            .font(.system(size: 10))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                
+                                GeometryReader { geo in
+                                    RoundedRectangle(cornerRadius: 2)
+                                        .fill(Color.blue.opacity(0.2))
+                                        .frame(height: 4)
+                                        .overlay(alignment: .leading) {
+                                            RoundedRectangle(cornerRadius: 2)
+                                                .fill(Color.blue)
+                                                .frame(width: geo.size.width * upload.progress)
+                                        }
+                                }
+                                .frame(height: 4)
+                            }
+                        }
+                        
+                        ForEach(Array(downloads)) { download in
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack {
+                                    Image(systemName: "arrow.down.circle.fill")
+                                        .foregroundColor(.blue)
+                                    Text(download.fileName)
+                                        .font(.system(size: 11))
+                                    Spacer()
+                                    Text(download.speedText)
+                                        .font(.system(size: 10))
+                                    
+                                    Button {
+                                        downloadManager.cancelDownload(devicePath: download.devicePath)
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .foregroundColor(.secondary)
+                                            .font(.system(size: 10))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                
+                                GeometryReader { geo in
+                                    RoundedRectangle(cornerRadius: 2)
+                                        .fill(Color.blue.opacity(0.2))
+                                        .frame(height: 4)
+                                        .overlay(alignment: .leading) {
+                                            RoundedRectangle(cornerRadius: 2)
+                                                .fill(Color.blue)
+                                                .frame(width: geo.size.width * download.progress)
+                                        }
+                                }
+                                .frame(height: 4)
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 250)
+            
+            Button(role: .destructive) {
+                appManager.operationEngine.cancelAllPending()
+                uploadManager.cancelAllUploads()
+                downloadManager.cancelAllDownloads()
+                showOperationDetails = false
+            } label: {
+                Text("Cancel All Active Tasks")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+        }
+        .padding(12)
+        .frame(width: 280)
     }
 
     var body: some View {
@@ -374,14 +676,14 @@ struct ContentView: View {
                 if let completed = notification.userInfo?["completed"] as? Int,
                    let total = notification.userInfo?["total"] as? Int {
                     guard completed > 0, completed == total else { return }
-                    supportPromptManager.recordSuccessfulTransfer(count: completed)
+                    supportPromptManager.recordSuccessfulBatch()
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .afsUploadBatchCompleted)) { notification in
                 if let completed = notification.userInfo?["completed"] as? Int,
                    let total = notification.userInfo?["total"] as? Int {
                     guard completed > 0, completed == total else { return }
-                    supportPromptManager.recordSuccessfulTransfer(count: completed)
+                    supportPromptManager.recordSuccessfulBatch()
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .afsUploadBatchStateChanged)) { notification in
@@ -443,11 +745,13 @@ struct ContentView: View {
                 )
             }
 
-            TransferProgressContainer(
-                downloadManager: downloadManager,
-                uploadManager: uploadManager,
-                deviceManager: deviceManager
-            )
+            if !isAnyOperationActive {
+                TransferProgressContainer(
+                    downloadManager: downloadManager,
+                    uploadManager: uploadManager,
+                    deviceManager: deviceManager
+                )
+            }
         }
         .overlay(alignment: .topTrailing) {
             if updateChecker.shouldShowBanner {
@@ -550,29 +854,7 @@ struct ContentView: View {
             .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 300)
         } detail: {
             VStack(spacing: 0) {
-                if appManager.isGlobalOperationInProgress {
-                    HStack(spacing: 8) {
-                        if appManager.globalOperationShowsSpinner {
-                            ProgressView()
-                                .tint(globalOperationAccentColor)
-                                .scaleEffect(0.65)
-                                .frame(width: 12, height: 12)
-                        } else {
-                            Image(systemName: appManager.globalOperationIsError ? "xmark.circle.fill" : "checkmark.circle.fill")
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundColor(appManager.globalOperationIsError ? .red : .green)
-                                .frame(width: 12, height: 12)
-                        }
-                        Text(appManager.globalOperationMessage)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(.secondary)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(globalOperationAccentColor.opacity(0.08))
-                    Divider()
-                }
+                unifiedStatusBanner
 
                 ZStack {
                 if let appFilter = activeAppFilter {
@@ -582,38 +864,6 @@ struct ContentView: View {
                 } else {
                     // ── File Browser ──────────────────────────────────────────
                     VStack(spacing: 0) {
-                        // Clipboard indicator (inline, above file list)
-                        if !fileActionManager.isPerformingAction && !fileActionManager.clipboard.isEmpty {
-                            HStack(spacing: 8) {
-                                Image(systemName: fileActionManager.clipboardOperation == .cut ? "scissors" : "doc.on.clipboard")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.blue)
-                                Text("\(fileActionManager.clipboard.count) item\(fileActionManager.clipboard.count == 1 ? "" : "s") ready to paste")
-                                    .font(.system(size: 12))
-                                    .foregroundColor(.secondary)
-                                Spacer()
-                                Button {
-                                    Task {
-                                        do { try await fileActionManager.paste(to: currentPath) } catch {}
-                                        await loadFiles()
-                                    }
-                                } label: {
-                                    Label("Paste", systemImage: "doc.on.doc")
-                                        .font(.system(size: 11, weight: .medium))
-                                }
-                                .buttonStyle(.borderless)
-                                Button { fileActionManager.clearClipboard() } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .foregroundColor(.secondary.opacity(0.6))
-                                }
-                                .buttonStyle(.plain)
-                            }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 6)
-                            .background(Color.blue.opacity(0.08))
-                            Divider()
-                        }
-
                         FileBrowserView(
                             files: displayedFiles,
                             currentPath: currentPath,
@@ -645,6 +895,15 @@ struct ContentView: View {
                                 )
                             },
                             onPermanentDelete: handlePermanentDelete,
+                            clipboardCount: fileActionManager.clipboard.count,
+                            clipboardOperation: fileActionManager.clipboardOperation,
+                            onPaste: {
+                                Task {
+                                    do { try await fileActionManager.paste(to: currentPath) } catch {}
+                                    await loadFiles()
+                                }
+                            },
+                            onClearClipboard: { fileActionManager.clearClipboard() },
                             sortOption: sortOption,
                             sortAscending: sortAscending,
                             sortVersion: sortVersion,
@@ -1403,29 +1662,44 @@ struct ContentView: View {
         }
 
         Task {
+            AppLogger.log("📂 [handleUpload] Starting upload for \(urls.count) URLs. Target destination path: \(path)")
             var allItems: [(localPath: String, fileName: String, fileSize: UInt64, devicePath: String)] = []
             var remoteDirsToCreate: Set<String> = []
 
             for url in urls {
                 var isDir: ObjCBool = false
                 guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else {
+                    AppLogger.log("⚠️ [handleUpload] File does not exist at local path: \(url.path)", level: .warning)
                     continue
                 }
 
                 if isDir.boolValue {
+                    AppLogger.log("📂 [handleUpload] Processing local directory: \(url.path)")
                     let basePath = url.path
                     let remoteFolderBase = (path.hasSuffix("/") ? path : path + "/") + url.lastPathComponent
                     remoteDirsToCreate.insert(remoteFolderBase)
 
                     guard let enumerator = FileManager.default.enumerator(
                         at: url,
-                        includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
-                        options: [.skipsHiddenFiles]
-                    ) else { continue }
+                        includingPropertiesForKeys: [.isRegularFileKey, .isDirectoryKey, .fileSizeKey],
+                        options: []
+                    ) else {
+                        AppLogger.log("⚠️ [handleUpload] Failed to create directory enumerator for: \(url.path)", level: .warning)
+                        continue
+                    }
 
+                    var folderFilesCount = 0
                     for case let fileURL as URL in enumerator {
-                        guard let rv = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
-                              rv.isRegularFile == true else { continue }
+                        guard let rv = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .isDirectoryKey, .fileSizeKey]) else {
+                            continue
+                        }
+
+                        let isDir = rv.isDirectory ?? false
+                        if isDir {
+                            continue
+                        }
+
+                        guard rv.isRegularFile == true else { continue }
 
                         let relativePath = String(fileURL.path.dropFirst(basePath.count + 1))
                         let remoteFilePath = remoteFolderBase + "/" + relativePath
@@ -1435,17 +1709,24 @@ struct ContentView: View {
                         let size = UInt64(rv.fileSize ?? 0)
                         let fileName = (relativePath as NSString).lastPathComponent
                         allItems.append((localPath: fileURL.path, fileName: fileName, fileSize: size, devicePath: remoteDir))
+                        folderFilesCount += 1
                     }
+                    AppLogger.log("📂 [handleUpload] Enumerated directory: \(url.path) — found \(folderFilesCount) files")
                 } else {
+                    AppLogger.log("📂 [handleUpload] Processing local file: \(url.path)")
                     guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
                           let size = attrs[.size] as? UInt64 else {
+                        AppLogger.log("⚠️ [handleUpload] Failed to retrieve attributes for local file: \(url.path)", level: .warning)
                         continue
                     }
                     allItems.append((localPath: url.path, fileName: url.lastPathComponent, fileSize: size, devicePath: path))
                 }
             }
 
+            AppLogger.log("📂 [handleUpload] Collected \(allItems.count) files to upload.")
+
             guard !allItems.isEmpty else {
+                AppLogger.log("⚠️ [handleUpload] No files collected for upload. Exiting.", level: .warning)
                 await MainActor.run { manager.isPreparing = false }
                 return
             }
@@ -1790,5 +2071,44 @@ struct ContentView: View {
                 }
             }
         }
+    }
+}
+
+struct LiveOperationRow: View {
+    let op: OperationEngine.LiveOperation
+    
+    var stateIconName: String {
+        switch op.state {
+        case .pending: return "clock"
+        case .running: return "arrow.triangle.2.circlepath"
+        case .completed(let success, let message):
+            if message == "Cancelled" { return "slash.circle" }
+            return success ? "checkmark.circle" : "xmark.circle"
+        }
+    }
+    
+    var stateColor: Color {
+        switch op.state {
+        case .pending: return .secondary
+        case .running: return .blue
+        case .completed(let success, let message):
+            if message == "Cancelled" { return .secondary }
+            return success ? .green : .red
+        }
+    }
+    
+    var body: some View {
+        HStack {
+            Image(systemName: stateIconName)
+                .font(.system(size: 10))
+                .foregroundColor(stateColor)
+            Text(op.displayName)
+                .font(.system(size: 10))
+            Spacer()
+            if case .running = op.state {
+                ProgressView().scaleEffect(0.5).frame(width: 10, height: 10)
+            }
+        }
+        .padding(.leading, 8)
     }
 }
