@@ -53,32 +53,90 @@ struct Shell {
     }
     
     // Truly async run using continuation and termination handler
+    // Drains stdout/stderr dynamically to prevent pipe buffer deadlock under large outputs.
+    // Handles Swift Task cancellation by terminating the running Process.
     static func runAsync(_ command: String, args: [String]) async -> (Int32, String, String) {
-        return await withCheckedContinuation { continuation in
-            let process = Process()
-            let stdout = Pipe()
-            let stderr = Pipe()
-            
-            process.executableURL = URL(fileURLWithPath: command)
-            process.arguments = args
-            process.environment = adbEnvironment
-            process.standardOutput = stdout
-            process.standardError = stderr
-            
-            process.terminationHandler = { process in
-                let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
-                let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
+        let process = Process()
+        let stdout = Pipe()
+        let stderr = Pipe()
+        
+        process.executableURL = URL(fileURLWithPath: command)
+        process.arguments = args
+        process.environment = adbEnvironment
+        process.standardOutput = stdout
+        process.standardError = stderr
+        
+        let stdoutHandle = stdout.fileHandleForReading
+        let stderrHandle = stderr.fileHandleForReading
+        
+        return await withTaskCancellationHandler {
+            return await withCheckedContinuation { continuation in
+                var outputData = Data()
+                var errorData = Data()
+                var hasResumed = false
+                let lock = NSLock()
                 
-                let output = String(data: outputData, encoding: .utf8) ?? ""
-                let error = String(data: errorData, encoding: .utf8) ?? ""
+                func finish(status: Int32, flushRemaining: Bool) {
+                    lock.lock()
+                    if !hasResumed {
+                        hasResumed = true
+                        
+                        stdoutHandle.readabilityHandler = nil
+                        stderrHandle.readabilityHandler = nil
+                        
+                        if flushRemaining {
+                            outputData.append(stdoutHandle.readDataToEndOfFile())
+                            errorData.append(stderrHandle.readDataToEndOfFile())
+                        }
+                        
+                        let output = String(data: outputData, encoding: .utf8) ?? ""
+                        let error = String(data: errorData, encoding: .utf8) ?? ""
+                        
+                        continuation.resume(returning: (status, output, error))
+                    }
+                    lock.unlock()
+                }
                 
-                continuation.resume(returning: (process.terminationStatus, output, error))
+                stdoutHandle.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    lock.lock()
+                    if data.isEmpty {
+                        handle.readabilityHandler = nil
+                    } else {
+                        outputData.append(data)
+                    }
+                    lock.unlock()
+                }
+                
+                stderrHandle.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    lock.lock()
+                    if data.isEmpty {
+                        handle.readabilityHandler = nil
+                    } else {
+                        errorData.append(data)
+                    }
+                    lock.unlock()
+                }
+                
+                process.terminationHandler = { proc in
+                    finish(status: proc.terminationStatus, flushRemaining: true)
+                }
+                
+                if Task.isCancelled {
+                    finish(status: -999, flushRemaining: false)
+                    return
+                }
+                
+                do {
+                    try process.run()
+                } catch {
+                    finish(status: -1, flushRemaining: false)
+                }
             }
-            
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(returning: (-1, "", error.localizedDescription))
+        } onCancel: {
+            if process.isRunning {
+                process.terminate()
             }
         }
     }

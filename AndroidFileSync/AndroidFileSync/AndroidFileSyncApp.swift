@@ -45,6 +45,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var localKeyMonitor: Any?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.santosh.AndroidFileSync1"
+        let runningApps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+        if runningApps.count > 1 {
+            AppLogger.log("⚠️ Another instance of AndroidFileSync is already running. Activating the existing instance and terminating this one.", level: .warning)
+            for app in runningApps {
+                if app != NSRunningApplication.current {
+                    app.activate(options: .activateIgnoringOtherApps)
+                    DispatchQueue.main.async {
+                        NSApp.terminate(nil)
+                    }
+                    break
+                }
+            }
+            return
+        }
+        
         AppLogger.addSessionSeparator()
         AppLogger.log("🚀 AndroidFileSync started successfully on macOS.")
         guard let window = NSApp.windows.first,

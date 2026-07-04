@@ -2001,19 +2001,20 @@ class ADBManager {
     static func pullFileWithProgress(
         devicePath: String,
         localPath: String
-    ) -> AsyncStream<(UInt64, Double)> {
-        return AsyncStream { continuation in
+    ) -> AsyncThrowingStream<(UInt64, Double), Error> {
+        return AsyncThrowingStream { continuation in
             let adbPath = getADBPath()
             
             Task {
+                var exitCode: Int32 = 0
+                var adbError = ""
+                
                 await withTaskGroup(of: Void.self) { group in
                     // Task 1: Run the download
                     group.addTask {
-                        let (code, _, error) = await Shell.runAsync(adbPath, args: deviceArgs(["pull", devicePath, localPath]))
-                        if code != 0 {
-                            print("❌ ADB Pull Error: \(error)")
-                        } else {
-                        }
+                        let (code, _, err) = await Shell.runAsync(adbPath, args: deviceArgs(["pull", devicePath, localPath]))
+                        exitCode = code
+                        adbError = err
                     }
                     
                     // Task 2: Poll for progress
@@ -2052,13 +2053,21 @@ class ADBManager {
                     group.cancelAll()
                 }
                 
-                // Send final update
-                if let attrs = try? FileManager.default.attributesOfItem(atPath: localPath),
-                   let finalSize = attrs[.size] as? UInt64 {
-                    continuation.yield((finalSize, 0))
+                if exitCode != 0 {
+                    let errMsg = adbError.trimmingCharacters(in: .whitespacesAndNewlines)
+                    continuation.finish(throwing: NSError(
+                        domain: "ADBPull",
+                        code: Int(exitCode),
+                        userInfo: [NSLocalizedDescriptionKey: errMsg.isEmpty ? "Download failed" : errMsg]
+                    ))
+                } else {
+                    // Send final update
+                    if let attrs = try? FileManager.default.attributesOfItem(atPath: localPath),
+                       let finalSize = attrs[.size] as? UInt64 {
+                        continuation.yield((finalSize, 0))
+                    }
+                    continuation.finish()
                 }
-                
-                continuation.finish()
             }
         }
     }
@@ -2103,15 +2112,15 @@ class ADBManager {
                         }
                     }
                     
-                    // Start progress polling AFTER process is running — only for files >= 5 MB to avoid ADB stat command contention on small files
-                    if totalBytes >= 5 * 1024 * 1024 {
+                    // Start progress polling AFTER process is running — only for files >= 20 MB to avoid ADB stat command contention on small files
+                    if totalBytes >= 10 * 1024 * 1024 {
                         DispatchQueue.global(qos: .userInitiated).async {
                             var lastSize: UInt64 = 0
                             var lastCheck = Date()
                             var consecutiveFailures = 0
                             
                             // Wait a moment for transfer to start
-                            Thread.sleep(forTimeInterval: 0.5)
+                            Thread.sleep(forTimeInterval: 0.8)
                             
                             let escapedPath = FileNameHelper.escapeForShell(devicePath)
                             
@@ -2143,7 +2152,7 @@ class ADBManager {
                                     }
                                 }
                                 
-                                Thread.sleep(forTimeInterval: 1.0)
+                                Thread.sleep(forTimeInterval: 1.5)
                             }
                         }
                     }
