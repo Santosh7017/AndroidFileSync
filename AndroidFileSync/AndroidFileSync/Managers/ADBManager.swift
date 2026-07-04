@@ -3028,46 +3028,91 @@ class ADBManager {
 
     // MARK: - Media Scanner
     
+    private static func normalizeMediaPath(_ path: String) -> String {
+        var p = path
+        if p.hasPrefix("/sdcard") {
+            p = "/storage/emulated/0" + p.dropFirst(7)
+        } else if p.hasPrefix("sdcard") {
+            p = "/storage/emulated/0" + p.dropFirst(6)
+        } else if p.hasPrefix("/mnt/sdcard") {
+            p = "/storage/emulated/0" + p.dropFirst(11)
+        }
+        return p
+    }
+
     /// Triggers the Android media scanner for a specific file path so it appears in the Gallery
-    /// and Google Photos immediately. Scans both the file AND its parent directory in a single
-    /// ADB call so MediaStore indexes the file properly without extra round-trip overhead.
+    /// and Google Photos immediately. Scans the file using content call, content insert, cmd media.scanner, and broadcast intent.
     static func triggerMediaScan(path: String) async {
         let adbPath = getADBPath()
         guard !adbPath.isEmpty else { return }
         
-        let escapedPath = path.replacingOccurrences(of: "'", with: "'\\''")
+        let normPath = normalizeMediaPath(path)
+        let escapedNorm = normPath.replacingOccurrences(of: "'", with: "'\\''")
+        let escapedRaw = path.replacingOccurrences(of: "'", with: "'\\''")
         
-        // Derive parent directory for the directory-level scan that Google Photos needs
-        let parentDir = (path as NSString).deletingLastPathComponent
-        let escapedParent = parentDir.replacingOccurrences(of: "'", with: "'\\''")
+        var parts: [String] = []
+        // 1. Android 10+: ContentProvider scan_file IPC call
+        parts.append("content call --uri content://media --method scan_file --arg '\(escapedNorm)' >/dev/null 2>&1")
+        // 2. Direct MediaStore DB record insertion fallback
+        parts.append("content insert --uri content://media/external/file --bind _data:s:'\(escapedNorm)' >/dev/null 2>&1")
+        // 3. Android 11/12 service scan
+        parts.append("cmd media.scanner scan '\(escapedNorm)' >/dev/null 2>&1")
+        // 4. Legacy broadcast intent fallback
+        parts.append("am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d 'file://\(escapedNorm)' >/dev/null 2>&1")
+        if normPath != path {
+            parts.append("am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d 'file://\(escapedRaw)' >/dev/null 2>&1")
+        }
         
-        // Combined single-call strategy (file + parent dir) — avoids extra ADB round trips:
-        //
-        // 1. Modern (Android 11+): "cmd media.scanner scan" on both file and parent directory
-        //    → This updates the MediaStore database so Google Photos sees the new files
-        // 2. Legacy (Android ≤10): broadcast intent for single-file scan
-        //
-        // All commands are chained with ';' (not &&) so failures in one don't block others.
-        // All output is suppressed to keep it lightweight.
-        let command = "cmd media.scanner scan '\(escapedPath)' >/dev/null 2>&1; cmd media.scanner scan '\(escapedParent)' >/dev/null 2>&1; am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d 'file://\(escapedPath)' >/dev/null 2>&1"
-        
+        let command = parts.joined(separator: "; ")
         _ = await Shell.runAsync(adbPath, args: deviceArgs(["shell", command]))
     }
     
-    /// Lightweight post-batch media scan: scans a single directory so Google Photos picks up
-    /// all newly uploaded files. Called once after a batch upload completes — NOT per file.
-    /// Uses a short timeout so it never blocks the UI or other ADB operations.
-    static func triggerMediaScanForDirectory(_ directoryPath: String) async {
+    /// Lightweight post-batch media scan: scans multiple files in chunks so Google Photos picks up
+    /// all newly uploaded files. Called once after a batch upload completes.
+    /// Uses chunks of 20 files to avoid blocking ADB for too long.
+    static func triggerMediaScanForFiles(_ filePaths: [String]) async {
         let adbPath = getADBPath()
-        guard !adbPath.isEmpty else { return }
+        guard !adbPath.isEmpty, !filePaths.isEmpty else { return }
         
-        let escapedPath = directoryPath.replacingOccurrences(of: "'", with: "'\\''")
+        // Chunk into groups of 20 to avoid shell command length limits and ADB bottleneck
+        let chunkSize = 20
+        for i in stride(from: 0, to: filePaths.count, by: chunkSize) {
+            let chunk = Array(filePaths[i..<min(i + chunkSize, filePaths.count)])
+            
+            var commandParts: [String] = []
+            for path in chunk {
+                let normPath = normalizeMediaPath(path)
+                let escapedNorm = normPath.replacingOccurrences(of: "'", with: "'\\''")
+                let escapedRaw = path.replacingOccurrences(of: "'", with: "'\\''")
+                
+                // 1. Android 10+: ContentProvider call directly to MediaProvider
+                commandParts.append("content call --uri content://media --method scan_file --arg '\(escapedNorm)' >/dev/null 2>&1")
+                // 2. Direct MediaStore DB record insertion fallback
+                commandParts.append("content insert --uri content://media/external/file --bind _data:s:'\(escapedNorm)' >/dev/null 2>&1")
+                // 3. Android 11/12 service scan
+                commandParts.append("cmd media.scanner scan '\(escapedNorm)' >/dev/null 2>&1")
+                // 4. Legacy broadcast intent fallback (canonical path + raw path)
+                commandParts.append("am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d 'file://\(escapedNorm)' >/dev/null 2>&1")
+                if normPath != path {
+                    commandParts.append("am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d 'file://\(escapedRaw)' >/dev/null 2>&1")
+                }
+            }
+            
+            let command = commandParts.joined(separator: "; ")
+            
+            // Give each chunk 10 seconds to finish
+            _ = await Shell.runAsyncWithTimeout(
+                adbPath, args: deviceArgs(["shell", command]), timeoutSeconds: 10.0
+            )
+            
+            // Sleep briefly between chunks to let the Android system breathe
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
         
-        // Single directory scan — 'cmd media.scanner scan' is recursive for directories
-        // and fast for a single folder. 5-second timeout ensures we never block.
-        let command = "cmd media.scanner scan '\(escapedPath)' >/dev/null 2>&1"
+        // Post-batch volume rescan trigger: forces MediaStore to sync external_primary volume
+        let volumeCmd = "content call --uri content://media --method scan_volume --arg external_primary >/dev/null 2>&1; content call --uri content://media --method scan_volume --arg external >/dev/null 2>&1"
         _ = await Shell.runAsyncWithTimeout(
-            adbPath, args: deviceArgs(["shell", command]), timeoutSeconds: 5.0
+            adbPath, args: deviceArgs(["shell", volumeCmd]), timeoutSeconds: 5.0
         )
     }
     

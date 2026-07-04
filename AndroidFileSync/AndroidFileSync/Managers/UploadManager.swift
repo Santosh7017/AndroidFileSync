@@ -20,15 +20,19 @@ class UploadManager: ObservableObject {
                 )
             }
             appManager?.operationEngine.processQueue()
+            downloadManager?.triggerProcessQueue()
         }
     }
     private var lastActiveUploadsCount = 0
     private var internalActiveUploads: [String: UploadProgress] = [:]
     weak var deviceManager: DeviceManager?
     weak var appManager: AppManager?
+    weak var downloadManager: DownloadManager?
     private var isConnectionOffline = false
     private var savedWirelessLimitBeforeBackup: Int? = nil
     private var targetDeviceSerial: String? = nil
+    
+    private var currentBatchId: UUID = UUID()
     
     @Published var batchTotal: Int = 0
     @Published var batchCompleted: Int = 0 {
@@ -60,9 +64,29 @@ class UploadManager: ObservableObject {
     @Published var isPreparing: Bool = false
     @Published var preparingMessage: String = ""
     
-    @Published var maxConcurrent: Int {
-        didSet { UserDefaults.standard.set(maxConcurrent, forKey: "maxConcurrentUploads") }
+    private var isAutoClamping = false
+    private var preferredMaxConcurrent: Int = 3
+    private var temporaryMaxConcurrent: Int? = nil
+    
+    @Published var maxConcurrent: Int = 3 {
+        didSet {
+            if !isAutoClamping {
+                let activeDownloadsCount = downloadManager?.runningTransfersCount ?? 0
+                let isDual = activeDownloadsCount > 0
+                
+                if isDual {
+                    temporaryMaxConcurrent = maxConcurrent
+                } else {
+                    temporaryMaxConcurrent = nil
+                    preferredMaxConcurrent = maxConcurrent
+                    UserDefaults.standard.set(maxConcurrent, forKey: "maxConcurrentUploads")
+                }
+            }
+            triggerProcessQueue()
+        }
     }
+    
+    @Published var effectiveConcurrentLimit: Int = 3
     
     private let progressLock = NSLock()
     private var backgroundProgress: [String: (bytes: UInt64, speed: Double)] = [:]
@@ -94,12 +118,20 @@ struct UploadQueueItem {
     private var internalBatchCompleted: Int = 0
     
     // Active running tasks counter for queue processor
-    private var activeRunningCount: Int = 0
     private let activeRunningLock = NSLock()
+    private var activeRunningCount = 0
+    
+    var runningTransfersCount: Int {
+        activeRunningLock.lock()
+        defer { activeRunningLock.unlock() }
+        return activeRunningCount
+    }
     
     init() {
         let saved = UserDefaults.standard.integer(forKey: "maxConcurrentUploads")
-        self.maxConcurrent = saved > 0 ? min(max(saved, 1), 10) : 3
+        let clamped = saved > 0 ? min(max(saved, 1), 10) : 3
+        self.preferredMaxConcurrent = clamped
+        self.maxConcurrent = clamped
     }
     
     // MARK: - Sleep Prevention
@@ -195,15 +227,43 @@ struct UploadQueueItem {
     }
 
     @MainActor
+    func forceReevaluateConcurrencyLimit() {
+        let isWireless = deviceManager?.connectionType == .wireless
+        let isAppBusy = appManager?.operationEngine.isBusy ?? false
+        let activeDownloadsCount = downloadManager?.runningTransfersCount ?? 0
+        let downloadsActive = activeDownloadsCount > 0
+        
+        let maxUploadCap: Int
+        if isWireless {
+            if downloadsActive {
+                maxUploadCap = isAppBusy ? 3 : 4
+            } else {
+                maxUploadCap = isAppBusy ? 6 : 8
+            }
+        } else {
+            if downloadsActive {
+                maxUploadCap = isAppBusy ? 5 : 8
+            } else {
+                maxUploadCap = isAppBusy ? 10 : 10
+            }
+        }
+        
+        let targetMax = min(preferredMaxConcurrent, maxUploadCap)
+        if self.maxConcurrent != targetMax {
+            self.isAutoClamping = true
+            self.maxConcurrent = targetMax
+            self.isAutoClamping = false
+        }
+    }
+
+    @MainActor
     private func markUploadFailed(localPath: String, error: Error) {
         AppLogger.log("❌ Upload failed for \(localPath): \(error.localizedDescription)", level: .error)
         if var upload = internalActiveUploads[localPath] {
             upload.error = error.localizedDescription
             upload.transferSpeed = 0
             internalActiveUploads[localPath] = upload
-            if !isBatchUploading {
-                activeUploads = internalActiveUploads
-            }
+            activeUploads = internalActiveUploads
         }
         progressLock.lock()
         backgroundProgress.removeValue(forKey: localPath)
@@ -212,14 +272,12 @@ struct UploadQueueItem {
     
     private func isConnectionError(_ error: Error) -> Bool {
         let msg = error.localizedDescription.lowercased()
-        return msg.contains("device offline") ||
-               msg.contains("eof") ||
-               msg.contains("closed") ||
-               msg.contains("protocol fault") ||
-               msg.contains("device not found") ||
-               msg.contains("transport") ||
-               msg.contains("timeout") ||
-               msg.contains("connection reset")
+        // Consider any error as a potential connection/I/O issue that warrants a retry,
+        // EXCEPT for permanent file errors.
+        if msg.contains("no such file or directory") || msg.contains("file not found") || msg.contains("permission denied") {
+            return false
+        }
+        return true
     }
     
     // MARK: - Cancellation
@@ -301,6 +359,7 @@ struct UploadQueueItem {
             
             self.batchTotal = 0
             self.batchCompleted = 0
+            self.downloadManager?.forceReevaluateConcurrencyLimit()
         }
     }
     
@@ -380,23 +439,31 @@ struct UploadQueueItem {
             }
         }
         
-        await ADBManager.triggerMediaScan(path: safeDevicePath)
+        let batchUploading = isBatchUploading
         
-        let delayNs: UInt64 = isBatchUploading ? 300_000_000 : 1_000_000_000
-        try? await Task.sleep(nanoseconds: delayNs)
-        
-        await MainActor.run {
-            internalActiveUploads.removeValue(forKey: localPath)
-            activeUploads = internalActiveUploads
-            stopTimerIfNeeded()
-        }
-        
-        flagLock.lock()
-        cancellationFlags.removeValue(forKey: localPath)
-        flagLock.unlock()
-        
-        if !isBatchUploading && activeUploads.isEmpty {
-            endPreventingSleep()
+        Task.detached { [weak self] in
+            
+            let delayNs: UInt64 = batchUploading ? 300_000_000 : 1_000_000_000
+            try? await Task.sleep(nanoseconds: delayNs)
+            
+            await MainActor.run {
+                self?.internalActiveUploads.removeValue(forKey: localPath)
+                if let dict = self?.internalActiveUploads {
+                    self?.activeUploads = dict
+                }
+                self?.stopTimerIfNeeded()
+            }
+            
+            self?.flagLock.lock()
+            self?.cancellationFlags.removeValue(forKey: localPath)
+            self?.flagLock.unlock()
+            
+            let shouldEndSleep = await MainActor.run {
+                !(self?.isBatchUploading ?? false) && (self?.activeUploads.isEmpty ?? true)
+            }
+            if shouldEndSleep {
+                self?.endPreventingSleep()
+            }
         }
     }
     
@@ -470,9 +537,7 @@ struct UploadQueueItem {
                 self.internalActiveUploads[localPath]?.isComplete = true
                 self.internalActiveUploads[localPath]?.bytesTransferred = fileSize
                 self.internalActiveUploads[localPath]?.transferSpeed = 0
-                if !self.isBatchUploading {
-                    self.activeUploads = self.internalActiveUploads
-                }
+                self.activeUploads = self.internalActiveUploads
             }
             
             await ADBManager.triggerMediaScan(path: safeDevicePath)
@@ -483,9 +548,7 @@ struct UploadQueueItem {
             
             await MainActor.run {
                 self.internalActiveUploads.removeValue(forKey: localPath)
-                if !self.isBatchUploading {
-                    self.activeUploads = self.internalActiveUploads
-                }
+                self.activeUploads = self.internalActiveUploads
                 self.stopTimerIfNeeded()
             }
             
@@ -520,19 +583,29 @@ struct UploadQueueItem {
         
         Task { @MainActor in
             self.targetDeviceSerial = ADBManager.activeDeviceSerial
-            if !self.isBatchUploading {
+            if self.isBatchUploading {
+                self.batchTotal += files.count
+            } else {
+                self.currentBatchId = UUID()
                 self.batchTotal = files.count
-                self.batchCompleted = 0
                 
                 self.progressLock.lock()
                 self.internalBatchCompleted = 0
                 self.progressLock.unlock()
+                self.batchCompleted = 0
                 
                 self.isBatchUploading = true
                 self.batchCancelled = false
                 self.startTimerIfNeeded()
+            }
+            
+            let isWireless = self.deviceManager?.connectionType == .wireless
+            let isAppBusy = self.appManager?.operationEngine.isBusy ?? false
+            let downloadsActive = (self.downloadManager?.runningTransfersCount ?? 0) > 0 || (self.downloadManager?.isBatchDownloading ?? false)
+            if isWireless {
+                self.effectiveConcurrentLimit = downloadsActive ? (isAppBusy ? 2 : 3) : (isAppBusy ? 4 : 5)
             } else {
-                self.batchTotal += files.count
+                self.effectiveConcurrentLimit = downloadsActive ? (isAppBusy ? 5 : 6) : min(self.maxConcurrent, isAppBusy ? 10 : 12)
             }
         }
         
@@ -563,21 +636,38 @@ struct UploadQueueItem {
         enqueueFiles(files: files)
     }
     
-    // MARK: - Queue Processor (single sliding window)
+    func triggerProcessQueue() {
+        queueLock.lock()
+        let shouldStart = !isProcessingQueue && !pendingFiles.isEmpty
+        if shouldStart { isProcessingQueue = true }
+        queueLock.unlock()
+        
+        if shouldStart {
+            Task.detached(priority: .userInitiated) { [weak self] in
+                await self?.processQueue()
+            }
+        }
+    }
     
     private func processQueue() async {
         beginPreventingSleep()
         
+        let batchId = await MainActor.run { self.currentBatchId }
+        
+        var scannedFiles = Set<String>()
+        
         await withTaskGroup(of: Void.self) { group in
             while !batchCancelled {
-                // Check if target device has switched
-                if targetDeviceSerial != ADBManager.activeDeviceSerial {
-                    print("⚠️ UploadManager: Device connection changed (from \(targetDeviceSerial ?? "nil") to \(ADBManager.activeDeviceSerial ?? "nil")). Aborting batch upload.")
+                // Check if target device has switched explicitly (ignore transient nil during ADB refreshes)
+                if let currentSerial = ADBManager.activeDeviceSerial, let targetSerial = targetDeviceSerial, currentSerial != targetSerial {
+                    print("⚠️ UploadManager: Explicit device switch from \(targetSerial) to \(currentSerial). Aborting batch upload.")
                     await MainActor.run {
                         self.cancelAllUploads()
                     }
                     break
                 }
+                
+                
                 
                 // Concurrency adjustment for Wi-Fi + active app operations
                 let isWireless = deviceManager?.connectionType == .wireless
@@ -621,12 +711,57 @@ struct UploadQueueItem {
                     continue
                 }
                 
-                // Dynamic wireless/wired concurrency limit
-                var limit = self.maxConcurrent
-                if isWireless && isAppBusy {
-                    limit = min(limit, 6)
+                // Dynamic wireless/wired concurrency limit with 50/50 cross-direction slot budgeting
+                let activeDownloadsCount = downloadManager?.runningTransfersCount ?? 0
+                let downloadsActive = activeDownloadsCount > 0
+                
+                let globalCombinedLimit: Int
+                let maxUploadCap: Int
+                if isWireless {
+                    if downloadsActive {
+                        // 50-50 Wi-Fi allocation: 4 uploads + 4 downloads = 8 total (or 3+3 if app ops active)
+                        globalCombinedLimit = isAppBusy ? 6 : 8
+                        maxUploadCap = isAppBusy ? 3 : 4
+                    } else {
+                        globalCombinedLimit = isAppBusy ? 6 : 8
+                        maxUploadCap = isAppBusy ? 6 : 8
+                    }
+                } else {
+                    if downloadsActive {
+                        // USB allocation: 8 uploads + 8 downloads = 16 total (or 5+5 if app ops active)
+                        globalCombinedLimit = isAppBusy ? 10 : 16
+                        maxUploadCap = isAppBusy ? 5 : 8
+                    } else {
+                        globalCombinedLimit = isAppBusy ? 10 : 16
+                        maxUploadCap = isAppBusy ? 10 : 10
+                    }
                 }
+                if !downloadsActive {
+                    await MainActor.run { self.temporaryMaxConcurrent = nil }
+                }
+                
+                let baseMax = await MainActor.run { self.temporaryMaxConcurrent ?? self.preferredMaxConcurrent }
+                let targetMax = min(baseMax, maxUploadCap)
+                if self.maxConcurrent != targetMax {
+                    await MainActor.run { 
+                        self.isAutoClamping = true
+                        self.maxConcurrent = targetMax 
+                        self.isAutoClamping = false
+                    }
+                }
+                
+                var limit = min(self.maxConcurrent, maxUploadCap)
                 limit = min(limit, self.activeCongestionCap)
+                
+                let maxUploadsAllowed = max(1, globalCombinedLimit - activeDownloadsCount)
+                limit = min(limit, maxUploadsAllowed)
+                
+                let newLimit = limit
+                await MainActor.run {
+                    if self.effectiveConcurrentLimit != newLimit {
+                        self.effectiveConcurrentLimit = newLimit
+                    }
+                }
                 
                 activeRunningLock.lock()
                 var running = activeRunningCount
@@ -639,6 +774,13 @@ struct UploadQueueItem {
                     queueLock.unlock()
                     
                     guard let file = nextFile else { break }
+                    
+                    let (safeName, _) = FileNameHelper.getSafeFilename(file.fileName)
+                    let fullDevicePath = file.devicePath.hasSuffix("/")
+                        ? file.devicePath + safeName
+                        : file.devicePath + "/" + safeName
+                    
+                    scannedFiles.insert(fullDevicePath)
                     
                     activeRunningLock.lock()
                     activeRunningCount += 1
@@ -659,33 +801,51 @@ struct UploadQueueItem {
                             didSucceed = true
                             
                             // Success path: gradually restore congestion cap
-                            self.successStreak += 1
-                            if self.successStreak >= 3 {
-                                self.activeCongestionCap = min(10, self.activeCongestionCap + 1)
-                                self.successStreak = 0
-                             }
+                            await MainActor.run {
+                                self.successStreak += 1
+                                if self.successStreak >= 3 {
+                                    self.activeCongestionCap = min(10, self.activeCongestionCap + 1)
+                                    self.successStreak = 0
+                                }
+                            }
                         } catch {
                             var updatedFile = file
                             updatedFile.retryCount += 1
-                            let isDisconnected = (self.deviceManager.map { !$0.isConnected } ?? true) || self.isConnectionError(error)
-                            let deviceSwitched = self.targetDeviceSerial != ADBManager.activeDeviceSerial
-                             
-                            if isDisconnected && updatedFile.retryCount <= 5 && !self.batchCancelled && !self.isCancelled(localPath: file.localPath) && !deviceSwitched {
-                                print("📶 UploadManager: Connection lost during upload of \(file.fileName). Retry \(updatedFile.retryCount)/5. Re-enqueuing...")
-                                self.isConnectionOffline = true
-                                connErrorOccurred = true
-                                self.activeCongestionCap = max(2, self.activeCongestionCap / 2)
-                                self.successStreak = 0
+                            let newRetryCount = updatedFile.retryCount
+                            
+                            let isDisconnected = await MainActor.run {
+                                (self.deviceManager?.isConnected == false) || self.isConnectionError(error)
+                            }
+                            let deviceSwitched = await MainActor.run {
+                                if let current = ADBManager.activeDeviceSerial, let target = self.targetDeviceSerial {
+                                    return current != target
+                                }
+                                return false
+                            }
+                            let isItemCancelled = await MainActor.run {
+                                self.isCancelled(localPath: file.localPath)
+                            }
+                            let isBatchCanc = await MainActor.run { self.batchCancelled }
+                            
+                            if isDisconnected && newRetryCount <= 5 && !isBatchCanc && !isItemCancelled && !deviceSwitched {
+                                print("📶 UploadManager: Connection lost during upload of \(file.fileName). Retry \(newRetryCount)/5. Re-enqueuing...")
                                 
-                                self.queueLock.lock()
-                                self.pendingFiles.insert(updatedFile, at: 0)
-                                self.queueLock.unlock()
+                                await MainActor.run {
+                                    self.isConnectionOffline = true
+                                    self.activeCongestionCap = max(2, self.activeCongestionCap / 2)
+                                    self.successStreak = 0
+                                    self.queueLock.lock()
+                                    self.pendingFiles.insert(updatedFile, at: 0)
+                                    self.queueLock.unlock()
+                                }
+                                connErrorOccurred = true
                                 
                                 // Update UI error status
                                 await MainActor.run {
                                     if var progress = self.internalActiveUploads[file.localPath] {
-                                        progress.error = "Connection lost (Retry \(updatedFile.retryCount)/5) - waiting for reconnect..."
+                                        progress.error = "Connection lost (Retry \(newRetryCount)/5) - waiting for reconnect..."
                                         progress.transferSpeed = 0
+                                        progress.retryCount = newRetryCount
                                         self.internalActiveUploads[file.localPath] = progress
                                         self.activeUploads = self.internalActiveUploads
                                     }
@@ -693,22 +853,29 @@ struct UploadQueueItem {
                                 try? await Task.sleep(nanoseconds: 500_000_000)
                             } else {
                                 // Permanent failure (either not a connection error, or exceeded max retries)
-                                let finalError = updatedFile.retryCount > 5 ? NSError(domain: "UploadManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed after 5 connection retries."]) : error
+                                let finalError = newRetryCount > 5 ? NSError(domain: "UploadManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed after 5 connection retries."]) : error
                                 await MainActor.run {
                                     self.markUploadFailed(localPath: file.localPath, error: finalError)
                                 }
                             }
                         }
                         
-                        self.activeRunningLock.lock()
-                        self.activeRunningCount -= 1
-                        self.activeRunningLock.unlock()
+                        await MainActor.run {
+                            self.activeRunningLock.lock()
+                            self.activeRunningCount -= 1
+                            self.activeRunningLock.unlock()
+                        }
                         
                         // Increment batch completion ONLY if it successfully transferred or failed permanently
-                        if didSucceed || self.batchCancelled || self.isCancelled(localPath: file.localPath) || !connErrorOccurred {
-                            self.progressLock.lock()
-                            self.internalBatchCompleted += 1
-                            self.progressLock.unlock()
+                        let isBatchCanc = await MainActor.run { self.batchCancelled }
+                        let isItemCanc = await MainActor.run { self.isCancelled(localPath: file.localPath) }
+                        let currentId = await MainActor.run { self.currentBatchId }
+                        if didSucceed || isItemCanc || (!isBatchCanc && !connErrorOccurred) {
+                            if currentId == batchId {
+                                self.progressLock.lock()
+                                self.internalBatchCompleted += 1
+                                self.progressLock.unlock()
+                            }
                         }
                     }
                 }
@@ -743,6 +910,12 @@ struct UploadQueueItem {
             await group.waitForAll()
         }
         
+        // Scan all modified files in chunks in the background
+        let filesToScan = Array(scannedFiles)
+        Task.detached {
+            await ADBManager.triggerMediaScanForFiles(filesToScan)
+        }
+        
         queueLock.lock()
         isProcessingQueue = false
         queueLock.unlock()
@@ -751,6 +924,7 @@ struct UploadQueueItem {
             self.flushUIUpdates()
             self.isBatchUploading = false
             self.stopTimerIfNeeded()
+            self.downloadManager?.forceReevaluateConcurrencyLimit()
         }
         
         endPreventingSleep()

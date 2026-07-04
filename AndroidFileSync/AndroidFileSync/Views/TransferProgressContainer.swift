@@ -49,7 +49,16 @@ struct TransferProgressContainer: View {
                     downloadManager.cancelAllDownloads()
                     uploadManager.cancelAllUploads()
                 },
-                concurrencyBinding: getConcurrencyBinding(),
+                onCancelAllUploads: {
+                    uploadManager.cancelAllUploads()
+                },
+                onCancelAllDownloads: {
+                    downloadManager.cancelAllDownloads()
+                },
+                concurrencyBinding: (downloadManager.isBatchDownloading || !downloadManager.activeDownloads.isEmpty) ? $downloadManager.maxConcurrent : nil,
+                uploadConcurrencyBinding: (uploadManager.isBatchUploading || !uploadManager.activeUploads.isEmpty) ? $uploadManager.maxConcurrent : nil,
+                effectiveDownloadLimit: downloadManager.effectiveConcurrentLimit,
+                effectiveUploadLimit: uploadManager.effectiveConcurrentLimit,
                 isWirelessConnection: deviceManager.connectionType == .wireless,
                 isAppOperationBusy: appManager.operationEngine.isBusy,
                 isScanning: downloadManager.isScanning,
@@ -57,15 +66,6 @@ struct TransferProgressContainer: View {
                 folderName: downloadManager.currentFolderName
             )
         }
-    }
-    
-    private func getConcurrencyBinding() -> Binding<Int>? {
-        if downloadManager.isBatchDownloading {
-            return $downloadManager.maxConcurrent
-        } else if uploadManager.isBatchUploading {
-            return $uploadManager.maxConcurrent
-        }
-        return nil
     }
     
     private func handleCancel(_ item: TransferItemData) {
@@ -80,18 +80,20 @@ struct TransferProgressContainer: View {
     
     /// Returns batch info for showing overall progress
     private func getBatchInfo() -> BatchTransferInfo? {
-        if downloadManager.isBatchDownloading && downloadManager.batchTotal > 1 {
+        let downloadsActive = downloadManager.isBatchDownloading || !downloadManager.activeDownloads.isEmpty
+        let dlComp = downloadsActive && downloadManager.batchTotal > 0 ? downloadManager.batchCompleted : nil
+        let dlTot = downloadsActive && downloadManager.batchTotal > 0 ? downloadManager.batchTotal : nil
+        
+        let uploadsActive = uploadManager.isBatchUploading || !uploadManager.activeUploads.isEmpty
+        let ulComp = uploadsActive && uploadManager.batchTotal > 0 ? uploadManager.batchCompleted : nil
+        let ulTot = uploadsActive && uploadManager.batchTotal > 0 ? uploadManager.batchTotal : nil
+        
+        if dlTot != nil || ulTot != nil {
             return BatchTransferInfo(
-                completed: downloadManager.batchCompleted,
-                total: downloadManager.batchTotal,
-                isDownload: true
-            )
-        }
-        if uploadManager.isBatchUploading && uploadManager.batchTotal > 1 {
-            return BatchTransferInfo(
-                completed: uploadManager.batchCompleted,
-                total: uploadManager.batchTotal,
-                isDownload: false
+                downloadCompleted: dlComp,
+                downloadTotal: dlTot,
+                uploadCompleted: ulComp,
+                uploadTotal: ulTot
             )
         }
         return nil

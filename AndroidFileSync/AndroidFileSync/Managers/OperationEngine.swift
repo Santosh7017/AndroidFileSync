@@ -92,7 +92,7 @@ final class OperationEngine: ObservableObject {
     }
 
     var operationLimit: Int {
-        if isWireless && isTransferActive {
+        if isWireless {
             return 2
         }
         return Int.max
