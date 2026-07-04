@@ -19,10 +19,16 @@ class UploadManager: ObservableObject {
                     userInfo: ["type": "upload", "count": count]
                 )
             }
+            appManager?.operationEngine.processQueue()
         }
     }
     private var lastActiveUploadsCount = 0
     private var internalActiveUploads: [String: UploadProgress] = [:]
+    weak var deviceManager: DeviceManager?
+    weak var appManager: AppManager?
+    private var isConnectionOffline = false
+    private var savedWirelessLimitBeforeBackup: Int? = nil
+    private var targetDeviceSerial: String? = nil
     
     @Published var batchTotal: Int = 0
     @Published var batchCompleted: Int = 0 {
@@ -69,10 +75,20 @@ class UploadManager: ObservableObject {
     private var transferActivity: NSObjectProtocol?
     private let activityLock = NSLock()
     
+struct UploadQueueItem {
+    let localPath: String
+    let fileName: String
+    let fileSize: UInt64
+    let devicePath: String
+    var retryCount: Int = 0
+}
+
     // Shared upload queue — new drops append here instead of starting a separate batch
     private let queueLock = NSLock()
-    private var pendingFiles: [(localPath: String, fileName: String, fileSize: UInt64, devicePath: String)] = []
+    private var pendingFiles: [UploadQueueItem] = []
     private var isProcessingQueue = false
+    private var activeCongestionCap: Int = 10
+    private var successStreak: Int = 0
     
     // Throttled batch counter — updated in background, flushed to @Published by timer
     private var internalBatchCompleted: Int = 0
@@ -117,6 +133,7 @@ class UploadManager: ObservableObject {
         var isComplete: Bool = false
         var isCancelled: Bool = false
         var error: String?
+        var retryCount: Int = 0
         
         var progress: Double {
             guard totalBytes > 0 else { return 0 }
@@ -191,6 +208,18 @@ class UploadManager: ObservableObject {
         progressLock.lock()
         backgroundProgress.removeValue(forKey: localPath)
         progressLock.unlock()
+    }
+    
+    private func isConnectionError(_ error: Error) -> Bool {
+        let msg = error.localizedDescription.lowercased()
+        return msg.contains("device offline") ||
+               msg.contains("eof") ||
+               msg.contains("closed") ||
+               msg.contains("protocol fault") ||
+               msg.contains("device not found") ||
+               msg.contains("transport") ||
+               msg.contains("timeout") ||
+               msg.contains("connection reset")
     }
     
     // MARK: - Cancellation
@@ -279,7 +308,8 @@ class UploadManager: ObservableObject {
         localPath: String,
         fileName: String,
         fileSize: UInt64,
-        to devicePath: String
+        to devicePath: String,
+        retryCount: Int = 0
     ) async throws {
         if batchCancelled { return }
         
@@ -296,16 +326,15 @@ class UploadManager: ObservableObject {
             fileName: safeFileName,
             localPath: localPath,
             devicePath: safeDevicePath,
-            totalBytes: fileSize
+            totalBytes: fileSize,
+            retryCount: retryCount
         )
         
         beginPreventingSleep()
         
         await MainActor.run {
             internalActiveUploads[localPath] = progress
-            if !isBatchUploading {
-                activeUploads = internalActiveUploads
-            }
+            activeUploads = internalActiveUploads
             startTimerIfNeeded()
         }
         
@@ -347,9 +376,7 @@ class UploadManager: ObservableObject {
                 upload.bytesTransferred = fileSize
                 upload.transferSpeed = 0
                 internalActiveUploads[localPath] = upload
-                if !isBatchUploading {
-                    activeUploads = internalActiveUploads
-                }
+                activeUploads = internalActiveUploads
             }
         }
         
@@ -485,12 +512,14 @@ class UploadManager: ObservableObject {
         guard !files.isEmpty else { return }
         
         queueLock.lock()
-        pendingFiles.append(contentsOf: files)
+        let items = files.map { UploadQueueItem(localPath: $0.localPath, fileName: $0.fileName, fileSize: $0.fileSize, devicePath: $0.devicePath) }
+        pendingFiles.append(contentsOf: items)
         let shouldStart = !isProcessingQueue
         if shouldStart { isProcessingQueue = true }
         queueLock.unlock()
         
         Task { @MainActor in
+            self.targetDeviceSerial = ADBManager.activeDeviceSerial
             if !self.isBatchUploading {
                 self.batchTotal = files.count
                 self.batchCompleted = 0
@@ -541,7 +570,63 @@ class UploadManager: ObservableObject {
         
         await withTaskGroup(of: Void.self) { group in
             while !batchCancelled {
-                let limit = self.maxConcurrent
+                // Check if target device has switched
+                if targetDeviceSerial != ADBManager.activeDeviceSerial {
+                    print("⚠️ UploadManager: Device connection changed (from \(targetDeviceSerial ?? "nil") to \(ADBManager.activeDeviceSerial ?? "nil")). Aborting batch upload.")
+                    await MainActor.run {
+                        self.cancelAllUploads()
+                    }
+                    break
+                }
+                
+                // Concurrency adjustment for Wi-Fi + active app operations
+                let isWireless = deviceManager?.connectionType == .wireless
+                let isAppBusy = appManager?.operationEngine.isBusy ?? false
+                
+                if isWireless && isAppBusy {
+                    if savedWirelessLimitBeforeBackup == nil {
+                        if maxConcurrent > 6 {
+                            savedWirelessLimitBeforeBackup = maxConcurrent
+                            await MainActor.run {
+                                self.maxConcurrent = 6
+                            }
+                        }
+                    }
+                } else {
+                    if let savedLimit = savedWirelessLimitBeforeBackup {
+                        await MainActor.run {
+                            self.maxConcurrent = savedLimit
+                        }
+                        savedWirelessLimitBeforeBackup = nil
+                    }
+                }
+                
+                // Connection protection: if device is offline, pause queue processing
+                let isOffline = (deviceManager.map { !$0.isConnected } ?? true) || isConnectionOffline
+                if isOffline {
+                    await MainActor.run {
+                        for (localPath, var upload) in internalActiveUploads where !upload.isComplete && !upload.isCancelled {
+                            upload.error = "Device offline - waiting for reconnect..."
+                            upload.transferSpeed = 0
+                            internalActiveUploads[localPath] = upload
+                        }
+                        activeUploads = internalActiveUploads
+                    }
+                    try? await Task.sleep(nanoseconds: 1_000_000_000) // Sleep 1 second
+                    
+                    // Reset our local offline flag if device is back online according to deviceManager
+                    if let dm = deviceManager, dm.isConnected {
+                        isConnectionOffline = false
+                    }
+                    continue
+                }
+                
+                // Dynamic wireless/wired concurrency limit
+                var limit = self.maxConcurrent
+                if isWireless && isAppBusy {
+                    limit = min(limit, 6)
+                }
+                limit = min(limit, self.activeCongestionCap)
                 
                 activeRunningLock.lock()
                 var running = activeRunningCount
@@ -561,22 +646,70 @@ class UploadManager: ObservableObject {
                     activeRunningLock.unlock()
                     
                     group.addTask {
+                        var didSucceed = false
+                        var connErrorOccurred = false
                         do {
-                            try await self.uploadFile(
-                                localPath: file.localPath,
-                                fileName: file.fileName,
-                                fileSize: file.fileSize,
-                                to: file.devicePath
-                            )
-                        } catch { }
+                             try await self.uploadFile(
+                                 localPath: file.localPath,
+                                 fileName: file.fileName,
+                                 fileSize: file.fileSize,
+                                 to: file.devicePath,
+                                 retryCount: file.retryCount
+                             )
+                            didSucceed = true
+                            
+                            // Success path: gradually restore congestion cap
+                            self.successStreak += 1
+                            if self.successStreak >= 3 {
+                                self.activeCongestionCap = min(10, self.activeCongestionCap + 1)
+                                self.successStreak = 0
+                             }
+                        } catch {
+                            var updatedFile = file
+                            updatedFile.retryCount += 1
+                            let isDisconnected = (self.deviceManager.map { !$0.isConnected } ?? true) || self.isConnectionError(error)
+                            let deviceSwitched = self.targetDeviceSerial != ADBManager.activeDeviceSerial
+                             
+                            if isDisconnected && updatedFile.retryCount <= 5 && !self.batchCancelled && !self.isCancelled(localPath: file.localPath) && !deviceSwitched {
+                                print("📶 UploadManager: Connection lost during upload of \(file.fileName). Retry \(updatedFile.retryCount)/5. Re-enqueuing...")
+                                self.isConnectionOffline = true
+                                connErrorOccurred = true
+                                self.activeCongestionCap = max(2, self.activeCongestionCap / 2)
+                                self.successStreak = 0
+                                
+                                self.queueLock.lock()
+                                self.pendingFiles.insert(updatedFile, at: 0)
+                                self.queueLock.unlock()
+                                
+                                // Update UI error status
+                                await MainActor.run {
+                                    if var progress = self.internalActiveUploads[file.localPath] {
+                                        progress.error = "Connection lost (Retry \(updatedFile.retryCount)/5) - waiting for reconnect..."
+                                        progress.transferSpeed = 0
+                                        self.internalActiveUploads[file.localPath] = progress
+                                        self.activeUploads = self.internalActiveUploads
+                                    }
+                                }
+                                try? await Task.sleep(nanoseconds: 500_000_000)
+                            } else {
+                                // Permanent failure (either not a connection error, or exceeded max retries)
+                                let finalError = updatedFile.retryCount > 5 ? NSError(domain: "UploadManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed after 5 connection retries."]) : error
+                                await MainActor.run {
+                                    self.markUploadFailed(localPath: file.localPath, error: finalError)
+                                }
+                            }
+                        }
                         
                         self.activeRunningLock.lock()
                         self.activeRunningCount -= 1
                         self.activeRunningLock.unlock()
                         
-                        self.progressLock.lock()
-                        self.internalBatchCompleted += 1
-                        self.progressLock.unlock()
+                        // Increment batch completion ONLY if it successfully transferred or failed permanently
+                        if didSucceed || self.batchCancelled || self.isCancelled(localPath: file.localPath) || !connErrorOccurred {
+                            self.progressLock.lock()
+                            self.internalBatchCompleted += 1
+                            self.progressLock.unlock()
+                        }
                     }
                 }
                 

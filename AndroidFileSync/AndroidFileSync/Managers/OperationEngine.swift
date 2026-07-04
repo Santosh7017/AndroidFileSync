@@ -53,6 +53,11 @@ final class OperationEngine: ObservableObject {
     }
 
     @Published private(set) var groups: [OperationGroup] = []
+    private var activeTasks: [UUID: Task<Void, Never>] = [:]
+
+    weak var deviceManager: DeviceManager? = nil
+    weak var uploadManager: UploadManager? = nil
+    weak var downloadManager: DownloadManager? = nil
 
     var activeGroups: [OperationGroup] { groups.filter { !$0.isFinished } }
     var activeGroupCount: Int { activeGroups.count }
@@ -69,7 +74,56 @@ final class OperationEngine: ObservableObject {
         }
     }
 
+    var runningOperationsCount: Int {
+        groups.flatMap(\.operations).filter {
+            if case .running = $0.state { return true }
+            return false
+        }.count
+    }
+
+    var isTransferActive: Bool {
+        let uploadsActive = !(uploadManager?.activeUploads.values.filter { !$0.isComplete }.isEmpty ?? true)
+        let downloadsActive = !(downloadManager?.activeDownloads.values.filter { !$0.isComplete }.isEmpty ?? true)
+        return uploadsActive || downloadsActive
+    }
+
+    var isWireless: Bool {
+        deviceManager?.connectionType == .wireless
+    }
+
+    var operationLimit: Int {
+        if isWireless && isTransferActive {
+            return 2
+        }
+        return Int.max
+    }
+
+    func processQueue() {
+        let limit = operationLimit
+        var currentRunning = runningOperationsCount
+        
+        guard currentRunning < limit else { return }
+        
+        for g in groups where !g.isFinished {
+            for pendingOp in g.operations {
+                if case .pending = pendingOp.state {
+                    if canStart(pendingOp) {
+                        startOperation(pendingOp, groupId: g.id)
+                        currentRunning += 1
+                        if currentRunning >= limit {
+                            return
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private func canStart(_ op: LiveOperation) -> Bool {
+        if runningOperationsCount >= operationLimit {
+            return false
+        }
+
         let allOps = groups.flatMap(\.operations)
         let isRunning = allOps.contains { otherOp in
             if otherOp.packageName != op.packageName { return false }
@@ -101,11 +155,7 @@ final class OperationEngine: ObservableObject {
         executors[groupId] = executor
         groups.append(group)
 
-        for op in operations {
-            if canStart(op) {
-                startOperation(op, groupId: groupId)
-            }
-        }
+        processQueue()
     }
 
     private func startOperation(_ op: LiveOperation, groupId: UUID) {
@@ -116,11 +166,18 @@ final class OperationEngine: ObservableObject {
 
         guard let executor = executors[groupId] else { return }
         let runningOp = groups[groupIdx].operations[opIdx]
+        let opId = op.id
 
-        Task {
+        let task = Task {
             let (success, message) = await executor(runningOp)
-            await onOperationComplete(runningOp, groupId: groupId, success: success, message: message)
+            if Task.isCancelled {
+                await onOperationComplete(runningOp, groupId: groupId, success: false, message: "Cancelled")
+            } else {
+                await onOperationComplete(runningOp, groupId: groupId, success: success, message: message)
+            }
+            activeTasks.removeValue(forKey: opId)
         }
+        activeTasks[opId] = task
     }
 
     private func onOperationComplete(_ op: LiveOperation, groupId: UUID, success: Bool, message: String) async {
@@ -129,16 +186,7 @@ final class OperationEngine: ObservableObject {
 
         groups[groupIdx].operations[opIdx].state = .completed(success: success, message: message)
 
-        for g in groups where !g.isFinished {
-            for pendingOp in g.operations {
-                if case .pending = pendingOp.state, pendingOp.packageName == op.packageName {
-                    if canStart(pendingOp) {
-                        startOperation(pendingOp, groupId: g.id)
-                    }
-                    break
-                }
-            }
-        }
+        processQueue()
 
         if let updatedGroupIdx = groups.firstIndex(where: { $0.id == groupId }),
            groups[updatedGroupIdx].isFinished {
@@ -156,8 +204,18 @@ final class OperationEngine: ObservableObject {
     func cancelPending(in groupId: UUID) {
         guard let groupIdx = groups.firstIndex(where: { $0.id == groupId }) else { return }
         for i in groups[groupIdx].operations.indices {
-            if case .pending = groups[groupIdx].operations[i].state {
+            let op = groups[groupIdx].operations[i]
+            switch op.state {
+            case .pending:
                 groups[groupIdx].operations[i].state = .completed(success: false, message: "Cancelled")
+            case .running:
+                groups[groupIdx].operations[i].state = .completed(success: false, message: "Cancelled")
+                if let task = activeTasks[op.id] {
+                    task.cancel()
+                    activeTasks.removeValue(forKey: op.id)
+                }
+            default:
+                break
             }
         }
     }

@@ -11,6 +11,7 @@ struct TransferProgressContainer: View {
     @ObservedObject var downloadManager: DownloadManager
     @ObservedObject var uploadManager: UploadManager
     @ObservedObject var deviceManager: DeviceManager
+    @ObservedObject var appManager: AppManager
     
     var body: some View {
         if uploadManager.isPreparing {
@@ -50,6 +51,7 @@ struct TransferProgressContainer: View {
                 },
                 concurrencyBinding: getConcurrencyBinding(),
                 isWirelessConnection: deviceManager.connectionType == .wireless,
+                isAppOperationBusy: appManager.operationEngine.isBusy,
                 isScanning: downloadManager.isScanning,
                 scanningFolderName: downloadManager.scanningFolderName,
                 folderName: downloadManager.currentFolderName
@@ -111,7 +113,8 @@ struct TransferProgressContainer: View {
                 isComplete: download.isComplete,
                 isCancelled: download.isCancelled,
                 error: download.error,
-                isUpload: false
+                isUpload: false,
+                retryCount: download.retryCount
             ))
         }
         
@@ -128,7 +131,8 @@ struct TransferProgressContainer: View {
                 isComplete: upload.isComplete,
                 isCancelled: upload.isCancelled,
                 error: upload.error,
-                isUpload: true
+                isUpload: true,
+                retryCount: upload.retryCount
             ))
         }
         

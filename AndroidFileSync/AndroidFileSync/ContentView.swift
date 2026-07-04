@@ -169,92 +169,32 @@ struct ContentView: View {
     }
 
     private var isAnyOperationActive: Bool {
-        appManager.operationEngine.isBusy ||
-        uploadManager.isBatchUploading ||
-        downloadManager.isBatchDownloading ||
-        !uploadManager.activeUploads.isEmpty ||
-        !downloadManager.activeDownloads.isEmpty ||
-        uploadManager.isPreparing ||
-        downloadManager.isScanning
+        appManager.operationEngine.isBusy
     }
 
     private var unifiedStatusText: String {
         let activeGroups = appManager.operationEngine.activeGroups
-        let hasAppOps = !activeGroups.isEmpty
+        let isMultiGroup = activeGroups.count > 1
+        let group = activeGroups.first
+        let completed = group?.completedCount ?? 0
+        let total = group?.totalCount ?? 0
+        let verb = group?.actionVerb ?? "Processing"
+        let currentApp = group?.currentRunningName ?? ""
         
-        let uploadsCount = uploadManager.activeUploads.count
-        let downloadsCount = downloadManager.activeDownloads.count
-        let hasTransfers = uploadsCount > 0 || downloadsCount > 0
-        
-        if hasAppOps && hasTransfers {
-            let appVerb = activeGroups.first?.actionVerb ?? "Processing"
-            let appCount = activeGroups.count
-            let transferText = uploadsCount > 0 ? "\(uploadsCount) upload\(uploadsCount > 1 ? "s" : "")" : "\(downloadsCount) download\(downloadsCount > 1 ? "s" : "")"
-            return "\(appVerb) apps (\(appCount) active) • Copying files (\(transferText))"
-        } else if hasAppOps {
-            let isMultiGroup = activeGroups.count > 1
-            let group = activeGroups.first
-            let completed = group?.completedCount ?? 0
-            let total = group?.totalCount ?? 0
-            let verb = group?.actionVerb ?? "Processing"
-            let currentApp = group?.currentRunningName ?? ""
-            
-            if isMultiGroup {
-                return "Multiple operations executing... (\(activeGroups.count) active)"
-            } else if total > 1 {
-                return "\(verb) apps... \(completed + 1) of \(total) (\(currentApp))"
-            } else {
-                return "\(verb) \(currentApp)…"
-            }
-        } else if hasTransfers {
-            if uploadManager.isPreparing {
-                return uploadManager.preparingMessage
-            }
-            if downloadManager.isScanning {
-                return "Scanning \(downloadManager.scanningFolderName)..."
-            }
-            
-            let uploads = uploadsCount > 0 ? "\(uploadsCount) upload\(uploadsCount > 1 ? "s" : "")" : ""
-            let downloads = downloadsCount > 0 ? "\(downloadsCount) download\(downloadsCount > 1 ? "s" : "")" : ""
-            let parts = [uploads, downloads].filter { !$0.isEmpty }
-            return "Copying files... " + parts.joined(separator: ", ")
+        if isMultiGroup {
+            return "Multiple operations executing... (\(activeGroups.count) active)"
+        } else if total > 1 {
+            return "\(verb) apps... \(completed + 1) of \(total) (\(currentApp))"
+        } else {
+            return "\(verb) \(currentApp)…"
         }
-        
-        return ""
     }
 
     private var unifiedProgressFraction: Double {
         let activeGroups = appManager.operationEngine.activeGroups
         let totalOps = activeGroups.reduce(0) { $0 + $1.totalCount }
         let completedOps = activeGroups.reduce(0) { $0 + $1.completedCount }
-        let opFraction = totalOps > 0 ? Double(completedOps) / Double(totalOps) : 0.0
-        
-        let uploadTotal = uploadManager.batchTotal
-        let uploadCompleted = uploadManager.batchCompleted
-        let uploadFraction = uploadTotal > 0 ? Double(uploadCompleted) / Double(uploadTotal) : 0.0
-        
-        let downloadTotal = downloadManager.batchTotal
-        let downloadCompleted = downloadManager.batchCompleted
-        let downloadFraction = downloadTotal > 0 ? Double(downloadCompleted) / Double(downloadTotal) : 0.0
-        
-        var totalFractions: [Double] = []
-        if totalOps > 0 { totalFractions.append(opFraction) }
-        
-        if uploadTotal > 0 {
-            totalFractions.append(uploadFraction)
-        } else if !uploadManager.activeUploads.isEmpty {
-            let sum = uploadManager.activeUploads.values.reduce(0.0) { $0 + $1.progress }
-            totalFractions.append(sum / Double(uploadManager.activeUploads.count))
-        }
-        
-        if downloadTotal > 0 {
-            totalFractions.append(downloadFraction)
-        } else if !downloadManager.activeDownloads.isEmpty {
-            let sum = downloadManager.activeDownloads.values.reduce(0.0) { $0 + $1.progress }
-            totalFractions.append(sum / Double(downloadManager.activeDownloads.count))
-        }
-        
-        return totalFractions.isEmpty ? 0.0 : totalFractions.reduce(0.0, +) / Double(totalFractions.count)
+        return totalOps > 0 ? Double(completedOps) / Double(totalOps) : 0.0
     }
 
     private var unifiedStatusColor: Color {
@@ -377,85 +317,6 @@ struct ContentView: View {
                             }
                             .padding(.bottom, 8)
                         }
-                        Divider()
-                    }
-                    
-                    let uploads = uploadManager.activeUploads.values
-                    let downloads = downloadManager.activeDownloads.values
-                    if !uploads.isEmpty || !downloads.isEmpty {
-                        Text("File Transfers")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(.secondary)
-                        
-                        ForEach(Array(uploads)) { upload in
-                            VStack(alignment: .leading, spacing: 2) {
-                                HStack {
-                                    Image(systemName: "arrow.up.circle.fill")
-                                        .foregroundColor(.blue)
-                                    Text(upload.fileName)
-                                        .font(.system(size: 11))
-                                    Spacer()
-                                    Text(upload.speedText)
-                                        .font(.system(size: 10))
-                                    
-                                    Button {
-                                        uploadManager.cancelUpload(localPath: upload.localPath)
-                                    } label: {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .foregroundColor(.secondary)
-                                            .font(.system(size: 10))
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                                
-                                GeometryReader { geo in
-                                    RoundedRectangle(cornerRadius: 2)
-                                        .fill(Color.blue.opacity(0.2))
-                                        .frame(height: 4)
-                                        .overlay(alignment: .leading) {
-                                            RoundedRectangle(cornerRadius: 2)
-                                                .fill(Color.blue)
-                                                .frame(width: geo.size.width * upload.progress)
-                                        }
-                                }
-                                .frame(height: 4)
-                            }
-                        }
-                        
-                        ForEach(Array(downloads)) { download in
-                            VStack(alignment: .leading, spacing: 2) {
-                                HStack {
-                                    Image(systemName: "arrow.down.circle.fill")
-                                        .foregroundColor(.blue)
-                                    Text(download.fileName)
-                                        .font(.system(size: 11))
-                                    Spacer()
-                                    Text(download.speedText)
-                                        .font(.system(size: 10))
-                                    
-                                    Button {
-                                        downloadManager.cancelDownload(devicePath: download.devicePath)
-                                    } label: {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .foregroundColor(.secondary)
-                                            .font(.system(size: 10))
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                                
-                                GeometryReader { geo in
-                                    RoundedRectangle(cornerRadius: 2)
-                                        .fill(Color.blue.opacity(0.2))
-                                        .frame(height: 4)
-                                        .overlay(alignment: .leading) {
-                                            RoundedRectangle(cornerRadius: 2)
-                                                .fill(Color.blue)
-                                                .frame(width: geo.size.width * download.progress)
-                                        }
-                                }
-                                .frame(height: 4)
-                            }
-                        }
                     }
                 }
             }
@@ -463,8 +324,6 @@ struct ContentView: View {
             
             Button(role: .destructive) {
                 appManager.operationEngine.cancelAllPending()
-                uploadManager.cancelAllUploads()
-                downloadManager.cancelAllDownloads()
                 showOperationDetails = false
             } label: {
                 Text("Cancel All Active Tasks")
@@ -755,13 +614,12 @@ struct ContentView: View {
                 )
             }
 
-            if !isAnyOperationActive {
-                TransferProgressContainer(
-                    downloadManager: downloadManager,
-                    uploadManager: uploadManager,
-                    deviceManager: deviceManager
-                )
-            }
+            TransferProgressContainer(
+                downloadManager: downloadManager,
+                uploadManager: uploadManager,
+                deviceManager: deviceManager,
+                appManager: appManager
+            )
         }
         .overlay(alignment: .topTrailing) {
             if updateChecker.shouldShowBanner {
@@ -816,6 +674,13 @@ struct ContentView: View {
         .onAppear {
             updateChecker.checkForUpdates()
             deviceManager.setDiagnosticsEnabled(diagnosticsControl.isEnabled)
+            uploadManager.deviceManager = deviceManager
+            downloadManager.deviceManager = deviceManager
+            uploadManager.appManager = appManager
+            downloadManager.appManager = appManager
+            appManager.operationEngine.deviceManager = deviceManager
+            appManager.operationEngine.uploadManager = uploadManager
+            appManager.operationEngine.downloadManager = downloadManager
         }
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             var fileURLs: [URL] = []

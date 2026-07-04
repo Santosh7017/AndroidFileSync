@@ -143,21 +143,30 @@ class ADBPairingBrowser: ObservableObject {
                                     let keepForRepairing = ipToDisconnect.map { ADBPairingBrowser.needsRepairing.contains($0) } ?? false
                                     if !keepForRepairing {
                                         self.discoveredDevices.removeValue(forKey: name)
-                                    }
-                                    self.evaluateStatus()
-                                    
-                                    // Force adb disconnect, but NOT for devices needing re-pair
-                                    if let ip = ipToDisconnect,
-                                       !ADBPairingBrowser.needsRepairing.contains(ip) {
-                                        Task {
-                                            let adbPath = ADBManager.getADBPath()
-                                            if !adbPath.isEmpty {
-                                                print("📡 NWBrowser: Device \(name) removed, forcing adb disconnect \(ip)")
-                                                _ = await Shell.runAsyncWithTimeout(adbPath, args: ["disconnect", ip], timeoutSeconds: 3.0)
+                                        // Force adb disconnect, but NOT for devices needing re-pair, and absolutely NOT if it is currently connected/active
+                                        if let ip = ipToDisconnect,
+                                           !ADBPairingBrowser.needsRepairing.contains(ip) {
+                                            
+                                            let isActiveIP = ADBManager.activeDeviceSerial.map { $0.contains(ip) || ip.contains($0) } ?? false
+                                            let isActiveName = ADBManager.activeDeviceSerial.map { $0.contains(name) || name.contains($0) } ?? false
+                                            let isActive = isActiveIP || isActiveName
+                                            
+                                            if !isActive {
+                                                Task {
+                                                    let adbPath = ADBManager.getADBPath()
+                                                    if !adbPath.isEmpty {
+                                                        print("📡 NWBrowser: Device \(name) removed, forcing adb disconnect \(ip)")
+                                                        _ = await Shell.runAsyncWithTimeout(adbPath, args: ["disconnect", ip], timeoutSeconds: 3.0)
+                                                    }
+                                                    self.onDeviceListChanged?()
+                                                }
+                                            } else {
+                                                print("📡 NWBrowser: Device \(name) (\(ip)) removed from mDNS, but skipping adb disconnect because it is currently connected and active.")
                                             }
-                                            self.onDeviceListChanged?()
                                         }
                                     }
+                                    self.evaluateStatus()
+                                    self.onDeviceListChanged?()
                                 }
                             }
                             self?.pendingRemovals[name] = task

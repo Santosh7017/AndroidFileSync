@@ -17,10 +17,33 @@ class DownloadManager: ObservableObject {
                     userInfo: ["type": "download", "count": count]
                 )
             }
+            appManager?.operationEngine.processQueue()
         }
     }
     private var lastActiveDownloadsCount = 0
     private var internalActiveDownloads: [String: DownloadProgress] = [:]
+    weak var deviceManager: DeviceManager?
+    weak var appManager: AppManager?
+    private var isConnectionOffline = false
+    private var savedWirelessLimitBeforeBackup: Int? = nil
+    private var targetDeviceSerial: String? = nil
+    
+    struct DownloadQueueItem {
+        let devicePath: String
+        let fileName: String
+        let fileSize: UInt64
+        let localPath: String
+        var retryCount: Int = 0
+    }
+    
+    // Download queue properties
+    private var pendingFiles: [DownloadQueueItem] = []
+    private let queueLock = NSLock()
+    private var isProcessingQueue = false
+    private var activeCongestionCap: Int = 10
+    private var successStreak: Int = 0
+    private var activeRunningCount = 0
+    private let activeRunningLock = NSLock()
     
     // Batch tracking for showing "X of Y completed"
     @Published var batchTotal: Int = 0
@@ -63,7 +86,7 @@ class DownloadManager: ObservableObject {
     private var isBatchCancelled: Bool = false
     
     // Store active tasks for cancellation (Key: devicePath)
-    private var activeTasks: [String: Task<Void, Never>] = [:]
+    private var activeTasks: [String: Task<Void, Error>] = [:]
     private let taskLock = NSLock()
     
     // App Nap / system sleep prevention — held while any download is active.
@@ -115,6 +138,7 @@ class DownloadManager: ObservableObject {
         var isComplete: Bool = false
         var isCancelled: Bool = false
         var error: String?
+        var retryCount: Int = 0
         
         var progress: Double {
             guard totalBytes > 0 else { return 0 }
@@ -255,12 +279,40 @@ class DownloadManager: ObservableObject {
             self.progressLock.unlock()
         }
     }
+    @MainActor
+    private func markDownloadFailed(devicePath: String, error: Error) {
+        AppLogger.log("❌ Download failed for \(devicePath): \(error.localizedDescription)", level: .error)
+        if var download = internalActiveDownloads[devicePath] {
+            download.error = error.localizedDescription
+            download.transferSpeed = 0
+            internalActiveDownloads[devicePath] = download
+            if !isBatchDownloading {
+                activeDownloads = internalActiveDownloads
+            }
+        }
+        progressLock.lock()
+        backgroundProgress.removeValue(forKey: devicePath)
+        progressLock.unlock()
+    }
+    
+    private func isConnectionError(_ error: Error) -> Bool {
+        let msg = error.localizedDescription.lowercased()
+        return msg.contains("device offline") ||
+               msg.contains("eof") ||
+               msg.contains("closed") ||
+               msg.contains("protocol fault") ||
+               msg.contains("device not found") ||
+               msg.contains("transport") ||
+               msg.contains("timeout") ||
+               msg.contains("connection reset")
+    }
     
     func downloadFile(
         devicePath: String,
         fileName: String,
         fileSize: UInt64,
-        to localPath: String
+        to localPath: String,
+        retryCount: Int = 0
     ) async throws {
         
         // Initialize progress
@@ -268,7 +320,8 @@ class DownloadManager: ObservableObject {
             fileName: fileName,
             devicePath: devicePath,
             localPath: localPath,
-            totalBytes: fileSize
+            totalBytes: fileSize,
+            retryCount: retryCount
         )
         
         // Add to UI on main thread and start timer
@@ -283,7 +336,6 @@ class DownloadManager: ObservableObject {
         // Prevent App Nap / system sleep during transfer
         beginPreventingSleep()
         
-        
         // Create and store the task for cancellation
         let downloadTask = Task.detached { [weak self] in
             guard let self = self else { return }
@@ -293,17 +345,22 @@ class DownloadManager: ObservableObject {
                 localPath: localPath
             )
             
-            // Consume stream and update background storage
-            for await (bytesTransferred, speed) in progressStream {
-                // Check for cancellation
-                if Task.isCancelled {
-                    print("🛑 Download cancelled: \(fileName)")
-                    return
+            do {
+                // Consume stream and update background storage
+                for try await (bytesTransferred, speed) in progressStream {
+                    // Check for cancellation
+                    if Task.isCancelled {
+                        print("🛑 Download cancelled: \(fileName)")
+                        return
+                    }
+                    
+                    self.progressLock.lock()
+                    self.backgroundProgress[devicePath] = (bytesTransferred, speed)
+                    self.progressLock.unlock()
                 }
-                
-                self.progressLock.lock()
-                self.backgroundProgress[devicePath] = (bytesTransferred, speed)
-                self.progressLock.unlock()
+            } catch {
+                await self.markDownloadFailed(devicePath: devicePath, error: error)
+                throw error
             }
             
             // Check for cancellation before marking complete
@@ -325,7 +382,6 @@ class DownloadManager: ObservableObject {
                     self.activeDownloads = self.internalActiveDownloads
                 }
             }
-            
             
             // Show 100% briefly
             let batchActive = await MainActor.run { self.isBatchDownloading }
@@ -354,7 +410,7 @@ class DownloadManager: ObservableObject {
         taskLock.unlock()
         
         // Wait for completion
-        await downloadTask.value
+        try await downloadTask.value
         
         // Clean up task reference
         taskLock.lock()
@@ -371,23 +427,23 @@ class DownloadManager: ObservableObject {
         devicePath: String,
         fileName: String,
         fileSize: UInt64,
-        to localPath: String
-    ) -> Task<Void, Never> {
+        to localPath: String,
+        retryCount: Int = 0
+    ) -> Task<Void, Error> {
         
         // Initialize progress
         let progress = DownloadProgress(
             fileName: fileName,
             devicePath: devicePath,
             localPath: localPath,
-            totalBytes: fileSize
+            totalBytes: fileSize,
+            retryCount: retryCount
         )
         
         // Add to UI on main thread and start timer
         Task { @MainActor in
             internalActiveDownloads[devicePath] = progress
-            if !isBatchDownloading {
-                activeDownloads = internalActiveDownloads
-            }
+            activeDownloads = internalActiveDownloads
             startTimerIfNeeded()
         }
         
@@ -400,17 +456,22 @@ class DownloadManager: ObservableObject {
                 localPath: localPath
             )
             
-            // Consume stream and update background storage
-            for await (bytesTransferred, speed) in progressStream {
-                // Check for cancellation
-                if Task.isCancelled {
-                    print("🛑 Download cancelled: \(fileName)")
-                    return
+            do {
+                // Consume stream and update background storage
+                for try await (bytesTransferred, speed) in progressStream {
+                    // Check for cancellation
+                    if Task.isCancelled {
+                        print("🛑 Download cancelled: \(fileName)")
+                        return
+                    }
+                    
+                    self.progressLock.lock()
+                    self.backgroundProgress[devicePath] = (bytesTransferred, speed)
+                    self.progressLock.unlock()
                 }
-                
-                self.progressLock.lock()
-                self.backgroundProgress[devicePath] = (bytesTransferred, speed)
-                self.progressLock.unlock()
+            } catch {
+                await self.markDownloadFailed(devicePath: devicePath, error: error)
+                throw error
             }
             
             // Check for cancellation before marking complete
@@ -428,9 +489,7 @@ class DownloadManager: ObservableObject {
                 self.internalActiveDownloads[devicePath]?.isComplete = true
                 self.internalActiveDownloads[devicePath]?.bytesTransferred = fileSize
                 self.internalActiveDownloads[devicePath]?.transferSpeed = 0
-                if !self.isBatchDownloading {
-                    self.activeDownloads = self.internalActiveDownloads
-                }
+                self.activeDownloads = self.internalActiveDownloads
             }
             
             // Show 100% briefly
@@ -440,9 +499,7 @@ class DownloadManager: ObservableObject {
             
             await MainActor.run {
                 self.internalActiveDownloads.removeValue(forKey: devicePath)
-                if !self.isBatchDownloading {
-                    self.activeDownloads = self.internalActiveDownloads
-                }
+                self.activeDownloads = self.internalActiveDownloads
                 self.stopTimerIfNeeded()
             }
             
@@ -496,8 +553,16 @@ class DownloadManager: ObservableObject {
         
         guard !itemsToDownload.isEmpty else { return }
         
+        queueLock.lock()
+        let items = itemsToDownload.map { DownloadQueueItem(devicePath: $0.devicePath, fileName: $0.fileName, fileSize: $0.fileSize, localPath: $0.localPath) }
+        pendingFiles.append(contentsOf: items)
+        let shouldStart = !isProcessingQueue
+        if shouldStart { isProcessingQueue = true }
+        queueLock.unlock()
+        
         // Initialize batch tracking
         await MainActor.run {
+            self.targetDeviceSerial = ADBManager.activeDeviceSerial
             if isBatchDownloading {
                 batchTotal += itemsToDownload.count
             } else {
@@ -509,63 +574,202 @@ class DownloadManager: ObservableObject {
         
         // Prevent App Nap / system sleep for the entire batch
         beginPreventingSleep()
-        
-        print("📥 Starting parallel download of \(itemsToDownload.count) files")
         isBatchCancelled = false
         
+        if shouldStart {
+            Task.detached(priority: .userInitiated) { [weak self] in
+                await self?.processQueue(fixedMax: fixedMax)
+            }
+        }
+    }
+    
+    private func processQueue(fixedMax: Int? = nil) async {
         await withTaskGroup(of: Void.self) { group in
-            var runningCount = 0
-            var fileIndex = 0
-            
-            while fileIndex < itemsToDownload.count && !isBatchCancelled {
-                // Re-read limit each iteration so live slider changes take effect
-                let limit = fixedMax ?? self.maxConcurrent
+            while !isBatchCancelled {
+                // Check if target device has switched
+                if targetDeviceSerial != ADBManager.activeDeviceSerial {
+                    print("⚠️ DownloadManager: Device connection changed (from \(targetDeviceSerial ?? "nil") to \(ADBManager.activeDeviceSerial ?? "nil")). Aborting batch download.")
+                    await MainActor.run {
+                        self.cancelAllDownloads()
+                    }
+                    break
+                }
+                
+                // Concurrency adjustment for Wi-Fi + active app operations
+                let isWireless = deviceManager?.connectionType == .wireless
+                let isAppBusy = appManager?.operationEngine.isBusy ?? false
+                
+                if isWireless && isAppBusy {
+                    if savedWirelessLimitBeforeBackup == nil {
+                        if maxConcurrent > 6 {
+                            savedWirelessLimitBeforeBackup = maxConcurrent
+                            await MainActor.run {
+                                self.maxConcurrent = 6
+                            }
+                        }
+                    }
+                } else {
+                    if let savedLimit = savedWirelessLimitBeforeBackup {
+                        await MainActor.run {
+                            self.maxConcurrent = savedLimit
+                        }
+                        savedWirelessLimitBeforeBackup = nil
+                    }
+                }
+                
+                // Connection protection: if device is offline, pause queue processing
+                let isOffline = (deviceManager.map { !$0.isConnected } ?? true) || isConnectionOffline
+                if isOffline {
+                    await MainActor.run {
+                        for (devicePath, var download) in internalActiveDownloads where !download.isComplete && !download.isCancelled {
+                            download.error = "Device offline - waiting for reconnect..."
+                            download.transferSpeed = 0
+                            internalActiveDownloads[devicePath] = download
+                        }
+                        activeDownloads = internalActiveDownloads
+                    }
+                    try? await Task.sleep(nanoseconds: 1_000_000_000) // Sleep 1 second
+                    
+                    // Reset our local offline flag if device is back online according to deviceManager
+                    if let dm = deviceManager, dm.isConnected {
+                        isConnectionOffline = false
+                    }
+                    continue
+                }
+                
+                // Dynamic wireless/wired concurrency limit
+                var limit = fixedMax ?? self.maxConcurrent
+                if isWireless && isAppBusy {
+                    limit = min(limit, 6)
+                }
+                limit = min(limit, self.activeCongestionCap)
+                
+                activeRunningLock.lock()
+                var running = activeRunningCount
+                activeRunningLock.unlock()
                 
                 // Fill up to limit slots
-                while runningCount < limit && fileIndex < itemsToDownload.count {
-                    let file = itemsToDownload[fileIndex]
-                    fileIndex += 1
-                    runningCount += 1
+                while running < limit && !isBatchCancelled {
+                    queueLock.lock()
+                    let nextFile = pendingFiles.isEmpty ? nil : pendingFiles.removeFirst()
+                    queueLock.unlock()
                     
-                    print("📥 [\(fileIndex)/\(itemsToDownload.count)] Starting: \(file.fileName)")
+                    guard let file = nextFile else { break }
+                    
+                    activeRunningLock.lock()
+                    activeRunningCount += 1
+                    running = activeRunningCount
+                    activeRunningLock.unlock()
                     
                     group.addTask {
+                        var didSucceed = false
+                        var connErrorOccurred = false
                         do {
-                            try await self.downloadFile(
-                                devicePath: file.devicePath,
-                                fileName: file.fileName,
-                                fileSize: file.fileSize,
-                                to: file.localPath
-                            )
-                            await MainActor.run { self.batchCompleted += 1 }
+                             try await self.downloadFile(
+                                 devicePath: file.devicePath,
+                                 fileName: file.fileName,
+                                 fileSize: file.fileSize,
+                                 to: file.localPath,
+                                 retryCount: file.retryCount
+                             )
+                            didSucceed = true
+                            
+                            // Success path: gradually restore congestion cap
+                            self.successStreak += 1
+                            if self.successStreak >= 3 {
+                                self.activeCongestionCap = min(10, self.activeCongestionCap + 1)
+                                self.successStreak = 0
+                            }
                         } catch {
-                            print("❌ Failed to download \(file.fileName): \(error)")
+                            var updatedFile = file
+                            updatedFile.retryCount += 1
+                             let isDisconnected = (self.deviceManager.map { !$0.isConnected } ?? true) || self.isConnectionError(error)
+                             let deviceSwitched = self.targetDeviceSerial != ADBManager.activeDeviceSerial
+                             
+                             if isDisconnected && updatedFile.retryCount <= 5 && !self.isBatchCancelled && !deviceSwitched {
+                                 print("📶 DownloadManager: Connection lost during download of \(file.fileName). Retry \(updatedFile.retryCount)/5. Re-enqueuing...")
+                                self.isConnectionOffline = true
+                                connErrorOccurred = true
+                                self.activeCongestionCap = max(2, self.activeCongestionCap / 2)
+                                self.successStreak = 0
+                                
+                                self.queueLock.lock()
+                                self.pendingFiles.insert(updatedFile, at: 0)
+                                self.queueLock.unlock()
+                                
+                                // Update UI error status
+                                await MainActor.run {
+                                    if var progress = self.internalActiveDownloads[file.devicePath] {
+                                        progress.error = "Connection lost (Retry \(updatedFile.retryCount)/5) - waiting for reconnect..."
+                                        progress.transferSpeed = 0
+                                        self.internalActiveDownloads[file.devicePath] = progress
+                                        self.activeDownloads = self.internalActiveDownloads
+                                    }
+                                }
+                                try? await Task.sleep(nanoseconds: 500_000_000)
+                            } else {
+                                // Permanent failure (either not a connection error, or exceeded max retries)
+                                let finalError = updatedFile.retryCount > 5 ? NSError(domain: "DownloadManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed after 5 connection retries."]) : error
+                                await MainActor.run {
+                                    self.markDownloadFailed(devicePath: file.devicePath, error: finalError)
+                                }
+                            }
+                        }
+                        
+                        self.activeRunningLock.lock()
+                        self.activeRunningCount -= 1
+                        self.activeRunningLock.unlock()
+                        
+                        // Increment batch completion ONLY if it successfully transferred or failed permanently
+                        if didSucceed || self.isBatchCancelled || !connErrorOccurred {
                             await MainActor.run { self.batchCompleted += 1 }
                         }
                     }
                 }
                 
-                // Wait for ONE slot to free before looping
-                if runningCount >= limit && fileIndex < itemsToDownload.count {
-                    await group.next()
-                    runningCount -= 1
+                if isBatchCancelled {
+                    group.cancelAll()
+                    break
                 }
+                
+                // Check if there's more work pending or running
+                queueLock.lock()
+                let hasMore = !pendingFiles.isEmpty
+                queueLock.unlock()
+                
+                activeRunningLock.lock()
+                let finalRunning = activeRunningCount
+                activeRunningLock.unlock()
+                
+                if finalRunning == 0 && !hasMore {
+                    break
+                }
+                
+                if finalRunning >= limit || (!hasMore && finalRunning > 0) {
+                    await group.next()
+                }
+            }
+            
+            if isBatchCancelled {
+                group.cancelAll()
             }
             
             await group.waitForAll()
         }
         
+        queueLock.lock()
+        isProcessingQueue = false
+        queueLock.unlock()
+        
         await MainActor.run {
-            isBatchDownloading = false
-            currentFolderName = ""
-            activeDownloads = internalActiveDownloads
-            stopTimerIfNeeded()
+            self.isBatchDownloading = false
+            self.currentFolderName = ""
+            self.activeDownloads = self.internalActiveDownloads
+            self.stopTimerIfNeeded()
         }
         
         // End sleep prevention now that all downloads are done
         endPreventingSleep()
-        
-        print("✅ All \(itemsToDownload.count) downloads completed")
     }
     
     // MARK: - Folder Download

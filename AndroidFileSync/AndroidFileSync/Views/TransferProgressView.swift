@@ -20,6 +20,7 @@ struct TransferItemData: Identifiable {
     let isCancelled: Bool
     let error: String?
     let isUpload: Bool
+    let retryCount: Int
 }
 
 // Batch transfer info
@@ -41,6 +42,7 @@ struct TransferProgressView: View {
     // Live concurrency control
     var concurrencyBinding: Binding<Int>? = nil
     var isWirelessConnection: Bool = false
+    var isAppOperationBusy: Bool = false
     
     // Folder-scan state
     var isScanning: Bool = false
@@ -156,7 +158,10 @@ struct TransferProgressView: View {
                             .font(.system(.caption, design: .monospaced, weight: .bold))
                             .frame(minWidth: 14, alignment: .center)
                         
-                        Button { binding.wrappedValue = min(10, binding.wrappedValue + 1) } label: {
+                        Button {
+                            let maxLimit = (isWirelessConnection && isAppOperationBusy) ? 6 : 10
+                            binding.wrappedValue = min(maxLimit, binding.wrappedValue + 1)
+                        } label: {
                             Image(systemName: "plus.circle")
                         }
                         .buttonStyle(.plain)
@@ -166,9 +171,15 @@ struct TransferProgressView: View {
                     
                     // Wireless hint
                     if isWirelessConnection {
-                        Text("Best: 1–5 on WiFi")
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundColor(.orange.opacity(0.8))
+                        if binding.wrappedValue >= 6 && isAppOperationBusy {
+                            Text("⚠️ Connection unstable (backup/op active)")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(.red)
+                        } else {
+                            Text("Best: 1–5 on WiFi")
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundColor(.orange.opacity(0.8))
+                        }
                     }
                 }
                 
@@ -351,7 +362,11 @@ struct OverlayProgressRow: View {
         if item.error != nil { return "Error" }
         if !item.speed.isEmpty { return item.speed }
         if item.percentage == 0 {
-            return item.bytesTransferred > 0 ? "<1%" : "Starting…"
+            if item.bytesTransferred > 0 {
+                return "<1%"
+            } else {
+                return item.retryCount > 0 ? "Retrying…" : "Starting…"
+            }
         }
         return "\(item.percentage)%"
     }
