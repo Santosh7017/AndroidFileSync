@@ -10,6 +10,16 @@ class UpdateChecker: ObservableObject {
     @Published var releaseURL = ""
     @Published var releaseNotes = ""
     @Published var isPreRelease = false
+    @Published var dmgURL = ""
+    @Published var isUpdating = false
+    @Published var updateStatusMessage = ""
+    @Published var updateCompleted = false
+
+    var isHomebrewInstall: Bool {
+        let fm = FileManager.default
+        return fm.fileExists(atPath: "/opt/homebrew/Caskroom/androidfilesync") ||
+               fm.fileExists(atPath: "/usr/local/Caskroom/androidfilesync")
+    }
 
     var isBetaChannel: Bool {
         get {
@@ -111,15 +121,27 @@ class UpdateChecker: ObservableObject {
             let htmlURL = json["html_url"] as? String ?? ""
             let body = json["body"] as? String ?? ""
             let preRelease = json["prerelease"] as? Bool ?? false
+            
+            var foundDmgURL = ""
+            if let assets = json["assets"] as? [[String: Any]] {
+                for asset in assets {
+                    if let name = asset["name"] as? String, name.lowercased().hasSuffix(".dmg"),
+                       let downloadURL = asset["browser_download_url"] as? String {
+                        foundDmgURL = downloadURL
+                        break
+                    }
+                }
+            }
 
             let hasUpdate = self.isNewer(remote: remoteVersion, current: self.currentVersion)
-            print("🔄 Latest release: v\(remoteVersion) | Pre-release: \(preRelease) | Current: v\(self.currentVersion) | Update available: \(hasUpdate)")
+            print("🔄 Latest release: v\(remoteVersion) | Pre-release: \(preRelease) | Current: v\(self.currentVersion) | Update available: \(hasUpdate) | DMG URL: \(foundDmgURL)")
 
             DispatchQueue.main.async {
                 self.latestVersion = remoteVersion
                 self.releaseURL = htmlURL
                 self.releaseNotes = body
                 self.isPreRelease = preRelease
+                self.dmgURL = foundDmgURL
                 self.updateAvailable = hasUpdate
             }
         }.resume()
@@ -161,5 +183,136 @@ class UpdateChecker: ObservableObject {
     func openReleasePage() {
         guard let url = URL(string: releaseURL) else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    func performAutoUpdate() {
+        guard !isUpdating else { return }
+        
+        isUpdating = true
+        updateStatusMessage = "Starting update..."
+        
+        if isHomebrewInstall {
+            performHomebrewUpgrade()
+        } else if !dmgURL.isEmpty {
+            performDMGAutoUpdate()
+        } else {
+            openReleasePage()
+            isUpdating = false
+        }
+    }
+
+    private func performHomebrewUpgrade() {
+        Task {
+            await MainActor.run {
+                self.updateStatusMessage = "Upgrading via Homebrew..."
+            }
+            
+            let brewPath = FileManager.default.fileExists(atPath: "/opt/homebrew/bin/brew")
+                ? "/opt/homebrew/bin/brew"
+                : "/usr/local/bin/brew"
+            
+            let (code, output, error) = await Shell.runAsync(brewPath, args: ["upgrade", "androidfilesync"])
+            
+            await MainActor.run {
+                if code == 0 || output.contains("already installed") || error.contains("already installed") {
+                    self.promptForRestart()
+                } else {
+                    print("⚠️ Homebrew upgrade failed: \(error)")
+                    self.openReleasePage()
+                    self.isUpdating = false
+                }
+            }
+        }
+    }
+
+    private func performDMGAutoUpdate() {
+        guard let url = URL(string: dmgURL) else {
+            openReleasePage()
+            isUpdating = false
+            return
+        }
+        
+        Task {
+            await MainActor.run {
+                self.updateStatusMessage = "Downloading DMG update..."
+            }
+            
+            do {
+                let (tempLocation, _) = try await URLSession.shared.download(from: url)
+                let targetDMG = NSTemporaryDirectory() + "AndroidFileSync_Update.dmg"
+                try? FileManager.default.removeItem(atPath: targetDMG)
+                try FileManager.default.moveItem(at: tempLocation, to: URL(fileURLWithPath: targetDMG))
+                
+                await MainActor.run {
+                    self.updateStatusMessage = "Mounting & Installing..."
+                }
+                
+                let mountPoint = "/Volumes/AndroidFileSync_Update_Mount"
+                _ = await Shell.runAsync("/usr/bin/hdiutil", args: ["detach", mountPoint, "-force"])
+                
+                let (attachCode, _, _) = await Shell.runAsync("/usr/bin/hdiutil", args: ["attach", targetDMG, "-mountpoint", mountPoint, "-nobrowse", "-quiet"])
+                
+                if attachCode == 0 {
+                    let sourceApp = mountPoint + "/AndroidFileSync.app"
+                    let targetApp = Bundle.main.bundlePath
+                    
+                    if FileManager.default.fileExists(atPath: sourceApp) {
+                        let (copyCode, _, _) = await Shell.runAsync("/usr/bin/ditto", args: [sourceApp, targetApp])
+                        _ = await Shell.runAsync("/usr/bin/hdiutil", args: ["detach", mountPoint, "-force"])
+                        try? FileManager.default.removeItem(atPath: targetDMG)
+                        
+                        if copyCode == 0 {
+                            await MainActor.run {
+                                self.promptForRestart()
+                            }
+                            return
+                        }
+                    }
+                    _ = await Shell.runAsync("/usr/bin/hdiutil", args: ["detach", mountPoint, "-force"])
+                }
+                
+                await MainActor.run {
+                    NSWorkspace.shared.open(URL(fileURLWithPath: targetDMG))
+                    self.isUpdating = false
+                }
+            } catch {
+                await MainActor.run {
+                    print("⚠️ DMG update failed: \(error.localizedDescription)")
+                    self.openReleasePage()
+                    self.isUpdating = false
+                }
+            }
+        }
+    }
+
+    @Published var updateReadyToRestart = false
+
+    @MainActor
+    func promptForRestart() {
+        self.isUpdating = false
+        self.updateCompleted = true
+        self.updateReadyToRestart = true
+        self.updateStatusMessage = "v\(latestVersion) ready — restart to apply"
+        
+        let alert = NSAlert()
+        alert.messageText = "Update Installed Successfully"
+        alert.informativeText = "AndroidFileSync v\(latestVersion) has been installed.\n\nThe application needs to restart to apply the update.\n\nWould you like to restart now, or wait until your work is done?"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Restart Now")
+        alert.addButton(withTitle: "Restart Later")
+        
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            self.relaunchApp()
+        }
+    }
+
+    func relaunchApp() {
+        let appPath = Bundle.main.bundlePath
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        task.arguments = ["-n", appPath]
+        try? task.run()
+        NSApplication.shared.terminate(nil)
     }
 }
