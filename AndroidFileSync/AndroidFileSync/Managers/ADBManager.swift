@@ -976,7 +976,7 @@ class ADBManager {
             // stat * got some — fill missing
             if !files.isEmpty {
                 AppLogger.log("⚙️ [listFiles] stat * returned \(files.count)/\(fileNames.count), filling missing")
-                return fillMissing(from: fileNames, existing: files, basePath: path)
+                return await fillMissing(from: fileNames, existing: files, basePath: path, adbPath: adbPath)
             }
         }
         
@@ -985,7 +985,7 @@ class ADBManager {
         AppLogger.log("⚙️ [listFiles] stat * unavailable, returning \(fileNames.count) files with names only")
         let totalElapsed = Date().timeIntervalSince(totalStart)
         AppLogger.log("⚙️ [listFiles] ✅ COMPLETE for \(path) - \(fileNames.count) names-only in \(String(format: "%.3fs", totalElapsed)) total")
-        return fillMissing(from: fileNames, existing: [], basePath: path)
+        return await fillMissing(from: fileNames, existing: [], basePath: path, adbPath: adbPath)
     }
     
     // MARK: - Device Diagnostics
@@ -1670,18 +1670,18 @@ class ADBManager {
             }
             AppLogger.log("⚙️ [listFilesWithDetails] Merged stat + ls-la returned \(merged.count)/\(exactNames.count) files")
             if merged.count == exactNames.count { return merged }
-            return fillMissing(from: exactNames, existing: merged, basePath: path)
+            return await fillMissing(from: exactNames, existing: merged, basePath: path, adbPath: adbPath)
         }
         
         if !statFiles.isEmpty {
-            return fillMissing(from: exactNames, existing: statFiles, basePath: path)
+            return await fillMissing(from: exactNames, existing: statFiles, basePath: path, adbPath: adbPath)
         }
         if !lsFiles.isEmpty {
-            return fillMissing(from: exactNames, existing: lsFiles, basePath: path)
+            return await fillMissing(from: exactNames, existing: lsFiles, basePath: path, adbPath: adbPath)
         }
         
         AppLogger.log("⚠️ [listFilesWithDetails] Both stat and ls-la failed completely. Falling back to names-only.")
-        return fillMissing(from: exactNames, existing: [], basePath: path)
+        return await fillMissing(from: exactNames, existing: [], basePath: path, adbPath: adbPath)
     }
     
     /// Parses a `content query` row to extract the `_display_name` value.
@@ -1849,14 +1849,28 @@ class ADBManager {
         return files
     }
     
-    // MARK: - Raw-name fallback (guarantees no files are lost)
-    private static func fillMissing(from exactNames: [String], existing: [ADBFile], basePath: String) -> [ADBFile] {
+    // MARK: - Raw-name fallback (guarantees no files are lost, but filters deleted ghosts)
+    private static func fillMissing(from exactNames: [String], existing: [ADBFile], basePath: String, adbPath: String) async -> [ADBFile] {
         let parsed = Set(existing.map { $0.name })
         var result = existing
         for name in exactNames where !parsed.contains(name) {
             let fullPath = basePath.hasSuffix("/") ? basePath + name : basePath + "/" + name
-            let isDir = !name.contains(".")
-            result.append(ADBFile(name: name, path: fullPath, isDirectory: isDir, size: 0, modificationDate: nil))
+            let escapedPath = FileNameHelper.escapeForShell(fullPath)
+            
+            // Verify if the file actually exists. FUSE dcache or MediaStore might return 
+            // recently deleted files as ghost entries.
+            let (code, _, _) = await Shell.runAsyncWithTimeout(
+                adbPath,
+                args: deviceArgs(["shell", "[ -e '\(escapedPath)' ]"]),
+                timeoutSeconds: 2.0
+            )
+            
+            if code == 0 {
+                let isDir = !name.contains(".")
+                result.append(ADBFile(name: name, path: fullPath, isDirectory: isDir, size: 0, modificationDate: nil))
+            } else {
+                AppLogger.log("👻 [fillMissing] Dropped ghost file (does not exist): \(name)")
+            }
         }
         return result
     }
@@ -2086,12 +2100,7 @@ class ADBManager {
                 let stdout = Pipe()
                 let stderr = Pipe()
                 process.executableURL = URL(fileURLWithPath: adbPath)
-                // LZ4 compression for files > 50 MB reduces USB bandwidth pressure
-                if totalBytes > 50 * 1024 * 1024 {
-                    process.arguments = deviceArgs(["push", "-z", "lz4", localPath, devicePath])
-                } else {
-                    process.arguments = deviceArgs(["push", localPath, devicePath])
-                }
+                process.arguments = deviceArgs(["push", localPath, devicePath])
                 process.environment = Shell.adbEnvironment
                 process.standardOutput = stdout
                 process.standardError = stderr
@@ -2152,6 +2161,7 @@ class ADBManager {
                                     }
                                 }
                                 
+                                // Relaxed polling interval to prevent ADB daemon socket starvation over USB
                                 Thread.sleep(forTimeInterval: 1.5)
                             }
                         }

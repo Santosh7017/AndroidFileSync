@@ -272,6 +272,7 @@ class FileActionManager: ObservableObject {
         
         if permanent {
             try await ADBManager.deleteFile(devicePath: path, cancellationCheck: cancellationCheck)
+            await ADBManager.triggerMediaScan(path: path)
             return
         }
 
@@ -287,6 +288,7 @@ class FileActionManager: ObservableObject {
 
         do {
             try await ADBManager.renameFile(oldPath: path, newPath: trashPath)
+            await ADBManager.triggerMediaScan(path: path)
             
             let adbPath = ADBManager.getADBPath()
             let escPath = trashPath.replacingOccurrences(of: "'", with: "'\\''")
