@@ -678,6 +678,8 @@ struct ContentView: View {
             downloadManager.deviceManager = deviceManager
             uploadManager.appManager = appManager
             downloadManager.appManager = appManager
+            uploadManager.downloadManager = downloadManager
+            downloadManager.uploadManager = uploadManager
             appManager.operationEngine.deviceManager = deviceManager
             appManager.operationEngine.uploadManager = uploadManager
             appManager.operationEngine.downloadManager = downloadManager
@@ -1998,7 +2000,7 @@ struct LiveOperationRow: View {
                 .font(.system(size: 10))
             Spacer()
             if case .running = op.state {
-                ProgressView().scaleEffect(0.5).frame(width: 10, height: 10)
+                ProgressView().controlSize(.mini)
             }
         }
         .padding(.leading, 8)

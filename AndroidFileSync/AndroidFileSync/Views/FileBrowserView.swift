@@ -221,10 +221,10 @@ struct FileBrowserView: View, Equatable {
             
             // Item count
             if isLoading {
-                ProgressView().scaleEffect(0.65).frame(width: 14, height: 14)
+                ProgressView().controlSize(.small)
             } else if isLoadingMoreFiles {
                 HStack(spacing: 4) {
-                    ProgressView().scaleEffect(0.55).frame(width: 12, height: 12)
+                    ProgressView().controlSize(.small)
                     Text("\(files.count) items")
                         .font(.system(size: 13))
                         .foregroundColor(.secondary)
@@ -232,7 +232,7 @@ struct FileBrowserView: View, Equatable {
                 .help("Loading more files from MediaStore...")
             } else if isLoadingMetadata {
                 HStack(spacing: 4) {
-                    ProgressView().scaleEffect(0.55).frame(width: 12, height: 12)
+                    ProgressView().controlSize(.small)
                     Text("\(metadataLoadedCount)/\(metadataTotalCount)")
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(.secondary)
