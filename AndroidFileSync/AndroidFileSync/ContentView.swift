@@ -624,30 +624,50 @@ struct ContentView: View {
         .overlay(alignment: .topTrailing) {
             if updateChecker.shouldShowBanner {
                 HStack(spacing: 6) {
-                    Image(systemName: "arrow.down.circle.fill")
-                        .font(.system(size: 11))
-                        .foregroundColor(.white)
-                    Text("v\(updateChecker.latestVersion) available")
+                    if updateChecker.isUpdating {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Image(systemName: updateChecker.updateReadyToRestart ? "checkmark.circle.fill" : "arrow.down.circle.fill")
+                            .font(.system(size: 11))
+                            .foregroundColor(.white)
+                    }
+                    
+                    Text(updateChecker.isUpdating ? updateChecker.updateStatusMessage : (updateChecker.updateReadyToRestart ? "v\(updateChecker.latestVersion) ready to apply" : "v\(updateChecker.latestVersion) available"))
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(.white)
                     
-                    Button(action: { updateChecker.openReleasePage() }) {
-                        Text("Update")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(.blue)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 2)
-                            .background(Color.white)
-                            .cornerRadius(10)
+                    if !updateChecker.isUpdating {
+                        if updateChecker.updateReadyToRestart {
+                            Button(action: { updateChecker.relaunchApp() }) {
+                                Text("Restart Now")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundColor(.blue)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 2)
+                                    .background(Color.white)
+                                    .cornerRadius(10)
+                            }
+                            .buttonStyle(.plain)
+                        } else {
+                            Button(action: { updateChecker.performAutoUpdate() }) {
+                                Text("Update")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundColor(.blue)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 2)
+                                    .background(Color.white)
+                                    .cornerRadius(10)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        
+                        Button(action: { updateChecker.dismissForToday() }) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundColor(.white.opacity(0.8))
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
-                    
-                    Button(action: { updateChecker.dismissForToday() }) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundColor(.white.opacity(0.8))
-                    }
-                    .buttonStyle(.plain)
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 5)
