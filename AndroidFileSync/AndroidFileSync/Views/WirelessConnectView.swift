@@ -221,6 +221,23 @@ class ADBPairingBrowser: ObservableObject {
         }
     }
     
+    /// Pauses the periodic mDNS poll timer while a pairing handshake is in flight.
+    /// Call `resumePolling()` once pairing completes (success or failure).
+    func pausePolling() {
+        mdnsPollTimer?.invalidate()
+        mdnsPollTimer = nil
+        print("📶 NWBrowser: mDNS poll timer paused for pairing.")
+    }
+    
+    /// Resumes the periodic mDNS poll timer after pairing finishes.
+    func resumePolling() {
+        guard isBrowsing, mdnsPollTimer == nil else { return }
+        mdnsPollTimer = Timer.scheduledTimer(withTimeInterval: 6.0, repeats: true) { [weak self] _ in
+            self?.pollADBMdnsServices()
+        }
+        print("📶 NWBrowser: mDNS poll timer resumed after pairing.")
+    }
+    
     private func startMdnsPolling() {
         mdnsPollTimer?.invalidate()
         // Rapid-fire polls in the first few seconds (catches devices that take time
@@ -246,6 +263,15 @@ class ADBPairingBrowser: ObservableObject {
     ///   adb-XXXX  _adb-tls-pairing._tcp  192.168.1.69:41583  adb-XXXX.local
     private func pollADBMdnsServices() {
         Task {
+            // Skip polling entirely while a pairing handshake is in flight.
+            // mdnsServicesWithRecovery() can trigger an ADB server restart, which kills
+            // the TLS connection and causes:
+            //   "protocol fault (couldn't read status message): Undefined error: 0"
+            guard self.status != .pairing else {
+                print("📶 NWBrowser: Skipping mDNS poll — pairing is in progress.")
+                return
+            }
+
             let adbPath = ADBManager.getADBPath()
             guard !adbPath.isEmpty else { return }
 
@@ -1655,8 +1681,18 @@ struct WirelessConnectView: View {
         
         deviceManager.cancelWirelessReconnectHunt()
         pairingBrowser.status = .pairing
+        // Pause the 6-second mDNS poll timer so mdnsServicesWithRecovery() cannot
+        // restart the ADB daemon while the TLS pairing handshake is in flight.
+        pairingBrowser.pausePolling()
         
         Task {
+            // Always resume polling when this Task exits, regardless of outcome.
+            defer {
+                Task { @MainActor in
+                    pairingBrowser.resumePolling()
+                }
+            }
+            
             // Pair using the user-verified port and the 6 digit code
             let (pairSuccess, pairMessage) = await ADBManager.pairDevice(
                 ip: device.ip,

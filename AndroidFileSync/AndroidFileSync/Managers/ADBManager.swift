@@ -15,6 +15,12 @@ class ADBManager {
     // Track the active device serial for multi-device support
     static var activeDeviceSerial: String?
     
+    /// Set to true while `pairDevice()` is running.
+    /// `restartServer()` checks this flag and skips the restart to avoid
+    /// killing the ADB TLS stack mid-handshake, which produces:
+    ///   "protocol fault (couldn't read status message): Undefined error: 0"
+    static var isPairingInProgress = false
+    
     // Track if we've already attempted a server restart this session
     private static var hasRestarted = false
     /// Cooldown for mDNS recovery restarts so we don't thrash ADB daemon.
@@ -182,6 +188,15 @@ class ADBManager {
         if let task = restartServerTask {
             print("🔄 ADB: Restart already in progress; waiting for it...")
             return await task.value
+        }
+
+        // Do NOT restart the server while a pairing handshake is in flight.
+        // Killing the ADB daemon during an active TLS pairing session causes:
+        //   "protocol fault (couldn't read status message): Undefined error: 0"
+        // which makes the first pairing attempt fail every time.
+        if isPairingInProgress {
+            print("🔄 ADB: Restart skipped — pairing is currently in progress.")
+            return false
         }
 
         let now = Date()
@@ -387,7 +402,9 @@ class ADBManager {
         let now = Date()
         let canRecover: Bool = {
             guard let last = lastMDNSRecoveryAt else { return true }
-            return now.timeIntervalSince(last) > 8.0
+            // 15s cooldown — reduces the chance that a background mDNS
+            // recovery restart races with an active pairing or connect attempt.
+            return now.timeIntervalSince(last) > 15.0
         }()
         guard canRecover else {
             return await withBonjourFallback(first)
@@ -2693,31 +2710,35 @@ class ADBManager {
         let target = "\(ip):\(port)"
         print("📶 ADB: Pairing with \(target)...")
         
+        // Signal that a pairing handshake is in flight so restartServer() (called
+        // by the background mDNS poller) will not kill the ADB daemon mid-handshake.
+        isPairingInProgress = true
+        defer { isPairingInProgress = false }
+        
         // adb pair <ip>:<port> <code>
-        var (exitCode, output, error) = await Shell.runAsyncWithTimeout(
+        let (exitCode, output, error) = await Shell.runAsyncWithTimeout(
             adbPath,
             args: ["pair", target, code],
             timeoutSeconds: 15.0
         )
         
-        var combined = output + error
+        let combined = output + error
         print("📶 ADB Pair result: code=\(exitCode), output=\(combined)")
         
-        // Auto-recover from protocol faults by restarting ADB server and retrying
+        // Protocol fault detected — this means the ADB daemon was restarted
+        // (e.g. by the background mDNS poller) while the TLS pairing handshake
+        // was in flight. Restarting the server here and retrying with the same
+        // code will almost always fail because:
+        //   (a) Android's pairing code expires or rotates after a failed attempt.
+        //   (b) The ~3s restart delay lets the pairing window on the phone time out.
+        // Instead we restart the server (so the next attempt starts from a clean
+        // state) and return a clear, actionable message to the user.
         if isProtocolError(combined) {
-            print("🔄 ADB: Protocol fault during pairing, restarting server and retrying...")
-            let restarted = await restartServer()
-            if restarted {
-                // Retry the pairing
-                (exitCode, output, error) = await Shell.runAsyncWithTimeout(
-                    adbPath,
-                    args: ["pair", target, code],
-                    timeoutSeconds: 15.0
-                )
-                combined = output + error
-                print("📶 ADB Pair retry result: code=\(exitCode), output=\(combined)")
-            }
+            print("🔄 ADB: Protocol fault during pairing — restarting ADB server for next attempt (not retrying with same code).")
+            await restartServer()
+            return (false, "Connection to ADB service was interrupted. Please re-open 'Pair device with pairing code' on your phone and enter the new code.")
         }
+
         
         if exitCode == 0 && (combined.lowercased().contains("successfully paired") || combined.lowercased().contains("paired")) {
             hasRestarted = false // Reset for next session
