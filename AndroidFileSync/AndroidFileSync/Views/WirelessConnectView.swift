@@ -48,6 +48,8 @@ class ADBPairingBrowser: ObservableObject {
     /// IPs where connection failed (authorization revoked) — need re-pairing.
     /// Prevents auto-reconnect and forces the pairing form in the UI.
     @MainActor static var needsRepairing = Set<String>()
+    /// When true, suppress device removal from discoveredDevices (pairing in progress)
+    @MainActor static var isPairingActive = false
     /// Called when connect services change — refresh the ADB device list
     var onDeviceListChanged: (() -> Void)?
     
@@ -136,6 +138,9 @@ class ADBPairingBrowser: ObservableObject {
                             let task = Task { [weak self] in
                                 try? await Task.sleep(nanoseconds: 5_000_000_000) // 5.0s
                                 guard !Task.isCancelled else { return }
+                                // Don't remove devices while pairing is active — mDNS services
+                                // briefly disappear during TLS key rotation.
+                                if await ADBPairingBrowser.isPairingActive { return }
                                 
                                 await MainActor.run {
                                     guard let self = self else { return }
@@ -267,7 +272,8 @@ class ADBPairingBrowser: ObservableObject {
             // mdnsServicesWithRecovery() can trigger an ADB server restart, which kills
             // the TLS connection and causes:
             //   "protocol fault (couldn't read status message): Undefined error: 0"
-            guard self.status != .pairing else {
+            let pairingActive = await ADBPairingBrowser.isPairingActive
+            guard !pairingActive else {
                 print("📶 NWBrowser: Skipping mDNS poll — pairing is in progress.")
                 return
             }
@@ -485,6 +491,7 @@ struct WirelessConnectView: View {
     @State private var isSuccess = false
     @State private var showConnectOnly = false
     @State private var connectingDeviceKey = ""
+    @State private var pairingDeviceKey = ""
     /// True when user taps "Re-scan" from the connected banner — shows scan UI below the card
     @State private var showRescanWhileConnected = false
     
@@ -509,6 +516,20 @@ struct WirelessConnectView: View {
         var names = UserDefaults.standard.dictionary(forKey: Self.wirelessDisplayNameByServiceIDKey) as? [String: String] ?? [:]
         names[serviceName] = trimmed
         UserDefaults.standard.set(names, forKey: Self.wirelessDisplayNameByServiceIDKey)
+    }
+
+    private func hostMatches(serial: String, device: DiscoveredDevice) -> Bool {
+        let hostPart = serial.components(separatedBy: ":").first?.trimmingCharacters(in: CharacterSet(charactersIn: ".")) ?? ""
+        if hostPart.isEmpty { return false }
+        if hostPart == device.ip { return true }
+        if let devHost = device.hostname?.trimmingCharacters(in: CharacterSet(charactersIn: ".")) {
+            if hostPart.caseInsensitiveCompare(devHost) == .orderedSame { return true }
+        }
+        if let svc = device.serviceName {
+            if hostPart.caseInsensitiveCompare(svc) == .orderedSame { return true }
+            if serial.hasPrefix(svc) { return true }
+        }
+        return false
     }
 
     var body: some View {
@@ -566,6 +587,11 @@ struct WirelessConnectView: View {
         .onChange(of: deviceManager.availableDevices) { _ in
             Task {
                 isUSBOccupied = await deviceManager.isUSBDeviceOccupiedByDefaultServer()
+            }
+            // When a device connects and WiFi devices are already visible, keep
+            // the discovered list expanded so it doesn't disappear from view.
+            if deviceManager.isConnected && !pairingBrowser.discoveredDevices.isEmpty {
+                showRescanWhileConnected = true
             }
         }
         .onDisappear {
@@ -765,14 +791,6 @@ struct WirelessConnectView: View {
                             .frame(maxWidth: .infinity, minHeight: 160)
                             .padding()
 
-                        } else if status == .pairing {
-                            // ── Pairing in progress ──
-                            VStack(spacing: 12) {
-                                ProgressView().scaleEffect(1.2)
-                                Text("Pairing…").font(.headline)
-                            }
-                            .frame(maxWidth: .infinity, minHeight: 120)
-
                         } else if status == .paired {
                             // ── Paired / connected success ──
                             autoDiscoveryStatusView
@@ -889,37 +907,29 @@ struct WirelessConnectView: View {
         // 2. Any wireless device already present in availableDevices
         //    (shown in "Other available devices"), so we don't show duplicates.
         let availableWireless = deviceManager.availableDevices.filter { $0.isWireless }
-        let excludedIPs: Set<String> = {
-            var ips = Set<String>()
-            if deviceManager.isConnected {
-                // Always exclude the active wireless device IP
-                let wip = deviceManager.lastWirelessIP
-                if !wip.isEmpty { ips.insert(wip) }
-                if let serial = ADBManager.activeDeviceSerial,
-                   ADBManager.isWirelessSerial(serial),
-                   let ip = serial.components(separatedBy: ":").first, ip.contains(".") {
-                    ips.insert(ip)
-                }
-            }
-            // Exclude any discovered IP already represented in available wireless devices
-            for dev in availableWireless {
-                if let ip = dev.ipAddress, !ip.isEmpty {
-                    ips.insert(ip)
-                }
-            }
-            return ips
-        }()
         let sortedKeys = pairingBrowser.discoveredDevices.keys
             .filter { key in
                 guard let device = pairingBrowser.discoveredDevices[key] else { return false }
-                if excludedIPs.contains(device.ip) { return false }
-                // For ADB 37+ mDNS serials, availableDevices may not embed IP.
-                // Match by stable service name where possible.
-                if let svc = device.serviceName, !svc.isEmpty {
-                    if availableWireless.contains(where: { $0.serial.hasPrefix(svc + "._adb-tls-connect._tcp") || $0.serial.hasPrefix(svc + "._adb-tls-pairing._tcp") }) {
+                
+                // 1. If this device matches the currently active wireless device, exclude it
+                if deviceManager.isConnected && deviceManager.connectionType == .wireless {
+                    if !deviceManager.lastWirelessIP.isEmpty {
+                        if device.ip == deviceManager.lastWirelessIP || device.hostname == deviceManager.lastWirelessIP {
+                            return false
+                        }
+                    }
+                    if let active = ADBManager.activeDeviceSerial, hostMatches(serial: active, device: device) {
                         return false
                     }
                 }
+                
+                // 2. If this device matches any available wireless device, exclude it
+                for dev in availableWireless {
+                    if hostMatches(serial: dev.serial, device: device) {
+                        return false
+                    }
+                }
+                
                 return true
             }
             .sorted()
@@ -988,6 +998,7 @@ struct WirelessConnectView: View {
     private func discoveredDeviceRow(deviceKey: String, isSelected: Bool) -> some View {
         let dev = pairingBrowser.discoveredDevices[deviceKey]
         let isAlreadyPaired = dev?.verifiedPaired == true
+        let isPairingThisDevice = pairingDeviceKey == deviceKey
         let cachedName = cachedDisplayName(for: dev?.serviceName)
         let displayName = cachedName ?? "Android Device"
 
@@ -1010,7 +1021,14 @@ struct WirelessConnectView: View {
                         .font(.subheadline.weight(.medium))
                         .foregroundColor(.primary)
                     Group {
-                        if isAlreadyPaired {
+                        if isPairingThisDevice {
+                            HStack(spacing: 4) {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                Text("Pairing...")
+                                    .foregroundColor(.blue)
+                            }
+                        } else if isAlreadyPaired {
                             Text("Already paired · tap to connect")
                                 .foregroundColor(.green)
                         } else if dev?.connectPort != nil {
@@ -1085,10 +1103,10 @@ struct WirelessConnectView: View {
             .background(RoundedRectangle(cornerRadius: 10).fill(Color.green.opacity(0.06)))
 
         } else if let cPort = deviceObj?.connectPort,
-                  !ADBPairingBrowser.needsRepairing.contains(deviceIP) {
-            // Device has wireless debugging on AND is not flagged as needing re-pair.
-            // If already paired: connect succeeds immediately.
-            // If not paired: connect fails, then we preserve this row and show the pairing form.
+                  !ADBPairingBrowser.needsRepairing.contains(deviceIP),
+                  deviceObj?.pairingPort == nil {
+            // Show "Connect Wirelessly" only when the phone's pairing dialog is NOT open.
+            // If pairingPort is set, fall through to the pairing form instead.
             VStack(spacing: 10) {
                 HStack(spacing: 6) {
                     if isConnectingSelectedDevice {
@@ -1159,6 +1177,7 @@ struct WirelessConnectView: View {
             .background(RoundedRectangle(cornerRadius: 10).fill(Color.blue.opacity(0.06)))
 
         } else {
+            let isPairingThisDevice = pairingDeviceKey == activeKey
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 4) {
@@ -1166,25 +1185,36 @@ struct WirelessConnectView: View {
                         TextField("e.g. 41583", text: $visiblePairingPort)
                             .textFieldStyle(.roundedBorder)
                             .font(.body.monospacedDigit())
+                            .disabled(isPairingThisDevice)
                     }
                     VStack(alignment: .leading, spacing: 4) {
                         Text("6-Digit Code").font(.subheadline.weight(.medium))
                         TextField("000000", text: $autoPairingCode)
                             .textFieldStyle(.roundedBorder)
                             .font(.body.monospacedDigit())
+                            .disabled(isPairingThisDevice)
                     }
                 }
                 Button(action: pairWithAutoDiscovery) {
-                    Label("Pair & Connect", systemImage: "link")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundColor(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 9)
-                        .background((autoPairingCode.count == 6 && !visiblePairingPort.isEmpty) ? Color.blue : Color.gray)
-                        .cornerRadius(8)
+                    HStack(spacing: 8) {
+                        if isPairingThisDevice {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Pairing...")
+                        } else {
+                            Image(systemName: "link")
+                            Text("Pair & Connect")
+                        }
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .background((autoPairingCode.count == 6 && !visiblePairingPort.isEmpty && !isPairingThisDevice) ? Color.blue : Color.gray)
+                    .cornerRadius(8)
                 }
                 .buttonStyle(.plain)
-                .disabled(autoPairingCode.count != 6 || visiblePairingPort.isEmpty)
+                .disabled(autoPairingCode.count != 6 || visiblePairingPort.isEmpty || isPairingThisDevice)
                 
                 if visiblePairingPort.isEmpty {
                     Text("Enter the pairing port and code shown on your phone's 'Pair device' screen")
@@ -1484,48 +1514,59 @@ struct WirelessConnectView: View {
 
     @ViewBuilder
     private var autoDiscoveryStatusView: some View {
-        switch pairingBrowser.status {
-        case .idle, .searching:
-            EmptyView()
-        case .deviceFound:
-            HStack(spacing: 8) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
-                Text("Device found! Ready to pair.")
-                    .font(.subheadline)
-                    .foregroundColor(.green)
-            }
-            .padding(10)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.green.opacity(0.1)))
-        case .pairing:
+        if !pairingDeviceKey.isEmpty {
             HStack(spacing: 8) {
                 ProgressView()
-                    .scaleEffect(0.7)
+                    .controlSize(.small)
                 Text("Pairing with device...")
                     .font(.subheadline)
             }
             .padding(10)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.blue.opacity(0.1)))
-        case .paired:
-            HStack(spacing: 8) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
-                Text("Paired & Connected!")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundColor(.green)
+        } else {
+            switch pairingBrowser.status {
+            case .idle, .searching:
+                EmptyView()
+            case .deviceFound:
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                    Text("Device found! Ready to pair.")
+                        .font(.subheadline)
+                        .foregroundColor(.green)
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.green.opacity(0.1)))
+            case .pairing:
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                    Text("Pairing with device...")
+                        .font(.subheadline)
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.blue.opacity(0.1)))
+            case .paired:
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                    Text("Paired & Connected!")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(.green)
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.green.opacity(0.1)))
+            case .failed(let message):
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                    Text(message)
+                        .font(.subheadline)
+                        .foregroundColor(.orange)
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.1)))
             }
-            .padding(10)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.green.opacity(0.1)))
-        case .failed(let message):
-            HStack(spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundColor(.orange)
-                Text(message)
-                    .font(.subheadline)
-                    .foregroundColor(.orange)
-            }
-            .padding(10)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.1)))
         }
     }
     
@@ -1677,28 +1718,45 @@ struct WirelessConnectView: View {
     private func pairWithAutoDiscovery() {
         guard !selectedDeviceIP.isEmpty, !visiblePairingPort.isEmpty, !autoPairingCode.isEmpty else { return }
         
-        guard let device = pairingBrowser.discoveredDevices[selectedDeviceIP] else { return }
+        // Primary lookup by key, fallback by matching pairing port (key can rotate
+        // when the user re-opens the pairing dialog on the phone).
+        var device: DiscoveredDevice? = pairingBrowser.discoveredDevices[selectedDeviceIP]
+        if device == nil {
+            for (key, d) in pairingBrowser.discoveredDevices {
+                if d.pairingPort.map({ String($0) == visiblePairingPort }) == true {
+                    device = d
+                    selectedDeviceIP = key
+                    break
+                }
+            }
+        }
+
+        guard let device = device else {
+            pairingBrowser.status = .failed("Device not found. Make sure 'Pair device with pairing code' is still open on your phone, then tap 'Search Again'.")
+            return
+        }
         
+        print("📶 PairAutoDiscovery: device=\(device.ip) port=\(visiblePairingPort)")
         deviceManager.cancelWirelessReconnectHunt()
-        pairingBrowser.status = .pairing
-        // Pause the 6-second mDNS poll timer so mdnsServicesWithRecovery() cannot
-        // restart the ADB daemon while the TLS pairing handshake is in flight.
+        pairingDeviceKey = selectedDeviceIP
         pairingBrowser.pausePolling()
+        ADBPairingBrowser.isPairingActive = true
         
         Task {
-            // Always resume polling when this Task exits, regardless of outcome.
             defer {
                 Task { @MainActor in
+                    pairingDeviceKey = ""
+                    ADBPairingBrowser.isPairingActive = false
                     pairingBrowser.resumePolling()
                 }
             }
             
-            // Pair using the user-verified port and the 6 digit code
             let (pairSuccess, pairMessage) = await ADBManager.pairDevice(
                 ip: device.ip,
                 port: visiblePairingPort,
                 code: autoPairingCode
             )
+            print("📶 PairAutoDiscovery: pair \(pairSuccess ? "✅" : "❌") — \(pairMessage)")
             
             guard pairSuccess else {
                 await MainActor.run {
@@ -1707,13 +1765,11 @@ struct WirelessConnectView: View {
                 return
             }
             
-            // Pairing succeeded — clear the "needs repairing" flag
             await MainActor.run {
                 ADBPairingBrowser.needsRepairing.remove(device.ip)
             }
             
-            // Use the already discovered connect port immediately. Only poll when
-            // pairing appeared before the connect service was available.
+            // Build list of connect ports to try.
             var fallbackPorts: [String] = []
             if let currentKnown = pairingBrowser.discoveredDevices[selectedDeviceIP]?.connectPort {
                 let s = String(currentKnown)
@@ -1724,6 +1780,8 @@ struct WirelessConnectView: View {
                 fallbackPorts.append(String(resolvedConnectPort))
             }
             if device.hostname == nil, !fallbackPorts.contains("5555") { fallbackPorts.append("5555") }
+            
+            print("📶 PairAutoDiscovery: connect ports=\(fallbackPorts)")
             
             for tryPort in fallbackPorts {
                 let (s, _) = await deviceManager.connectWirelessly(
@@ -1744,8 +1802,7 @@ struct WirelessConnectView: View {
                 }
             }
             
-            // Pairing succeeded, but connection failed on all candidate ports.
-            // Keep the dialog open and show a clear action path instead of false success.
+            // Paired but connection failed on all ports.
             await MainActor.run {
                 ADBPairingBrowser.needsRepairing.insert(device.ip)
                 if var dev = pairingBrowser.discoveredDevices[selectedDeviceIP] {
@@ -1756,6 +1813,8 @@ struct WirelessConnectView: View {
             }
         }
     }
+
+
 
     /// Waits briefly for `_adb-tls-connect._tcp` to appear after successful pairing.
     /// Returns discovered connect port for this device, or nil if not seen.
