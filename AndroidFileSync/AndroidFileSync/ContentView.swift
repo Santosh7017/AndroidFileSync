@@ -1182,24 +1182,18 @@ struct ContentView: View {
         
         await deviceManager.detectDevice()
         
-        // Poll for USB cold-start ONLY when there are no saved wireless devices.
-        // If saved wireless IPs exist, detectDevice() already kicked off a background
-        // reconnect task with its own retry logic. Running both simultaneously causes
-        // the polling loop to flash "No Device Connected" while the reconnect is in progress.
-        let savedWirelessIPs = UserDefaults.standard.stringArray(forKey: "connectedWirelessDevices") ?? []
-        if !deviceManager.isConnected && savedWirelessIPs.isEmpty {
-            for _ in 1...10 {
-                try? await Task.sleep(nanoseconds: 300_000_000) // 0.3s
-                await deviceManager.detectDevice()
-                if deviceManager.isConnected { break }
-            }
-        }
-        
         // NOTE: We do NOT call loadFiles() here.
         // The .onChange(of: deviceManager.deviceName) observer fires whenever detectDevice()
         // sets a new device name, and it is the single source of truth for loading files.
         // Calling loadFiles() here too caused a race condition where files were loaded twice.
+        //
+        // NOTE: The earlier USB cold-start polling loop (10×0.3s) was removed because:
+        //  1. detectDevice() itself calls recoverPrivateUSBTransportIfNeeded() on cold-start.
+        //  2. DeviceManager's wirelessHuntTask handles wireless retry in the background.
+        //  3. The 2-second Timer in layoutContent re-calls detectDevice() automatically.
+        //  All three together give fast re-detection without the 3-second stall.
     }
+
     
     /// Refreshes the sidebar storage stats (Internal Storage bar) after a file operation
     private func refreshStorageStats() {

@@ -277,6 +277,14 @@ class DeviceManager: ObservableObject {
                             let serialReached = targetSerialCount > 0 && connectedSerials.count >= targetSerialCount
                             let ipReached = targetIPCount > 0 && connectedIPs.count >= targetIPCount
                             if serialReached || ipReached { break }
+                            
+                            // If first attempt didn't connect, let the UI show instructions
+                            if attempt == 1 {
+                                await MainActor.run {
+                                    guard let self = self, !self.isConnected else { return }
+                                    self.isDetecting = false
+                                }
+                            }
                         }
                         print("📱 DeviceManager: Reconnected \(connectedSerials.count) serial-based and \(connectedIPs.count) IP-based devices")
                         
@@ -302,8 +310,7 @@ class DeviceManager: ObservableObject {
                     }
                 }
                 
-                // Return early so we DON'T update the UI to "Disconnected" while the background task is running!
-                // This keeps the spinner active on first launch.
+                // Return early so we DON'T overwrite the device state while the background task is running!
                 return
             } else {
                 print("📱 DeviceManager: No saved wireless devices, trying direct mDNS connect...")
@@ -385,7 +392,15 @@ class DeviceManager: ObservableObject {
                     }
                 }
 
-                // Keep current UI state while background mDNS connect hunt runs.
+                // Show the "No Device Connected" UI immediately — no saved wireless devices,
+                // so there's nothing the spinner can tell the user that the static screen can't.
+                // The hunt task runs in the background and calls detectDevice() if it succeeds.
+                await MainActor.run {
+                    if !self.isConnected {
+                        self.isDetecting = false
+                    }
+                }
+                // Keep current device state while background mDNS connect hunt runs.
                 // Without this return, the same detection cycle marks device as disconnected
                 // even though connect may succeed moments later.
                 return
@@ -461,7 +476,6 @@ class DeviceManager: ObservableObject {
             adbAvailable = !allDevices.isEmpty
         } else {
             adbAvailable = false
-            // Clear stale active serial so it doesn't block future detections
             ADBManager.activeDeviceSerial = nil
         }
         
@@ -642,6 +656,8 @@ class DeviceManager: ObservableObject {
     /// Switch the active ADB device (e.g. from wireless -> USB or between two devices)
     /// and re-detect all state.
     func switchToDevice(serial: String) async {
+        userDisconnected = false
+        ADBPairingBrowser.suppressAutoConnect = false
         ADBManager.switchToDevice(serial: serial)
         await detectDevice()
     }
@@ -649,6 +665,9 @@ class DeviceManager: ObservableObject {
     /// Switch using an already listed device snapshot so the UI responds immediately.
     /// A full detect still runs in the background to refresh metadata and storage state.
     func switchToDevice(_ device: ADBManager.ConnectedDevice) {
+        // User is explicitly switching — allow the new wireless device to be picked up
+        userDisconnected = false
+        ADBPairingBrowser.suppressAutoConnect = false
         ADBManager.switchToDevice(serial: device.serial)
         deviceName = device.displayName
         connectionType = device.isWireless ? .wireless : .usb
@@ -1018,31 +1037,55 @@ class DeviceManager: ObservableObject {
         }
     }
     
-    /// Disconnect wireless device
+    /// Disconnects the currently active wireless device only.
+    /// Other connected devices (USB or additional WiFi) are left intact.
     func disconnectWireless() async {
-        ADBPairingBrowser.suppressAutoConnect = true
-        await MainActor.run {
-            self.userDisconnected = true
+        let activeSerial = ADBManager.activeDeviceSerial
+        let activeIP = await MainActor.run { self.lastWirelessIP }
+
+        // Disconnect only the active wireless ADB connection using its exact serial.
+        // Works for both IP:port ("192.168.1.5:38101") and mDNS ("adb-XXX._adb-tls-connect._tcp") serials.
+        if let serial = activeSerial, ADBManager.isWirelessSerial(serial) {
+            let adbPath = ADBManager.getADBPath()
+            if !adbPath.isEmpty {
+                let _ = await Shell.runAsyncWithTimeout(
+                    adbPath, args: ["disconnect", serial], timeoutSeconds: 5.0
+                )
+            }
         }
-        let _ = await ADBManager.disconnectAllWireless()
-        // Clear all saved wireless devices
-        UserDefaults.standard.removeObject(forKey: "connectedWirelessDevices")
-        UserDefaults.standard.removeObject(forKey: "connectedWirelessSerials")
-        UserDefaults.standard.removeObject(forKey: "wirelessDisplayNameBySerial")
-        UserDefaults.standard.removeObject(forKey: Self.savedWirelessPortByIPKey)
-        UserDefaults.standard.removeObject(forKey: Self.savedWirelessTargetByIPKey)
-        await MainActor.run {
-            self.lastWirelessIP = ""
-            self.isConnected = false
-            self.connectionType = .none
-            self.deviceName = "No Device"
-            self.statusMessage = "Disconnected. Connect a device to continue."
-            self.sdCardPath = nil
-            self.storageStats = [:]
+
+        // Clear only this device's saved reconnect data
+        if !activeIP.isEmpty {
+            Self.clearSavedWirelessEndpoint(for: activeIP)
         }
-        // All cached sizes are stale after disconnect
+        if let serial = activeSerial {
+            var serials = UserDefaults.standard.stringArray(forKey: "connectedWirelessSerials") ?? []
+            serials.removeAll { $0 == serial }
+            UserDefaults.standard.set(serials, forKey: "connectedWirelessSerials")
+        }
+
+        // Only block wireless auto-reconnect if no other wireless devices remain.
+        // Otherwise detectDevice's userDisconnected guard would kill them too.
+        let remaining = await ADBManager.listAllConnectedDevices()
+        let otherWirelessStillConnected = remaining.contains { $0.isWireless }
+
+        await MainActor.run {
+            if otherWirelessStillConnected {
+                // Another wireless device is still connected — don't block it
+                self.lastWirelessIP = ""
+            } else {
+                self.userDisconnected = true
+                self.lastWirelessIP = ""
+                ADBPairingBrowser.suppressAutoConnect = true
+            }
+        }
         ADBManager.invalidateFolderSizeCache()
+        // Re-detect: picks up remaining connected devices (USB, other WiFi)
+        await detectDevice()
     }
+
+
+
     
     /// Re-detect device after QR pairing auto-connected it
     func detectDeviceAfterWirelessConnect() {
