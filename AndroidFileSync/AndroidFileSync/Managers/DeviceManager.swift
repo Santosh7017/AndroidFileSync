@@ -519,9 +519,13 @@ class DeviceManager: ObservableObject {
                         }
                     } else {
                         self.connectionType = .usb
-                        self.statusMessage = "Connected via USB"
+                        // Reflect coexistence mode in the status so user knows the device is shared
+                        self.statusMessage = Shell.useDefaultServer
+                            ? "Connected via USB · Shared with Android Studio"
+                            : "Connected via USB"
                     }
                     self.isConnected = true
+
                     
                     // task and silently kill the upload popup. It resets only on disconnect.
                     print("📱 DeviceManager: Device connected (\(self.connectionType.rawValue))!")
@@ -1118,8 +1122,12 @@ class DeviceManager: ObservableObject {
         return "/storage/emulated/0" // Default fallback
     }
     
-    /// Queries default port 5037 to check if there is an occupied physical USB device
+    /// Queries default port 5037 to check if there is a physical USB device occupied by another server.
+    /// Returns false if we are already in shared/coexistence mode — because in that state the device
+    /// is accessible to this app and there is nothing to "claim".
     func isUSBDeviceOccupiedByDefaultServer() async -> Bool {
+        // If we are already piggybacking on the default server, the device is accessible — not "occupied".
+        if Shell.useDefaultServer { return false }
         let adbPath = ADBManager.getADBPath()
         guard !adbPath.isEmpty else { return false }
         let (_, defaultOutput, _) = await Shell.runAsyncWithTimeout(
@@ -1128,6 +1136,16 @@ class DeviceManager: ObservableObject {
             timeoutSeconds: 2.0,
             environment: Shell.defaultADBEnvironment
         )
-        return defaultOutput.contains(" usb:")
+        // Only report as occupied if the default server has USB AND our private server does not
+        guard defaultOutput.contains(" usb:") else { return false }
+        // Double-check that our private server does NOT already have it
+        let (_, privateOutput, _) = await Shell.runAsyncWithTimeout(
+            adbPath,
+            args: ["devices", "-l"],
+            timeoutSeconds: 2.0,
+            environment: Shell.adbEnvironment
+        )
+        return !privateOutput.contains(" usb:")
     }
 }
+

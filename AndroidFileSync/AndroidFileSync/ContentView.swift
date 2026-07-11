@@ -72,6 +72,10 @@ struct ContentView: View {
     // Trash view state
     @State private var showTrashView = false
     @State private var showWirelessConnect = false
+
+    // USB Occupied (Claim USB) state — shown on homepage
+    @State private var isUSBOccupied = false
+    @State private var isClaimingUSB = false
     @ObservedObject private var updateChecker = UpdateChecker.shared
     @ObservedObject private var supportPromptManager = SupportPromptManager.shared
     @ObservedObject private var diagnosticsControl = DiagnosticsControl.shared
@@ -610,7 +614,26 @@ struct ContentView: View {
                     isDetecting: deviceManager.isDetecting,
                     customMessage: showCustomMessage ? deviceManager.statusMessage : nil,
                     onRetry: { Task { await initializeDevice() } },
-                    onConnectWiFi: { showWirelessConnect = true }
+                    onConnectWiFi: { showWirelessConnect = true },
+                    isUSBOccupied: isUSBOccupied,
+                    isClaimingUSB: isClaimingUSB,
+                    onClaimUSB: {
+                        isClaimingUSB = true
+                        Task {
+                            _ = await ADBManager.recoverPrivateUSBTransportIfNeeded(forceRestart: true)
+                            // Wait 1.5s for the OS to release the USB driver interface and map it to the private server
+                            try? await Task.sleep(nanoseconds: 1_500_000_000)
+                            await deviceManager.detectDevice()
+                            isUSBOccupied = await deviceManager.isUSBDeviceOccupiedByDefaultServer()
+                            isClaimingUSB = false
+                            
+                            // If the device is still not connected, alert the user with troubleshooting steps
+                            if !deviceManager.isConnected {
+                                errorMessage = "USB connection was released, but your device is still not detected.\n\nPlease try:\n• Unplugging and re-plugging the USB cable.\n• Toggling 'USB Debugging' off and on in Developer Options.\n• Checking your phone screen for an 'Allow USB debugging' prompt."
+                                showErrorAlert = true
+                            }
+                        }
+                    }
                 )
             }
 
@@ -738,6 +761,22 @@ struct ContentView: View {
             if !deviceManager.isConnected && !deviceManager.isDetecting {
                 Task {
                     await deviceManager.detectDevice()
+                    // Refresh USB occupied status on the homepage
+                    if !deviceManager.isConnected {
+                        isUSBOccupied = await deviceManager.isUSBDeviceOccupiedByDefaultServer()
+                    }
+                }
+            }
+        }
+        .onChange(of: deviceManager.isConnected) { connected in
+            if connected {
+                // Device connected — clear USB occupied banner
+                isUSBOccupied = false
+                isClaimingUSB = false
+            } else {
+                // Just disconnected — check if USB is now occupied
+                Task {
+                    isUSBOccupied = await deviceManager.isUSBDeviceOccupiedByDefaultServer()
                 }
             }
         }
