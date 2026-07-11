@@ -205,6 +205,20 @@ AndroidFileSync supports familiar Finder-like keyboard shortcuts for fast, mouse
 
 ---
 
+## 📊 How It Compares
+
+| Feature | **AndroidFileSync** (v2.3.1) | **OpenMTP** | **MacDroid** | **Blip** |
+| :--- | :--- | :--- | :--- | :--- |
+| **Cost & License** | 🆓 **100% Free & Open Source** | Free & Open Source | Paid Subscription ($19.99/yr for write access) | Free (Closed Source) |
+| **macOS Integration** | 🍎 **Native SwiftUI** (Lightweight) | Electron (Heavy, non-native) | Native drive mount (Uses system extensions) | Electron |
+| **USB Transfers** | ✅ **Yes (ADB)** | Yes (MTP - prone to connection drops) | Yes (ADB/MTP) | ❌ No (Wireless only) |
+| **Wi-Fi Transfers** | ✅ **Yes** (Native Android Wi-Fi) | ❌ No | Yes (Pro version only) | Yes |
+| **Phone App Required**| ❌ **No phone app needed** | ❌ No | ❌ No | ⚠️ Yes (Must install app on phone) |
+| **App Sideload / Manager**| 🚀 **Yes** (Uninstall/Backup/Sideload) | ❌ No | ❌ No | ❌ No |
+| **Spacebar Previews** | 👁️ **Yes** (Instant Quick Look) | ❌ No | ⚠️ Yes (via Finder, but mounts slowly) | ❌ No |
+
+---
+
 ## Troubleshooting
 
 | Problem                             | What to Do                                                                                  |
