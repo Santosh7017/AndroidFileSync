@@ -16,14 +16,14 @@ No cloud. No Google account needed. Plug in via USB or connect wirelessly over W
 - 📁 **Browse your phone like Finder** — Navigate folders, search, sort by name/size/type
 - 🖱️ **Drag & Drop** — Drag files from your Mac straight to your phone
 - 📶 **USB or WiFi** — Connect with a cable, or wirelessly over your home network
-- 👁️ **Preview files** — Double-click to view images, videos, and PDFs without downloading
+- 👁️ **Preview files** — Hit **Spacebar** (or double-click) to view images, videos, and PDFs instantly using native Quick Look
 - 🚀 **Fast transfers** — Upload and download multiple files at the same time
 - ⚠️ **Duplicate detection** — Warns you before overwriting files that already exist
 - 🗑️ **Trash & Restore** — Deleted something by accident? Restore it, just like on macOS
 - ✂️ **Copy, Cut, Paste** — Move files between folders on your phone with clipboard shortcuts
 - 📝 **Rename & Batch operations** — Rename files, change extensions, delete in bulk
 - 💾 **SD Card support** — Browse and manage files on your external SD card
-- 📱 **App Manager** — Install, uninstall, disable and manage apps (System/User) on your Android device
+- 📱 **App Manager & Sideloading** — Sideload `.apk`, `.xapk`, `.apks`, or split `.zip` files by dragging them in, plus uninstall, disable, and backup system/user apps
 
 ---
 
@@ -167,6 +167,29 @@ If Auto-Discovery doesn't find your phone (for example, on a corporate network o
 
 ---
 
+## ⌨️ Keyboard Shortcuts
+
+AndroidFileSync supports familiar Finder-like keyboard shortcuts for fast, mouse-free file management:
+
+| Action | Shortcut |
+| :--- | :--- |
+| **Quick Look Preview** | `Spacebar` |
+| **Copy File(s)** | `⌘ C` |
+| **Cut File(s)** | `⌘ X` |
+| **Paste File(s)** | `⌘ V` |
+| **Move to Trash** | `⌘ ⌫` (Command + Delete) |
+| **Delete Permanently** | `⌘ ⌥ ⌫` (Command + Option + Delete) |
+| **Rename File/Folder** | `⌘ ⇧ R` (Command + Shift + R) |
+| **New Folder** | `⌘ ⇧ N` (Command + Shift + N) |
+| **Refresh File List** | `⌘ R` (Command + R) |
+| **Navigate to Parent Folder** | `⌘ ↑` (Command + Up Arrow) |
+| **Go Back in History** | `⌘ [` |
+| **Go Forward in History** | `⌘ ]` |
+| **Get File/Folder Info** | `⌘ I` |
+| **Deselect All** | `⌘ ⇧ A` (Command + Shift + A) |
+
+---
+
 ## Preview
 
 <p align="center">
@@ -222,13 +245,13 @@ If Auto-Discovery doesn't find your phone (for example, on a corporate network o
 - **Copy, Cut & Paste** — Clipboard operations across folders on the device
 - **Trash & Restore** — Move files to trash and restore them later, just like macOS
 - **Delete Permanently** — Bypass Trash and permanently erase files/folders instantly
-- **File Preview** — Double-click to preview images, videos, PDFs, and documents
+- **File Preview (Quick Look)** — Hit Spacebar or double-click to preview images, videos, and PDFs using native Quick Look
 - **Resizable Transfer Panel** — Collapsible, draggable progress view
 
 ### App Management
 
 - **App Browser** — View all installed apps (User, System, Disabled) with icons and labels
-- **Install APK** — Sideload APK files directly from your Mac
+- **Install Apps & Sideloading** — Sideload `.apk`, `.xapk`, `.apks`, or split `.zip` files by dragging them onto the App Manager (with automatic `/obb` folder mapping)
 - **Uninstall Apps** — Remove user-installed apps with confirmation
 - **Disable System Apps** — Disable built-in system apps without rooting
 - **Re-enable Apps** — Restore previously disabled apps with one click
