@@ -5,7 +5,7 @@ A free, native macOS app to transfer files between your Mac and Android phone �
 No cloud. No Google account needed. Plug in via USB or connect wirelessly over WiFi.
 
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-macOS%2013%2B-blue)
-![Version](https://img.shields.io/badge/version-2.3.0-green)
+![Version](https://img.shields.io/badge/version-2.3.1-green)
 
 **[📥 Download Latest Version](#installation) • [🖼️ View Preview](#preview)**
 
