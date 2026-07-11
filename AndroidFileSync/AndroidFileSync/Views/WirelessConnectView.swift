@@ -474,10 +474,6 @@ struct WirelessConnectView: View {
     @AppStorage("hasSeenWifiSetup") private var hasSeenWifiSetup = false
     @State private var showSetupPopup = false
     
-    // USB Occupied State
-    @State private var isUSBOccupied = false
-    @State private var isClaimingUSB = false
-    
     // Manual pairing fields
     @State private var ipAddress = ""
     @State private var pairingPort = ""
@@ -578,16 +574,8 @@ struct WirelessConnectView: View {
             if !hasSeenWifiSetup {
                 showSetupPopup = true
             }
-            
-            // Check if USB device is occupied
-            Task {
-                isUSBOccupied = await deviceManager.isUSBDeviceOccupiedByDefaultServer()
-            }
         }
         .onChange(of: deviceManager.availableDevices) { _ in
-            Task {
-                isUSBOccupied = await deviceManager.isUSBDeviceOccupiedByDefaultServer()
-            }
             // When a device connects and WiFi devices are already visible, keep
             // the discovered list expanded so it doesn't disappear from view.
             if deviceManager.isConnected && !pairingBrowser.discoveredDevices.isEmpty {
@@ -648,11 +636,6 @@ struct WirelessConnectView: View {
 
         return ScrollView {
             VStack(spacing: 0) {
-                if isUSBOccupied {
-                    usbOccupiedWarningBanner
-                        .padding(.horizontal, 20)
-                        .padding(.top, 20)
-                }
 
                 // ╔══════════════════════════════════════════════════════╗
                 // ║  STATE 1 — Already connected                         ║
@@ -833,68 +816,6 @@ struct WirelessConnectView: View {
             // Re-validate connection state (catches stale wireless connections)
             Task { await deviceManager.detectDevice() }
         }
-    }
-
-    // MARK: - USB Occupied Warning Banner View
-    
-    @ViewBuilder
-    private var usbOccupiedWarningBanner: some View {
-        VStack(spacing: 12) {
-            HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.title3)
-                    .foregroundColor(.orange)
-                    .padding(.top, 2)
-                
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("USB Device Occupied")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundColor(.primary)
-                    Text("A USB device is connected but claimed by another app (like Android Studio). Release it to use USB connection here.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer()
-            }
-            
-            Button(action: {
-                isClaimingUSB = true
-                Task {
-                    _ = await ADBManager.recoverPrivateUSBTransportIfNeeded(forceRestart: true)
-                    await deviceManager.detectDevice()
-                    isUSBOccupied = await deviceManager.isUSBDeviceOccupiedByDefaultServer()
-                    isClaimingUSB = false
-                }
-            }) {
-                HStack {
-                    if isClaimingUSB {
-                        ProgressView().controlSize(.small)
-                            .padding(.trailing, 4)
-                    } else {
-                        Image(systemName: "cable.connector")
-                    }
-                    Text(isClaimingUSB ? "Claiming USB..." : "Claim USB Connection")
-                }
-                .font(.subheadline.weight(.medium))
-                .foregroundColor(.white)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
-                .background(isClaimingUSB ? Color.blue.opacity(0.6) : Color.blue)
-                .cornerRadius(8)
-            }
-            .buttonStyle(.plain)
-            .disabled(isClaimingUSB)
-        }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.orange.opacity(0.06))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.orange.opacity(0.2), lineWidth: 1)
-                )
-        )
     }
 
     // MARK: - Discovered Devices Panel

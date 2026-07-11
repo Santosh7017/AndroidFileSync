@@ -5,6 +5,18 @@ struct Shell {
     /// Any adb process started by app commands will use this private server.
     private static let appADBServerPort = 56037
 
+    /// When true, all ADB commands are routed to the default server (port 5037).
+    /// This allows the app to piggyback on an existing server that already owns the
+    /// USB transport (e.g. Android Studio), so both tools can coexist without conflict.
+    static var useDefaultServer: Bool = false
+
+    /// The environment used for all standard ADB commands.
+    /// Automatically routes to the default server (5037) when `useDefaultServer` is true,
+    /// or to our private server (56037) otherwise.
+    static var activeADBEnvironment: [String: String] {
+        useDefaultServer ? defaultADBEnvironment : adbEnvironment
+    }
+
     /// Environment variables applied to ALL processes launched by Shell.
     /// We isolate adb to a private server and disable adb's automatic mDNS auto-connect
     /// so the app controls when connections are established.
@@ -32,7 +44,7 @@ struct Shell {
         
         process.executableURL = URL(fileURLWithPath: command)
         process.arguments = args
-        process.environment = adbEnvironment
+        process.environment = activeADBEnvironment
         process.standardOutput = stdout
         process.standardError = stderr
         
@@ -62,7 +74,7 @@ struct Shell {
         
         process.executableURL = URL(fileURLWithPath: command)
         process.arguments = args
-        process.environment = adbEnvironment
+        process.environment = activeADBEnvironment
         process.standardOutput = stdout
         process.standardError = stderr
         
@@ -157,7 +169,7 @@ struct Shell {
             
             process.executableURL = URL(fileURLWithPath: command)
             process.arguments = args
-            process.environment = environment ?? adbEnvironment
+            process.environment = environment ?? activeADBEnvironment
             process.standardOutput = stdout
             process.standardError = stderr
             
@@ -289,7 +301,7 @@ struct Shell {
                 
                 process.executableURL = URL(fileURLWithPath: command)
                 process.arguments = args
-                process.environment = adbEnvironment
+                process.environment = activeADBEnvironment
                 process.standardOutput = stdout
                 process.standardError = stderr
                 
@@ -349,7 +361,7 @@ struct Shell {
                 
                 process.executableURL = URL(fileURLWithPath: command)
                 process.arguments = args
-                process.environment = adbEnvironment
+                process.environment = activeADBEnvironment
                 process.standardOutput = stdout
                 process.standardError = stderr
                 

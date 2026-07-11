@@ -73,11 +73,66 @@ class ADBManager {
 
     /// Returns all devices currently listed as 'device', 'unauthorized', or 'offline' in `adb devices`,
     /// enriched with real model names fetched in parallel.
+    /// If the private server has no USB device but the default server (port 5037) does,
+    /// transparently switches to shared mode so the app piggybacks on the existing server.
     static func listAllConnectedDevices() async -> [ConnectedDevice] {
         let path = getADBPath()
         guard !path.isEmpty else { return [] }
-        let (_, output, _) = await Shell.runAsyncWithTimeout(path, args: ["devices"], timeoutSeconds: 5.0)
-        let parsed: [(serial: String, status: String)] = output.split(separator: "\n").compactMap { line -> (String, String)? in
+        // Query the private server explicitly (port 56037) to check for connected devices
+        let (_, output, _) = await Shell.runAsyncWithTimeout(
+            path,
+            args: ["devices"],
+            timeoutSeconds: 5.0,
+            environment: Shell.adbEnvironment
+        )
+
+        // --- Coexistence / piggyback logic ---
+        // Check if our private server has any active connected devices.
+        let privateHasDevices = output.split(separator: "\n").contains { line in
+            let s = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
+            return !s.starts(with: "List") && !s.isEmpty && s.contains("\tdevice")
+        }
+        
+        if !privateHasDevices {
+            // Check default server — 2s timeout to keep detection snappy
+            let (_, defaultOutput, _) = await Shell.runAsyncWithTimeout(
+                path,
+                args: ["devices"],
+                timeoutSeconds: 2.0,
+                environment: Shell.defaultADBEnvironment
+            )
+            let defaultHasDevices = defaultOutput.split(separator: "\n").contains { line in
+                let s = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
+                return !s.starts(with: "List") && !s.isEmpty && s.contains("\tdevice")
+            }
+            if defaultHasDevices && !Shell.useDefaultServer {
+                print("🔄 ADB Coexistence: Default server has connected devices. Switching to shared mode (port 5037).")
+                Shell.useDefaultServer = true
+            } else if !defaultHasDevices && Shell.useDefaultServer {
+                // Default server has lost the devices — revert to private server mode
+                print("🔄 ADB Coexistence: Default server lost devices. Reverting to private server mode.")
+                Shell.useDefaultServer = false
+            }
+        } else if Shell.useDefaultServer {
+            // Private server now has active devices — revert to private mode
+            print("🔄 ADB Coexistence: Private server now has devices. Reverting to private server mode.")
+            Shell.useDefaultServer = false
+        }
+        // If we just switched to shared mode, re-query using the active environment
+        let effectiveOutput: String
+        if Shell.useDefaultServer {
+            let (_, sharedOutput, _) = await Shell.runAsyncWithTimeout(
+                path,
+                args: ["devices"],
+                timeoutSeconds: 5.0
+            )
+            effectiveOutput = sharedOutput
+        } else {
+            effectiveOutput = output
+        }
+        // --- End coexistence logic ---
+
+        let parsed: [(serial: String, status: String)] = effectiveOutput.split(separator: "\n").compactMap { line -> (String, String)? in
             let s = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !s.starts(with: "List"), !s.isEmpty else { return nil }
             let parts = s.split(whereSeparator: { $0.isWhitespace }).map(String.init)
@@ -190,6 +245,17 @@ class ADBManager {
             return await task.value
         }
 
+        // Do NOT restart the server if we are in shared mode (port 5037) or if a device is connected.
+        // Doing so will disrupt Android Studio or disconnect the active session.
+        if Shell.useDefaultServer {
+            print("🔄 ADB: Server restart skipped — app is in shared mode (port 5037).")
+            return false
+        }
+        if activeDeviceSerial != nil {
+            print("🔄 ADB: Server restart skipped — a device is currently connected (\(activeDeviceSerial!)).")
+            return false
+        }
+
         // Do NOT restart the server while a pairing handshake is in flight.
         // Killing the ADB daemon during an active TLS pairing session causes:
         //   "protocol fault (couldn't read status message): Undefined error: 0"
@@ -278,7 +344,8 @@ class ADBManager {
         let (_, privateOutput, _) = await Shell.runAsyncWithTimeout(
             path,
             args: ["devices", "-l"],
-            timeoutSeconds: 3.0
+            timeoutSeconds: 3.0,
+            environment: Shell.adbEnvironment
         )
         if privateOutput.contains(" usb:") {
             return false
@@ -312,7 +379,8 @@ class ADBManager {
             let (_, postKillOutput, _) = await Shell.runAsyncWithTimeout(
                 path,
                 args: ["devices", "-l"],
-                timeoutSeconds: 2.0
+                timeoutSeconds: 2.0,
+                environment: Shell.adbEnvironment
             )
             if postKillOutput.contains(" usb:") {
                 print("🔄 ADB: Private server automatically claimed the USB transport after \(Double(attempt) * 0.5)s.")
@@ -322,6 +390,7 @@ class ADBManager {
         }
         
         if claimed {
+            Shell.useDefaultServer = false
             return true
         }
 
@@ -331,7 +400,30 @@ class ADBManager {
             return false
         }
 
-        return await restartPrivateServer(reason: "Starting private server after releasing default USB owner.")
+        let restarted = await restartPrivateServer(reason: "Starting private server after releasing default USB owner.")
+        if restarted {
+            Shell.useDefaultServer = false
+        }
+        
+        // Last resort: if our private server still doesn't have the USB device (e.g. Android Studio
+        // auto-respawned its server), fall back to coexistence mode so the user can still use the app.
+        if restarted {
+            let (_, checkOutput, _) = await Shell.runAsyncWithTimeout(
+                path, args: ["devices", "-l"], timeoutSeconds: 2.0, environment: Shell.adbEnvironment
+            )
+            if !checkOutput.contains(" usb:") {
+                let (_, defaultCheck, _) = await Shell.runAsyncWithTimeout(
+                    path, args: ["devices", "-l"], timeoutSeconds: 2.0, environment: Shell.defaultADBEnvironment
+                )
+                if defaultCheck.contains(" usb:") {
+                    print("🔄 ADB Coexistence: Private server could not claim USB (likely reclaimed by another app). Switching to shared mode.")
+                    Shell.useDefaultServer = true
+                    return true
+                }
+            }
+        }
+        
+        return restarted
     }
 
     /// Runs `adb mdns services` with optional daemon recovery.
@@ -394,7 +486,7 @@ class ADBManager {
 
         let first = await runOnce()
         let combinedLower = (first.1 + first.2).lowercased()
-        let shouldRecover = allowRecovery && (first.0 != 0 || isProtocolError(combinedLower))
+        let shouldRecover = allowRecovery && !Shell.useDefaultServer && activeDeviceSerial == nil && (first.0 != 0 || isProtocolError(combinedLower))
         if !shouldRecover {
             return await withBonjourFallback(first)
         }
@@ -2118,7 +2210,7 @@ class ADBManager {
                 let stderr = Pipe()
                 process.executableURL = URL(fileURLWithPath: adbPath)
                 process.arguments = deviceArgs(["push", localPath, devicePath])
-                process.environment = Shell.adbEnvironment
+                process.environment = Shell.activeADBEnvironment
                 process.standardOutput = stdout
                 process.standardError = stderr
                 
@@ -2214,7 +2306,7 @@ class ADBManager {
                             let retryErr = Pipe()
                             retryProcess.executableURL = URL(fileURLWithPath: adbPath)
                             retryProcess.arguments = deviceArgs(["push", localPath, devicePath])
-                            retryProcess.environment = Shell.adbEnvironment
+                            retryProcess.environment = Shell.activeADBEnvironment
                             retryProcess.standardOutput = retryOut
                             retryProcess.standardError = retryErr
                             

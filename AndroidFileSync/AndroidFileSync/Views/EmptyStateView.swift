@@ -12,9 +12,21 @@ struct EmptyStateView: View {
     var customMessage: String? = nil
     var onRetry: (() -> Void)? = nil
     var onConnectWiFi: (() -> Void)? = nil
-    
+
+    // USB Claim props
+    var isUSBOccupied: Bool = false
+    var isClaimingUSB: Bool = false
+    var onClaimUSB: (() -> Void)? = nil
+
     var body: some View {
         VStack(spacing: 24) {
+            // USB Occupied Warning Banner — shown at the top of the homepage
+            if isUSBOccupied {
+                usbOccupiedWarningBanner
+                    .padding(.horizontal, 32)
+                    .padding(.top, 16)
+            }
+
             // Icon with animation
             ZStack {
                 Circle()
@@ -81,7 +93,60 @@ struct EmptyStateView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .id("empty_state_view_\(isDetecting)")
     }
-    
+
+    @ViewBuilder
+    private var usbOccupiedWarningBanner: some View {
+        HStack(spacing: 16) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.title2)
+                .foregroundColor(.orange)
+            
+            VStack(alignment: .leading, spacing: 3) {
+                Text("USB Device Occupied")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.primary)
+                Text("A USB device is connected but claimed by another app (like Android Studio).")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            
+            Spacer(minLength: 16)
+            
+            Button(action: { onClaimUSB?() }) {
+                HStack(spacing: 6) {
+                    if isClaimingUSB {
+                        ProgressView()
+                            .controlSize(.small)
+                            .scaleEffect(0.8)
+                    } else {
+                        Image(systemName: "cable.connector")
+                    }
+                    Text(isClaimingUSB ? "Claiming..." : "Claim USB")
+                }
+                .font(.subheadline.weight(.medium))
+                .foregroundColor(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(isClaimingUSB ? Color.blue.opacity(0.6) : Color.blue)
+                .cornerRadius(6)
+            }
+            .buttonStyle(.plain)
+            .disabled(isClaimingUSB)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .frame(maxWidth: 680)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.orange.opacity(0.06))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.orange.opacity(0.25), lineWidth: 1)
+        )
+    }
+
     private var instructionsList: some View {
         VStack(alignment: .leading, spacing: 12) {
             instructionRow(number: 1, text: "Enable 'USB Debugging' in Developer Options", icon: "ant.fill")
@@ -114,4 +179,3 @@ struct EmptyStateView: View {
         }
     }
 }
-
