@@ -44,7 +44,13 @@ That's it. The app comes with everything else built in.
 The easiest way to install AndroidFileSync is using [Homebrew](https://brew.sh/):
 
 ```bash
+# 1. Tap the repository
 brew tap santosh7017/androidfilesync
+
+# 2. Trust the tap (Required for Homebrew 6.0+)
+brew trust santosh7017/androidfilesync
+
+# 3. Install the app cask
 brew install --cask androidfilesync
 ```
 
