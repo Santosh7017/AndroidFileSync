@@ -269,6 +269,75 @@ struct ContentView: View {
         }
     }
 
+    /// Banner shown when the wireless connection drops and the health monitor
+    /// is actively attempting to reconnect. Shows animated indicator, status message,
+    /// and attempt count. Auto-dismisses when reconnection succeeds.
+    @ViewBuilder
+    private var reconnectionBanner: some View {
+        let monitor = deviceManager.connectionHealthMonitor
+        let message = monitor.reconnectMessage
+        let attempt = monitor.reconnectAttempt
+        
+        VStack(spacing: 0) {
+            HStack(spacing: 10) {
+                // Animated WiFi icon with pulsing effect
+                Image(systemName: "wifi.exclamationmark")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.orange)
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(message.isEmpty ? "Device disconnected. Reconnecting..." : message)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.primary)
+                    
+                    if attempt > 0 {
+                        Text("Attempt \(attempt) · Your files are safe")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                Spacer()
+                
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 16, height: 16)
+                
+                // Manual retry button — opens wireless connect view
+                Button {
+                    showWirelessConnect = true
+                } label: {
+                    Text("Connect")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.orange)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            
+            // Indeterminate progress bar
+            GeometryReader { geo in
+                let width = geo.size.width
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(Color.orange.opacity(0.2))
+                    .frame(height: 3)
+                    .overlay(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(Color.orange)
+                            .frame(width: width * 0.3, height: 3)
+                            .modifier(IndeterminateProgressModifier(containerWidth: width))
+                    }
+            }
+            .frame(height: 3)
+            
+            Divider()
+        }
+        .background(Color.orange.opacity(0.08))
+        .transition(.move(edge: .top).combined(with: .opacity))
+        .animation(.easeInOut(duration: 0.3), value: monitor.isReconnecting)
+    }
+
     private var unifiedDetailsPopoverView: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Active Tasks")
@@ -512,6 +581,13 @@ struct ContentView: View {
             }
             .onChange(of: deviceManager.isConnected) { connected in
                 if !connected {
+                    // If the health monitor is actively reconnecting in the background,
+                    // keep the last loaded files visible as a read-only snapshot on screen.
+                    guard !deviceManager.connectionHealthMonitor.isReconnecting else {
+                        print("📱 ContentView: isConnected changed to false, but health monitor is reconnecting — keeping files visible.")
+                        return
+                    }
+                    
                     // Immediately clear file browser state on disconnect
                     loadTask?.cancel()
                     metadataTask?.cancel()
@@ -606,8 +682,14 @@ struct ContentView: View {
     // Level 3: layout + input modifiers
     private var layoutContent: some View {
         VStack(spacing: 0) {
-            if deviceManager.isConnected {
+            // Show connected content OR the reconnection banner while reconnecting
+            if deviceManager.isConnected || deviceManager.connectionHealthMonitor.isReconnecting {
                 connectedContent
+                
+                // Reconnection banner — shown when health monitor detects wireless disconnect
+                if deviceManager.connectionHealthMonitor.isReconnecting {
+                    reconnectionBanner
+                }
             } else {
                 let showCustomMessage = !deviceManager.availableDevices.isEmpty
                 EmptyStateView(
@@ -2057,5 +2139,25 @@ struct LiveOperationRow: View {
             }
         }
         .padding(.leading, 8)
+    }
+}
+
+/// Animates a progress bar segment back and forth (indeterminate progress indicator).
+/// Used by the reconnection banner to show ongoing activity.
+struct IndeterminateProgressModifier: ViewModifier, Animatable {
+    let containerWidth: CGFloat
+    @State private var offset: CGFloat = 0
+    
+    func body(content: Content) -> some View {
+        content
+            .offset(x: offset)
+            .onAppear {
+                withAnimation(
+                    .easeInOut(duration: 1.2)
+                    .repeatForever(autoreverses: true)
+                ) {
+                    offset = containerWidth * 0.7
+                }
+            }
     }
 }

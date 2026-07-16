@@ -26,6 +26,11 @@ class DeviceManager: ObservableObject {
     @Published var storageStats: [String: StorageInfo] = [:]
     /// True when there is an active file transfer — prevents false USB disconnects from ADB contention
     @Published var isTransferActive = false
+    
+    /// Event-driven wireless connection health monitor.
+    /// Uses `adb wait-for-disconnect` for instant disconnect detection and
+    /// NWBrowser + targeted reconnect for automatic recovery.
+    let connectionHealthMonitor = ConnectionHealthMonitor()
 
     struct StorageInfo {
         let usedBytes: Int64
@@ -529,20 +534,34 @@ class DeviceManager: ObservableObject {
                     
                     // task and silently kill the upload popup. It resets only on disconnect.
                     print("📱 DeviceManager: Device connected (\(self.connectionType.rawValue))!")
+                    
+                    // If the health monitor was reconnecting, dismiss the banner
+                    // (detectDevice is called by the health monitor on reconnect success)
+                    if self.connectionHealthMonitor.isReconnecting {
+                        self.connectionHealthMonitor.isReconnecting = false
+                        self.connectionHealthMonitor.isHealthy = true
+                        self.connectionHealthMonitor.reconnectMessage = ""
+                    }
                 }
             } else {
-                self.connectionType = .none
-                self.deviceName = "No Device"
-                self.statusMessage = "No device detected. Please connect your device."
-                self.isConnected = false
-                self.diagnosticsComplete = false
-                self.sdCardPath = nil
-                self.storageStats = [:]
-                // Only clear lastWirelessIP if no wireless device is available at all
-                if !allDevices.contains(where: { $0.isWireless }) {
-                    self.lastWirelessIP = ""
+                // Don't mark as disconnected if the health monitor is actively reconnecting —
+                // let it handle the state so the reconnection banner stays visible.
+                if !self.connectionHealthMonitor.isReconnecting {
+                    self.connectionType = .none
+                    self.deviceName = "No Device"
+                    self.statusMessage = "No device detected. Please connect your device."
+                    self.isConnected = false
+                    self.diagnosticsComplete = false
+                    self.sdCardPath = nil
+                    self.storageStats = [:]
+                    // Only clear lastWirelessIP if no wireless device is available at all
+                    if !allDevices.contains(where: { $0.isWireless }) {
+                        self.lastWirelessIP = ""
+                    }
+                    print("📱 DeviceManager: No device found")
+                } else {
+                    print("📱 DeviceManager: Health monitor is reconnecting — keeping state for banner.")
                 }
-                print("📱 DeviceManager: No device found")
             }
             
             // Detection is complete, hide the initial loading screen
@@ -611,7 +630,10 @@ class DeviceManager: ObservableObject {
                     }
                     
                     if let target = ADBManager.activeDeviceSerial {
-                        if let hwSerial = await ADBManager.getHardwareSerial(for: target) {
+                        // Resolve hardware serial for mDNS matching
+                        let hwSerial = await ADBManager.getHardwareSerial(for: target)
+                        
+                        if let hwSerial {
                             var savedSerials = UserDefaults.standard.stringArray(forKey: "connectedWirelessSerials") ?? []
                             if !savedSerials.contains(hwSerial) {
                                 savedSerials.append(hwSerial)
@@ -625,6 +647,22 @@ class DeviceManager: ObservableObject {
                                 UserDefaults.standard.set(serialNames, forKey: "wirelessDisplayNameBySerial")
                             }
                         }
+                        
+                        // ── Start event-driven wireless connection health monitor ──
+                        let monitorIP = await MainActor.run { self.lastWirelessIP }
+                        await MainActor.run {
+                            self.connectionHealthMonitor.startMonitoring(
+                                serial: target,
+                                ip: monitorIP,
+                                hwSerial: hwSerial,
+                                deviceManager: self
+                            )
+                        }
+                    }
+                } else {
+                    // USB connection — stop wireless health monitoring
+                    await MainActor.run {
+                        self.connectionHealthMonitor.stopMonitoring()
                     }
                 }
             }
@@ -690,6 +728,28 @@ class DeviceManager: ObservableObject {
     // MARK: - USB Device Monitor (IOKit, zero-overhead)
 
     func startMonitoring() {
+        // ── Wire up ConnectionHealthMonitor callbacks ──
+        connectionHealthMonitor.onReconnected = { [weak self] in
+            guard let self else { return }
+            print("📱 DeviceManager: Health monitor reconnected! Refreshing device state...")
+            // Update the active device serial to the reconnected target
+            if let newSerial = self.connectionHealthMonitor.monitoredSerial {
+                ADBManager.switchToDevice(serial: newSerial)
+            }
+            Task {
+                // Give the ADB server a moment to register the device in `adb devices`
+                try? await Task.sleep(nanoseconds: 500_000_000) // 500ms
+                await self.detectDevice()
+            }
+        }
+        connectionHealthMonitor.onDisconnected = { [weak self] in
+            guard let self else { return }
+            print("📱 DeviceManager: Health monitor detected disconnect!")
+            // Don't clear isConnected here — the health monitor is handling reconnection.
+            // Just update the status message to show the reconnection banner.
+            self.statusMessage = "Device disconnected. Reconnecting..."
+        }
+        
         let monitor = USBDeviceMonitor()
         
         // USB device plugged in — poll for ADB to register the new device
@@ -1041,9 +1101,23 @@ class DeviceManager: ObservableObject {
         }
     }
     
+    
+    /// Mark a device as live in the liveness check cache to prevent detectDevice from querying it again immediately.
+    func markDeviceAsLive(_ serial: String) {
+        lastLivenessCheckAt[serial] = Date()
+    }
+    
+    /// Clear a device from the liveness check cache so it will be queried again.
+    func clearLivenessCheck(for serial: String) {
+        lastLivenessCheckAt.removeValue(forKey: serial)
+    }
+
     /// Disconnects the currently active wireless device only.
     /// Other connected devices (USB or additional WiFi) are left intact.
     func disconnectWireless() async {
+        // Stop health monitor — this is an intentional disconnect, not a transient one.
+        connectionHealthMonitor.stopMonitoring()
+        
         let activeSerial = ADBManager.activeDeviceSerial
         let activeIP = await MainActor.run { self.lastWirelessIP }
 

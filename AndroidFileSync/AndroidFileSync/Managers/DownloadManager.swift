@@ -680,11 +680,20 @@ class DownloadManager: ObservableObject {
             while !isBatchCancelled {
                 // Check if target device has switched explicitly (ignore transient nil during ADB refreshes)
                 if let currentSerial = ADBManager.activeDeviceSerial, let targetSerial = targetDeviceSerial, currentSerial != targetSerial {
-                    print("⚠️ DownloadManager: Explicit device switch from \(targetSerial) to \(currentSerial). Aborting batch download.")
-                    await MainActor.run {
-                        self.cancelAllDownloads()
+                    // Check if it's just a wireless port rotation on the same IP
+                    if ADBManager.isWirelessSerial(currentSerial) && ADBManager.isWirelessSerial(targetSerial),
+                       currentSerial.components(separatedBy: ":").first == targetSerial.components(separatedBy: ":").first {
+                        // Port rotation on same wireless device — update target serial to match new port
+                        await MainActor.run {
+                            self.targetDeviceSerial = currentSerial
+                        }
+                    } else {
+                        print("⚠️ DownloadManager: Explicit device switch from \(targetSerial) to \(currentSerial). Aborting batch download.")
+                        await MainActor.run {
+                            self.cancelAllDownloads()
+                        }
+                        break
                     }
-                    break
                 }
                 
                 // Concurrency adjustment for Wi-Fi + active app operations
@@ -811,6 +820,12 @@ class DownloadManager: ObservableObject {
                             }
                             let deviceSwitched = await MainActor.run {
                                 if let current = ADBManager.activeDeviceSerial, let target = self.targetDeviceSerial {
+                                    // If both are wireless, compare the IP addresses instead of the port!
+                                    if ADBManager.isWirelessSerial(current) && ADBManager.isWirelessSerial(target) {
+                                        let currentIP = current.components(separatedBy: ":").first ?? ""
+                                        let targetIP = target.components(separatedBy: ":").first ?? ""
+                                        return currentIP != targetIP
+                                    }
                                     return current != target
                                 }
                                 return false
