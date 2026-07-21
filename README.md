@@ -7,7 +7,7 @@ No cloud. No Google account needed. Plug in via USB or connect wirelessly over W
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-macOS%2013%2B-blue)
 ![Version](https://img.shields.io/badge/version-2.3.1-green)
 
-**[🌐 Project Website](https://santosh7017.github.io/AndroidFileSync/) • [📥 Download Latest Version](#installation) • [🖼️ View Previews](#preview) • [⌨️ Keyboard Shortcuts](#keyboard-shortcuts) • [❓ Troubleshooting](#troubleshooting) • [⚖️ License & Legal](#license--legal)**
+**[🌐 Project Website](https://santosh7017.github.io/AndroidFileSync/) • [📥 Download Latest Version](#installation) • [🖼️ View Previews](#preview) • [⌨️ Keyboard Shortcuts](#keyboard-shortcuts) • [❓ Troubleshooting](#troubleshooting) • [⚖️ License & Legal](#license-legal)**
 
 ---
 
@@ -206,7 +206,7 @@ If Auto-Discovery doesn't find your phone (for example, on a corporate network o
 
 ---
 
-## ⌨️ Keyboard Shortcuts
+## <a id="keyboard-shortcuts"></a><a id="-keyboard-shortcuts"></a>⌨️ Keyboard Shortcuts
 
 AndroidFileSync supports familiar Finder-like keyboard shortcuts for fast, mouse-free file management:
 
@@ -243,7 +243,7 @@ AndroidFileSync supports familiar Finder-like keyboard shortcuts for fast, mouse
 
 ---
 
-## ❓ Troubleshooting
+## <a id="troubleshooting"></a><a id="-troubleshooting"></a>❓ Troubleshooting
 
 | Problem                             | What to Do                                                                                   |
 | ----------------------------------- | -------------------------------------------------------------------------------------------- |
@@ -268,10 +268,10 @@ AndroidFileSync supports familiar Finder-like keyboard shortcuts for fast, mouse
 
 ---
 
-## ⚖️ License & Legal
+## <a id="license-legal"></a><a id="license--legal"></a><a id="-license--legal"></a><a id="-license-legal"></a>⚖️ License & Legal
 
 - **License**: Released under the GPL-3.0 License. See the [LICENSE](LICENSE) file for more information.
 - **Security Policy**: For reporting security vulnerabilities, please refer to the [Security Policy](SECURITY.md).
-- **Privacy Policy**: Read the [Privacy Policy](docs/privacy.html) to learn how data is handled.
-- **Terms of Service**: Read the [Terms of Service](docs/terms.html).
+- **Privacy Policy**: Read the [Privacy Policy](https://santosh7017.github.io/AndroidFileSync/privacy.html) to learn how data is handled.
+- **Terms of Service**: Read the [Terms of Service](https://santosh7017.github.io/AndroidFileSync/terms.html).
 - **Support & Contact**: If you have questions, feedback, or need help, please open an [issue on GitHub](https://github.com/Santosh7017/AndroidFileSync/issues) or reach out via email to [santoshmorya400@gmail.com](mailto:santoshmorya400@gmail.com).
