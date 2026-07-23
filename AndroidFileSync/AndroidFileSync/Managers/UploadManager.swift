@@ -19,11 +19,16 @@ class UploadManager: ObservableObject {
                     userInfo: ["type": "upload", "count": count]
                 )
             }
-            appManager?.operationEngine.processQueue()
-            downloadManager?.triggerProcessQueue()
+            let now = CFAbsoluteTimeGetCurrent()
+            if now - lastSideEffectTime > 0.5 {
+                lastSideEffectTime = now
+                appManager?.operationEngine.processQueue()
+                downloadManager?.triggerProcessQueue()
+            }
         }
     }
     private var lastActiveUploadsCount = 0
+    private var lastSideEffectTime: CFAbsoluteTime = 0
     private var internalActiveUploads: [String: UploadProgress] = [:]
     weak var deviceManager: DeviceManager?
     weak var appManager: AppManager?
@@ -57,6 +62,13 @@ class UploadManager: ObservableObject {
                     "batchTotal": batchTotal
                 ]
             )
+            if oldValue != isBatchUploading {
+                updateTimer?.invalidate()
+                updateTimer = nil
+                if isBatchUploading || !internalActiveUploads.isEmpty {
+                    startTimerIfNeeded()
+                }
+            }
         }
     }
     @Published var batchCancelled: Bool = false
@@ -111,15 +123,25 @@ struct UploadQueueItem {
     private let queueLock = NSLock()
     private var pendingFiles: [UploadQueueItem] = []
     private var isProcessingQueue = false
-    private var activeCongestionCap: Int = 10
+    private var activeCongestionCap: Int = 12
     private var successStreak: Int = 0
     
     // Throttled batch counter — updated in background, flushed to @Published by timer
     private var internalBatchCompleted: Int = 0
     
+    // Coalesced removals to avoid per-file @Published updates during batch mode
+    private var pendingRemovals: Set<String> = []
+    
     // Active running tasks counter for queue processor
     private let activeRunningLock = NSLock()
-    private var activeRunningCount = 0
+    private var activeRunningCount: Int = 0
+    private var activeRunningWeight: Double = 0.0
+    
+    var pendingQueueCount: Int {
+        queueLock.lock()
+        defer { queueLock.unlock() }
+        return pendingFiles.count
+    }
     
     var runningTransfersCount: Int {
         activeRunningLock.lock()
@@ -127,9 +149,45 @@ struct UploadQueueItem {
         return activeRunningCount
     }
     
+    var runningTransfersWeight: Double {
+        activeRunningLock.lock()
+        defer { activeRunningLock.unlock() }
+        return activeRunningWeight
+    }
+    
+    /// Calculates dynamic slot weight based on file size
+    /// Large files (> 50 MB) take 2.0 slots to avoid choking ADB/USB bus.
+    /// Small files (< 2 MB) take 0.5 slots for fast parallel throughput.
+    /// Medium files (2 MB - 50 MB) take 1.0 slot.
+    private func slotWeight(for fileSize: UInt64) -> Double {
+        if fileSize > 50 * 1024 * 1024 {
+            return 2.0
+        } else if fileSize < 2 * 1024 * 1024 {
+            return 0.5
+        } else {
+            return 1.0
+        }
+    }
+    
+    @Published var isAutoConcurrency: Bool = true {
+        didSet {
+            UserDefaults.standard.set(isAutoConcurrency, forKey: "isAutoConcurrencyUploads")
+            if !isAutoConcurrency {
+                // User taking manual control — reset AIMD cap so prior error-halving
+                // doesn't silently throttle their manually-chosen concurrency
+                activeCongestionCap = maxConcurrent
+                successStreak = 0
+            }
+            triggerProcessQueue()
+        }
+    }
+    
     init() {
+        let savedAuto = UserDefaults.standard.object(forKey: "isAutoConcurrencyUploads") as? Bool ?? true
+        self.isAutoConcurrency = savedAuto
+        
         let saved = UserDefaults.standard.integer(forKey: "maxConcurrentUploads")
-        let clamped = saved > 0 ? min(max(saved, 1), 10) : 3
+        let clamped = saved > 0 ? min(max(saved, 1), kWiredMaxConcurrent) : 3
         self.preferredMaxConcurrent = clamped
         self.maxConcurrent = clamped
     }
@@ -188,13 +246,14 @@ struct UploadQueueItem {
     
     private func startTimerIfNeeded() {
         guard updateTimer == nil else { return }
-        updateTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        let interval: TimeInterval = isBatchUploading ? 0.5 : 1.0
+        updateTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.flushUIUpdates()
         }
     }
     
     private func stopTimerIfNeeded() {
-        guard activeUploads.isEmpty, !isBatchUploading else { return }
+        guard internalActiveUploads.isEmpty, !isBatchUploading else { return }
         updateTimer?.invalidate()
         updateTimer = nil
     }
@@ -213,11 +272,28 @@ struct UploadQueueItem {
             }
         }
         
+        let removals = pendingRemovals
+        pendingRemovals.removeAll()
+        if !removals.isEmpty {
+            for localPath in removals {
+                internalActiveUploads.removeValue(forKey: localPath)
+            }
+            progressLock.lock()
+            for localPath in removals {
+                backgroundProgress.removeValue(forKey: localPath)
+            }
+            progressLock.unlock()
+        }
+        
         // Single batch update to @Published property to minimize SwiftUI updates
         activeUploads = internalActiveUploads
         
         if completedSnapshot != batchCompleted {
             batchCompleted = completedSnapshot
+        }
+        
+        if internalActiveUploads.isEmpty && !isBatchUploading {
+            stopTimerIfNeeded()
         }
     }
     
@@ -236,15 +312,15 @@ struct UploadQueueItem {
         let maxUploadCap: Int
         if isWireless {
             if downloadsActive {
-                maxUploadCap = isAppBusy ? 3 : 4
+                maxUploadCap = isAppBusy ? kWirelessDualBusyCap : kWirelessDualCap
             } else {
-                maxUploadCap = isAppBusy ? 6 : 8
+                maxUploadCap = isAppBusy ? kWirelessSoloBusyCap : kWirelessMaxConcurrent
             }
         } else {
             if downloadsActive {
-                maxUploadCap = isAppBusy ? 5 : 8
+                maxUploadCap = isAppBusy ? kWiredDualBusyCap : kWiredDualCap
             } else {
-                maxUploadCap = isAppBusy ? 10 : 10
+                maxUploadCap = isAppBusy ? kWiredSoloBusyCap : kWiredMaxConcurrent
             }
         }
         
@@ -258,12 +334,27 @@ struct UploadQueueItem {
 
     @MainActor
     private func markUploadFailed(localPath: String, error: Error) {
+        if isCancelled(localPath: localPath) || batchCancelled {
+            AppLogger.log("🛑 Upload cancelled for \(localPath)", level: .info)
+            if var upload = internalActiveUploads[localPath] {
+                upload.isCancelled = true
+                upload.error = nil
+                upload.transferSpeed = 0
+                internalActiveUploads[localPath] = upload
+                if !isBatchUploading {
+                    activeUploads = internalActiveUploads
+                }
+            }
+            return
+        }
         AppLogger.log("❌ Upload failed for \(localPath): \(error.localizedDescription)", level: .error)
         if var upload = internalActiveUploads[localPath] {
             upload.error = error.localizedDescription
             upload.transferSpeed = 0
             internalActiveUploads[localPath] = upload
-            activeUploads = internalActiveUploads
+            if !isBatchUploading {
+                activeUploads = internalActiveUploads
+            }
         }
         progressLock.lock()
         backgroundProgress.removeValue(forKey: localPath)
@@ -306,6 +397,7 @@ struct UploadQueueItem {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             guard let self = self else { return }
             self.internalActiveUploads.removeValue(forKey: localPath)
+            self.pendingRemovals.remove(localPath)
             self.activeUploads = self.internalActiveUploads
             self.stopTimerIfNeeded()
             
@@ -345,8 +437,10 @@ struct UploadQueueItem {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self = self else { return }
             self.internalActiveUploads.removeAll()
+            self.pendingRemovals.removeAll()
             self.activeUploads.removeAll()
             self.stopTimerIfNeeded()
+            self.endPreventingSleep()
             
             self.progressLock.lock()
             self.backgroundProgress.removeAll()
@@ -393,7 +487,9 @@ struct UploadQueueItem {
         
         await MainActor.run {
             internalActiveUploads[localPath] = progress
-            activeUploads = internalActiveUploads
+            if !isBatchUploading {
+                activeUploads = internalActiveUploads
+            }
             startTimerIfNeeded()
         }
         
@@ -435,7 +531,9 @@ struct UploadQueueItem {
                 upload.bytesTransferred = fileSize
                 upload.transferSpeed = 0
                 internalActiveUploads[localPath] = upload
-                activeUploads = internalActiveUploads
+                if !isBatchUploading {
+                    activeUploads = internalActiveUploads
+                }
             }
         }
         
@@ -447,11 +545,14 @@ struct UploadQueueItem {
             try? await Task.sleep(nanoseconds: delayNs)
             
             await MainActor.run {
-                self?.internalActiveUploads.removeValue(forKey: localPath)
-                if let dict = self?.internalActiveUploads {
-                    self?.activeUploads = dict
+                guard let self = self else { return }
+                if self.isBatchUploading {
+                    self.pendingRemovals.insert(localPath)
+                } else {
+                    self.internalActiveUploads.removeValue(forKey: localPath)
+                    self.activeUploads = self.internalActiveUploads
+                    self.stopTimerIfNeeded()
                 }
-                self?.stopTimerIfNeeded()
             }
             
             self?.flagLock.lock()
@@ -537,7 +638,9 @@ struct UploadQueueItem {
                 self.internalActiveUploads[localPath]?.isComplete = true
                 self.internalActiveUploads[localPath]?.bytesTransferred = fileSize
                 self.internalActiveUploads[localPath]?.transferSpeed = 0
-                self.activeUploads = self.internalActiveUploads
+                if !self.isBatchUploading {
+                    self.activeUploads = self.internalActiveUploads
+                }
             }
             
             await ADBManager.triggerMediaScan(path: safeDevicePath)
@@ -547,9 +650,13 @@ struct UploadQueueItem {
             try? await Task.sleep(nanoseconds: delayNs)
             
             await MainActor.run {
-                self.internalActiveUploads.removeValue(forKey: localPath)
-                self.activeUploads = self.internalActiveUploads
-                self.stopTimerIfNeeded()
+                if self.isBatchUploading {
+                    self.pendingRemovals.insert(localPath)
+                } else {
+                    self.internalActiveUploads.removeValue(forKey: localPath)
+                    self.activeUploads = self.internalActiveUploads
+                    self.stopTimerIfNeeded()
+                }
             }
             
             self.flagLock.lock()
@@ -602,11 +709,26 @@ struct UploadQueueItem {
             let isWireless = self.deviceManager?.connectionType == .wireless
             let isAppBusy = self.appManager?.operationEngine.isBusy ?? false
             let downloadsActive = (self.downloadManager?.runningTransfersCount ?? 0) > 0 || (self.downloadManager?.isBatchDownloading ?? false)
+            let initialLimit: Int
             if isWireless {
-                self.effectiveConcurrentLimit = downloadsActive ? (isAppBusy ? 2 : 3) : (isAppBusy ? 4 : 5)
+                initialLimit = downloadsActive ? (isAppBusy ? 2 : 3) : (isAppBusy ? 4 : 5)
             } else {
-                self.effectiveConcurrentLimit = downloadsActive ? (isAppBusy ? 5 : 6) : min(self.maxConcurrent, isAppBusy ? 10 : 12)
+                initialLimit = downloadsActive ? (isAppBusy ? kWiredDualBusyCap : kWiredDualCap) : min(self.maxConcurrent, isAppBusy ? kWiredSoloBusyCap : kWiredMaxConcurrent)
             }
+            self.effectiveConcurrentLimit = initialLimit
+            
+            // Reset AIMD congestion cap:
+            // - Solo mode: start at the full connection-type cap so AIMD immediately reacts to errors
+            //   (e.g., 8 → error → 4 → error → 2, then recovers 3 successes at a time)
+            // - Dual mode: start at initialLimit (conservative) so first error aggressively cuts bandwidth
+            let soloMaxCap: Int
+            if isWireless {
+                soloMaxCap = isAppBusy ? kWirelessSoloBusyCap : kWirelessMaxConcurrent
+            } else {
+                soloMaxCap = min(self.maxConcurrent, isAppBusy ? kWiredSoloBusyCap : kWiredMaxConcurrent)
+            }
+            self.activeCongestionCap = downloadsActive ? initialLimit : soloMaxCap
+            self.successStreak = 0
         }
         
         if shouldStart {
@@ -679,8 +801,12 @@ struct UploadQueueItem {
                 
                 
                 // Concurrency adjustment for Wi-Fi + active app operations
-                let isWireless = deviceManager?.connectionType == .wireless
-                let isAppBusy = appManager?.operationEngine.isBusy ?? false
+                // These MUST be read on the main actor — deviceManager/appManager are @MainActor-bound
+                let (isWireless, isAppBusy) = await MainActor.run {
+                    let wireless = self.deviceManager?.connectionType == .wireless
+                    let busy = self.appManager?.operationEngine.isBusy ?? false
+                    return (wireless, busy)
+                }
                 
                 if isWireless && isAppBusy {
                     if savedWirelessLimitBeforeBackup == nil {
@@ -709,47 +835,59 @@ struct UploadQueueItem {
                             upload.transferSpeed = 0
                             internalActiveUploads[localPath] = upload
                         }
-                        activeUploads = internalActiveUploads
+                        if !isBatchUploading {
+                            activeUploads = internalActiveUploads
+                        }
                     }
-                    try? await Task.sleep(nanoseconds: 1_000_000_000) // Sleep 1 second
+                    try? await Task.sleep(nanoseconds: kOfflineCheckIntervalNs)
                     
                     // Reset our local offline flag if device is back online according to deviceManager
                     if let dm = deviceManager, dm.isConnected {
                         isConnectionOffline = false
+                        // WiFi reconnect stabilization: give ADB transport time to settle
+                        // before dispatching new transfers, preventing immediate re-drops
+                        if isWireless {
+                            try? await Task.sleep(nanoseconds: kReconnectStabilizationDelayNs)
+                        }
                     }
                     continue
                 }
                 
-                // Dynamic wireless/wired concurrency limit with 50/50 cross-direction slot budgeting
+                // Dynamic wireless/wired concurrency limit with smart asymmetric slot borrowing
                 let activeDownloadsCount = downloadManager?.runningTransfersCount ?? 0
+                let pendingDownloadsCount = downloadManager?.pendingQueueCount ?? 0
+                // Include isBatchDownloading to cover the startup race window where downloads have
+                // started but haven't dispatched tasks yet (runningCount=0, pendingCount=0)
+                let isBatchDownload = await MainActor.run { self.downloadManager?.isBatchDownloading ?? false }
                 let downloadsActive = activeDownloadsCount > 0
+                let isOppositeDemandActive = downloadsActive || pendingDownloadsCount > 0 || isBatchDownload
                 
                 let globalCombinedLimit: Int
                 let maxUploadCap: Int
                 if isWireless {
-                    if downloadsActive {
-                        // 50-50 Wi-Fi allocation: 4 uploads + 4 downloads = 8 total (or 3+3 if app ops active)
-                        globalCombinedLimit = isAppBusy ? 6 : 8
-                        maxUploadCap = isAppBusy ? 3 : 4
+                    if isOppositeDemandActive {
+                        // 50-50 Wi-Fi allocation
+                        globalCombinedLimit = isAppBusy ? (kWirelessDualBusyCap * 2) : kWirelessMaxConcurrent
+                        maxUploadCap = isAppBusy ? kWirelessDualBusyCap : kWirelessDualCap
                     } else {
-                        globalCombinedLimit = isAppBusy ? 6 : 8
-                        maxUploadCap = isAppBusy ? 6 : 8
+                        globalCombinedLimit = isAppBusy ? kWirelessSoloBusyCap : kWirelessMaxConcurrent
+                        maxUploadCap = isAppBusy ? kWirelessSoloBusyCap : kWirelessMaxConcurrent
                     }
                 } else {
-                    if downloadsActive {
-                        // USB allocation: 8 uploads + 8 downloads = 16 total (or 5+5 if app ops active)
-                        globalCombinedLimit = isAppBusy ? 10 : 16
-                        maxUploadCap = isAppBusy ? 5 : 8
+                    if isOppositeDemandActive {
+                        // 50-50 USB allocation
+                        globalCombinedLimit = isAppBusy ? (kWiredDualBusyCap * 2) : kWiredMaxConcurrent
+                        maxUploadCap = isAppBusy ? kWiredDualBusyCap : kWiredDualCap
                     } else {
-                        globalCombinedLimit = isAppBusy ? 10 : 16
-                        maxUploadCap = isAppBusy ? 10 : 10
+                        globalCombinedLimit = isAppBusy ? kWiredSoloBusyCap : kWiredMaxConcurrent
+                        maxUploadCap = isAppBusy ? kWiredSoloBusyCap : kWiredMaxConcurrent
                     }
                 }
-                if !downloadsActive {
+                if !isOppositeDemandActive {
                     await MainActor.run { self.temporaryMaxConcurrent = nil }
                 }
                 
-                let baseMax = await MainActor.run { self.temporaryMaxConcurrent ?? self.preferredMaxConcurrent }
+                let baseMax = await MainActor.run { self.isAutoConcurrency ? maxUploadCap : (self.temporaryMaxConcurrent ?? self.preferredMaxConcurrent) }
                 let targetMax = min(baseMax, maxUploadCap)
                 if self.maxConcurrent != targetMax {
                     await MainActor.run { 
@@ -760,10 +898,19 @@ struct UploadQueueItem {
                 }
                 
                 var limit = min(self.maxConcurrent, maxUploadCap)
-                limit = min(limit, self.activeCongestionCap)
+                // AIMD congestion cap only applies in auto mode.
+                // In manual mode the user explicitly owns the concurrency value.
+                let isAuto = await MainActor.run { self.isAutoConcurrency }
+                if isAuto {
+                    limit = min(limit, self.activeCongestionCap)
+                }
                 
-                let maxUploadsAllowed = max(1, globalCombinedLimit - activeDownloadsCount)
+                let oppositeWeight = downloadManager?.runningTransfersWeight ?? 0.0
+                let maxUploadsAllowed = max(1, Int(Double(globalCombinedLimit) - oppositeWeight))
                 limit = min(limit, maxUploadsAllowed)
+                
+                // Hard ceiling — can never exceed the connection-type cap under any circumstance
+                limit = min(limit, maxUploadCap)
                 
                 let newLimit = limit
                 await MainActor.run {
@@ -777,12 +924,40 @@ struct UploadQueueItem {
                 activeRunningLock.unlock()
                 
                 // Try to fill slots from the pending queue
+                var dispatchedThisRound = 0
                 while running < limit && !batchCancelled {
                     queueLock.lock()
                     let nextFile = pendingFiles.isEmpty ? nil : pendingFiles.removeFirst()
                     queueLock.unlock()
                     
                     guard let file = nextFile else { break }
+                    
+                    let weight = slotWeight(for: file.fileSize)
+                    
+                    // WiFi weight guard: large video files (>50MB) consume 2.0 slots each.
+                    // Without this, limit=4 would dispatch 4 large videos (total weight 8.0),
+                    // overwhelming WiFi ADB transport. With this guard, only 2 large videos
+                    // run concurrently (2×2.0=4.0 ≤ 4), while 8 small files can still burst (8×0.5=4.0).
+                    if isWireless {
+                        activeRunningLock.lock()
+                        let currentWeight = activeRunningWeight
+                        activeRunningLock.unlock()
+                        if currentWeight + weight > Double(limit) && running > 0 {
+                            // Would exceed weight budget — put file back and stop dispatching
+                            queueLock.lock()
+                            pendingFiles.insert(file, at: 0)
+                            queueLock.unlock()
+                            break
+                        }
+                    }
+                    
+                    // WiFi stagger: ADB's wireless transport is TCP-based and fragile.
+                    // Burst-dispatching multiple push processes simultaneously overwhelms
+                    // the connection, causing drops. A 200ms gap lets ADB stabilize each new connection.
+                    if isWireless && dispatchedThisRound > 0 {
+                        try? await Task.sleep(nanoseconds: kWiFiStaggerDelayNs)
+                    }
+                    dispatchedThisRound += 1
                     
                     let (safeName, _) = FileNameHelper.getSafeFilename(file.fileName)
                     let fullDevicePath = file.devicePath.hasSuffix("/")
@@ -793,10 +968,18 @@ struct UploadQueueItem {
                     
                     activeRunningLock.lock()
                     activeRunningCount += 1
+                    activeRunningWeight += weight
                     running = activeRunningCount
                     activeRunningLock.unlock()
                     
                     group.addTask {
+                        defer {
+                            self.activeRunningLock.lock()
+                            self.activeRunningCount -= 1
+                            self.activeRunningWeight = max(0.0, self.activeRunningWeight - weight)
+                            self.activeRunningLock.unlock()
+                        }
+                        
                         var didSucceed = false
                         var connErrorOccurred = false
                         do {
@@ -809,18 +992,30 @@ struct UploadQueueItem {
                              )
                             didSucceed = true
                             
-                            // Success path: gradually restore congestion cap
-                            await MainActor.run {
-                                self.successStreak += 1
-                                if self.successStreak >= 3 {
-                                    self.activeCongestionCap = min(10, self.activeCongestionCap + 1)
-                                    self.successStreak = 0
+                            // Success path: gradually restore congestion cap (AIMD Additive Increase)
+                            let aimdEnabled = await MainActor.run { self.isAutoConcurrency }
+                            if aimdEnabled {
+                                await MainActor.run {
+                                    self.successStreak += 1
+                                    if self.successStreak >= 3 {
+                                        self.activeCongestionCap = min(maxUploadCap, self.activeCongestionCap + 1)
+                                        self.successStreak = 0
+                                    }
                                 }
                             }
                         } catch {
                             var updatedFile = file
                             updatedFile.retryCount += 1
                             let newRetryCount = updatedFile.retryCount
+                            
+                            // AIMD Multiplicative Decrease: Cut congestion cap on error/stall
+                            let aimdEnabled = await MainActor.run { self.isAutoConcurrency }
+                            if aimdEnabled {
+                                await MainActor.run {
+                                    self.successStreak = 0
+                                    self.activeCongestionCap = max(2, self.activeCongestionCap / 2)
+                                }
+                            }
                             
                             let isDisconnected = await MainActor.run {
                                 (self.deviceManager?.isConnected == false) || self.isConnectionError(error)
@@ -847,8 +1042,10 @@ struct UploadQueueItem {
                                 
                                 await MainActor.run {
                                     self.isConnectionOffline = true
-                                    self.activeCongestionCap = max(2, self.activeCongestionCap / 2)
-                                    self.successStreak = 0
+                                    if self.isAutoConcurrency {
+                                        self.activeCongestionCap = max(2, self.activeCongestionCap / 2)
+                                        self.successStreak = 0
+                                    }
                                     self.queueLock.lock()
                                     self.pendingFiles.insert(updatedFile, at: 0)
                                     self.queueLock.unlock()
@@ -862,10 +1059,12 @@ struct UploadQueueItem {
                                         progress.transferSpeed = 0
                                         progress.retryCount = newRetryCount
                                         self.internalActiveUploads[file.localPath] = progress
-                                        self.activeUploads = self.internalActiveUploads
+                                        if !self.isBatchUploading {
+                                            self.activeUploads = self.internalActiveUploads
+                                        }
                                     }
                                 }
-                                try? await Task.sleep(nanoseconds: 500_000_000)
+                                try? await Task.sleep(nanoseconds: kConnectionRetryDelayNs)
                             } else {
                                 // Permanent failure (either not a connection error, or exceeded max retries)
                                 let finalError = newRetryCount > 5 ? NSError(domain: "UploadManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed after 5 connection retries."]) : error
@@ -875,11 +1074,6 @@ struct UploadQueueItem {
                             }
                         }
                         
-                        await MainActor.run {
-                            self.activeRunningLock.lock()
-                            self.activeRunningCount -= 1
-                            self.activeRunningLock.unlock()
-                        }
                         
                         // Increment batch completion ONLY if it successfully transferred or failed permanently
                         let isBatchCanc = await MainActor.run { self.batchCancelled }
@@ -936,7 +1130,9 @@ struct UploadQueueItem {
         queueLock.unlock()
         
         await MainActor.run {
-            self.flushUIUpdates()
+            self.internalActiveUploads.removeAll()
+            self.pendingRemovals.removeAll()
+            self.activeUploads.removeAll()
             self.isBatchUploading = false
             self.stopTimerIfNeeded()
             self.downloadManager?.forceReevaluateConcurrencyLimit()

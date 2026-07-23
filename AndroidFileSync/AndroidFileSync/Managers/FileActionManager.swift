@@ -99,6 +99,9 @@ class FileActionManager: ObservableObject {
                 isPerformingAction = false
                 currentAction = ""
             }
+            if !activeDeletions.isEmpty {
+                activeDeletions.removeAll()
+            }
         }
     }
     
@@ -205,10 +208,147 @@ class FileActionManager: ObservableObject {
             self.updatePerformingActionState()
         }
         
-        // Process each deletion in the background without blocking the UI
-        for deletion in newDeletions {
-            Task {
-                await self.processDeletion(deletion)
+        if permanent {
+            // Process permanent deletes in batch (chunks of 20) via single rm -rf commands to prevent ADB command flooding
+            let pathsToDelete = files.map { $0.path }
+            
+            // Build a mapping from file path to LiveDeletion ID
+            var pathMap: [String: UUID] = [:]
+            for deletion in newDeletions {
+                pathMap[deletion.filePath] = deletion.id
+            }
+            
+            do {
+                try await ADBManager.batchDeleteFiles(
+                    devicePaths: pathsToDelete,
+                    onChunkCompleted: { completedPaths in
+                        Task { @MainActor in
+                            for path in completedPaths {
+                                if let id = pathMap[path],
+                                   let idx = self.activeDeletions.firstIndex(where: { $0.id == id }) {
+                                    self.activeDeletions[idx].isComplete = true
+                                    self.activeDeletions[idx].isRunning = false
+                                }
+                            }
+                            self.updatePerformingActionState()
+                            NotificationCenter.default.post(name: .afsDeletionsChanged, object: nil)
+                        }
+                    },
+                    cancellationCheck: { [weak self] in
+                        self?.cancellationRequested ?? false
+                    }
+                )
+            } catch {
+                await MainActor.run {
+                    for deletion in newDeletions {
+                        if let idx = self.activeDeletions.firstIndex(where: { $0.id == deletion.id && !$0.isComplete }) {
+                            if (error as NSError).code == -999 || self.activeDeletions[idx].isCancelled {
+                                self.activeDeletions[idx].isCancelled = true
+                            } else {
+                                self.activeDeletions[idx].error = error.localizedDescription
+                            }
+                            self.activeDeletions[idx].isComplete = true
+                            self.activeDeletions[idx].isRunning = false
+                        }
+                    }
+                    self.updatePerformingActionState()
+                    NotificationCenter.default.post(name: .afsDeletionsChanged, object: nil)
+                }
+            }
+            
+            // Trigger a single lightweight post-batch media scan for all deleted files
+            Task.detached(priority: .background) {
+                await ADBManager.triggerMediaScanForFiles(pathsToDelete)
+            }
+        } else {
+            // Process trash deletions (move to trash) in batch chunks of 20 to prevent ADB command flooding
+            do {
+                try await ensureTrashFolder()
+            } catch {
+                await MainActor.run {
+                    for deletion in newDeletions {
+                        if let idx = self.activeDeletions.firstIndex(where: { $0.id == deletion.id && !$0.isComplete }) {
+                            self.activeDeletions[idx].error = error.localizedDescription
+                            self.activeDeletions[idx].isComplete = true
+                            self.activeDeletions[idx].isRunning = false
+                        }
+                    }
+                    self.updatePerformingActionState()
+                    NotificationCenter.default.post(name: .afsDeletionsChanged, object: nil)
+                }
+                return
+            }
+            
+            let timestamp = Int(Date().timeIntervalSince1970)
+            var movesToMake: [(src: String, dst: String)] = []
+            var trashItemsToInsert: [TrashedItem] = []
+            var pathMap: [String: UUID] = [:]
+            
+            for (idx, file) in files.enumerated() {
+                let deletion = newDeletions[idx]
+                pathMap[file.path] = deletion.id
+                
+                let trashName = "\(timestamp)_\(UUID().uuidString)_\(file.name)"
+                let trashPath = "\(trashFolderPath)/\(trashName)"
+                
+                movesToMake.append((src: file.path, dst: trashPath))
+                
+                let item = TrashedItem(
+                    originalPath: file.path,
+                    trashPath: trashPath,
+                    name: file.name,
+                    isDirectory: file.isDirectory
+                )
+                trashItemsToInsert.append(item)
+            }
+            
+            do {
+                try await ADBManager.batchMoveFiles(
+                    moves: movesToMake,
+                    onChunkCompleted: { completedChunk in
+                        Task { @MainActor in
+                            for move in completedChunk {
+                                if let id = pathMap[move.src],
+                                   let idx = self.activeDeletions.firstIndex(where: { $0.id == id }) {
+                                    self.activeDeletions[idx].isComplete = true
+                                    self.activeDeletions[idx].isRunning = false
+                                }
+                            }
+                            self.updatePerformingActionState()
+                            NotificationCenter.default.post(name: .afsDeletionsChanged, object: nil)
+                        }
+                    },
+                    cancellationCheck: { [weak self] in
+                        self?.cancellationRequested ?? false
+                    }
+                )
+                
+                await MainActor.run {
+                    self.trashedItems.insert(contentsOf: trashItemsToInsert, at: 0)
+                    self.saveTrashedItems()
+                }
+            } catch {
+                await MainActor.run {
+                    for deletion in newDeletions {
+                        if let idx = self.activeDeletions.firstIndex(where: { $0.id == deletion.id && !$0.isComplete }) {
+                            if (error as NSError).code == -999 || self.activeDeletions[idx].isCancelled {
+                                self.activeDeletions[idx].isCancelled = true
+                            } else {
+                                self.activeDeletions[idx].error = error.localizedDescription
+                            }
+                            self.activeDeletions[idx].isComplete = true
+                            self.activeDeletions[idx].isRunning = false
+                        }
+                    }
+                    self.updatePerformingActionState()
+                    NotificationCenter.default.post(name: .afsDeletionsChanged, object: nil)
+                }
+            }
+            
+            // Trigger a single lightweight post-batch media scan for all moved files
+            let pathsToScan = files.map { $0.path }
+            Task.detached(priority: .background) {
+                await ADBManager.triggerMediaScanForFiles(pathsToScan)
             }
         }
     }
@@ -328,8 +468,13 @@ class FileActionManager: ObservableObject {
         }
         
         do {
+            // Ensure parent destination directory exists
+            let parentDir = (item.originalPath as NSString).deletingLastPathComponent
+            try? await ADBManager.createFolder(at: parentDir)
+            
             // Move file back to original location
             try await ADBManager.renameFile(oldPath: item.trashPath, newPath: item.originalPath)
+            await ADBManager.triggerMediaScan(path: item.originalPath)
             
             // Remove from trashed items
             await MainActor.run {
@@ -366,49 +511,83 @@ class FileActionManager: ObservableObject {
             lastError = nil
         }
 
-        var failed: [String] = []
-        for item in items {
-            do {
-                try await ADBManager.renameFile(oldPath: item.trashPath, newPath: item.originalPath)
-                await MainActor.run {
-                    trashedItems.removeAll { $0.id == item.id }
-                    saveTrashedItems()
+        let moves = items.map { (src: $0.trashPath, dst: $0.originalPath) }
+        var failedMessage: String?
+
+        do {
+            try await ADBManager.batchMoveFiles(
+                moves: moves,
+                onChunkCompleted: { completedChunk in
+                    let completedSrcs = Set(completedChunk.map { $0.src })
+                    Task { @MainActor in
+                        let restoredItems = items.filter { completedSrcs.contains($0.trashPath) }
+                        let restoredIDs = Set(restoredItems.map { $0.id })
+                        self.trashedItems.removeAll { restoredIDs.contains($0.id) }
+                        self.saveTrashedItems()
+                    }
                 }
-            } catch {
-                failed.append(item.name)
-            }
+            )
+        } catch {
+            failedMessage = error.localizedDescription
+        }
+
+        // Trigger a single lightweight post-batch media scan for all restored files
+        let restoredPaths = items.map { $0.originalPath }
+        Task.detached(priority: .background) {
+            await ADBManager.triggerMediaScanForFiles(restoredPaths)
         }
 
         await MainActor.run {
             isPerformingAction = false
             currentAction = ""
-            if !failed.isEmpty {
-                lastError = "Failed to restore: \(failed.joined(separator: ", "))"
+            if let err = failedMessage {
+                lastError = "Failed to restore items: \(err)"
             }
         }
     }
     
     /// Permanently deletes an item from trash
     func permanentlyDeleteFromTrash(_ item: TrashedItem) async throws {
+        try await permanentlyDeleteFromTrash([item])
+    }
+    
+    /// Permanently deletes multiple items from trash using batched rm -rf commands
+    func permanentlyDeleteFromTrash(_ items: [TrashedItem]) async throws {
+        guard !items.isEmpty else { return }
+        
         await MainActor.run {
             isPerformingAction = true
-            currentAction = "Permanently deleting \(item.name)..."
+            currentAction = items.count == 1 ? "Permanently deleting \(items[0].name)..." : "Permanently deleting \(items.count) item(s)..."
         }
         
+        let paths = items.map { $0.trashPath }
+        let idsToRemove = Set(items.map { $0.id })
+        
         do {
-            try await ADBManager.deleteFile(devicePath: item.trashPath, cancellationCheck: { [weak self] in self?.cancellationRequested ?? false })
+            try await ADBManager.batchDeleteFiles(
+                devicePaths: paths,
+                onChunkCompleted: { completedChunkPaths in
+                    let completedSet = Set(completedChunkPaths)
+                    Task { @MainActor in
+                        let deletedItems = items.filter { completedSet.contains($0.trashPath) }
+                        let deletedIDs = Set(deletedItems.map { $0.id })
+                        self.trashedItems.removeAll { deletedIDs.contains($0.id) }
+                        self.saveTrashedItems()
+                    }
+                },
+                cancellationCheck: { [weak self] in self?.cancellationRequested ?? false }
+            )
             
             await MainActor.run {
-                trashedItems.removeAll { $0.id == item.id }
-                saveTrashedItems()
-                isPerformingAction = false
-                currentAction = ""
+                self.trashedItems.removeAll { idsToRemove.contains($0.id) }
+                self.saveTrashedItems()
+                self.isPerformingAction = false
+                self.currentAction = ""
             }
-            
         } catch {
             await MainActor.run {
-                isPerformingAction = false
-                currentAction = ""
+                self.isPerformingAction = false
+                self.currentAction = ""
             }
             throw error
         }

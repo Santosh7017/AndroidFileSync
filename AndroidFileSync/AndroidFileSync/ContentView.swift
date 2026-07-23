@@ -118,6 +118,12 @@ struct ContentView: View {
     private func updateDisplayedFiles() {
         var result = files
         
+        // Filter out active in-progress deletions so deleting items never linger on screen
+        let activeDeletingPaths = Set(fileActionManager.activeDeletions.filter { !$0.isComplete }.map { $0.filePath })
+        if !activeDeletingPaths.isEmpty {
+            result = result.filter { !activeDeletingPaths.contains($0.path) }
+        }
+        
         // Apply search filter
         if !searchQuery.isEmpty {
             result = result.filter { $0.name.localizedCaseInsensitiveContains(searchQuery) }
@@ -457,6 +463,11 @@ struct ContentView: View {
                     Button("") { handleGetInfo() }.keyboardShortcut("i", modifiers: .command)
                     Button("") { handleRenameShortcut() }.keyboardShortcut("r", modifiers: [.command, .shift])
                     Button("") { handleQuickPreview() }.keyboardShortcut(.space, modifiers: [])
+                    Button("") {
+                        if filePreviewManager.isLoading {
+                            filePreviewManager.cancelPreview()
+                        }
+                    }.keyboardShortcut(.escape, modifiers: [])
                 }
                 .hidden()
             )
@@ -467,10 +478,12 @@ struct ContentView: View {
                 handlePermanentDeleteShortcut()
             }
             .onReceive(NotificationCenter.default.publisher(for: .afsDeletionsChanged)) { _ in
-                Task {
-                    ADBManager.invalidateFolderSizeCache()
-                    await loadFiles()
-                    await deviceManager.fetchStorageInfo()
+                updateDisplayedFiles()
+                if !fileActionManager.isDeleting {
+                    Task {
+                        ADBManager.invalidateFolderSizeCache()
+                        await deviceManager.fetchStorageInfo()
+                    }
                 }
             }
             .sheet(item: $infoFile, onDismiss: {
@@ -648,17 +661,9 @@ struct ContentView: View {
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .afsDownloadBatchStateChanged)) { notification in
-                if let isDownloading = notification.userInfo?["isDownloading"] as? Bool,
-                   let batchTotal = notification.userInfo?["batchTotal"] as? Int {
-                    let oldDownloading = self.isDownloading
+                if let isDownloading = notification.userInfo?["isDownloading"] as? Bool {
                     self.isDownloading = isDownloading
                     deviceManager.isTransferActive = self.isUploading || isDownloading
-                    if !isDownloading && oldDownloading && batchTotal > 0 {
-                        Task {
-                            await loadFiles()
-                            await deviceManager.fetchStorageInfo()
-                        }
-                    }
                 }
             }
             .onChange(of: diagnosticsControl.isEnabled) { enabled in
@@ -839,7 +844,7 @@ struct ContentView: View {
             return true
         }
         .task { await initializeDevice() }
-        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
+        .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
             if !deviceManager.isConnected && !deviceManager.isDetecting {
                 Task {
                     await deviceManager.detectDevice()
@@ -958,10 +963,27 @@ struct ContentView: View {
                         ProgressView().scaleEffect(1.2)
                         Text("Loading preview...").font(.subheadline).foregroundColor(.secondary)
                         Text(filePreviewManager.loadingFileName)
-                            .font(.caption).foregroundColor(.secondary).lineLimit(1)
+                            .font(.caption).bold().lineLimit(1)
+                        
+                        Button {
+                            filePreviewManager.cancelPreview()
+                        } label: {
+                            Label("Cancel (Esc)", systemImage: "xmark.circle.fill")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red.opacity(0.8))
+                        .controlSize(.small)
+                        .keyboardShortcut(.escape, modifiers: [])
+                        .padding(.top, 4)
                     }
                     .padding(24)
+                    .frame(minWidth: 220)
                     .background(RoundedRectangle(cornerRadius: 12).fill(.ultraThinMaterial))
+                    .shadow(radius: 10)
+                    .onExitCommand {
+                        filePreviewManager.cancelPreview()
+                    }
                 }
             }
             .navigationTitle(deviceManager.isConnected ? "AndroidFileSync" : "")
@@ -1861,19 +1883,21 @@ struct ContentView: View {
 
     
     private func handleDelete(_ file: UnifiedFile) {
+        files.removeAll { $0.id == file.id }
+        updateDisplayedFiles()
+        selectedFiles.remove(file.id)
+        
         Task {
             do {
                 try await fileActionManager.deleteFile(file)
-                
-                // Invalidate cache and refresh
                 ADBManager.invalidateFolderSizeCache()
-                await loadFiles()
                 await deviceManager.fetchStorageInfo()
             } catch {
                 await MainActor.run {
                     errorMessage = error.localizedDescription
                     showErrorAlert = true
                 }
+                await loadFiles()
             }
         }
     }
@@ -1899,23 +1923,24 @@ struct ContentView: View {
     
     private func handleBatchDelete() {
         let filesToDelete = files.filter { selectedFiles.contains($0.id) }
-        
         guard !filesToDelete.isEmpty else { return }
+        
+        let deletedIDs = Set(filesToDelete.map { $0.id })
+        files.removeAll { deletedIDs.contains($0.id) }
+        updateDisplayedFiles()
+        selectedFiles.removeAll()
         
         Task {
             do {
                 try await fileActionManager.deleteFiles(filesToDelete)
-                
-                // Clear selection and refresh
-                selectedFiles.removeAll()
                 ADBManager.invalidateFolderSizeCache()
-                await loadFiles()
                 await deviceManager.fetchStorageInfo()
             } catch {
                 await MainActor.run {
                     errorMessage = error.localizedDescription
                     showErrorAlert = true
                 }
+                await loadFiles()
             }
         }
     }
@@ -1923,17 +1948,23 @@ struct ContentView: View {
     private func handlePermanentDelete() {
         let filesToDelete = files.filter { selectedFiles.contains($0.id) }
         guard !filesToDelete.isEmpty else { return }
+        
+        let deletedIDs = Set(filesToDelete.map { $0.id })
+        files.removeAll { deletedIDs.contains($0.id) }
+        updateDisplayedFiles()
+        selectedFiles.removeAll()
+        
         Task {
             do {
                 try await fileActionManager.deleteFiles(filesToDelete, permanent: true)
-                selectedFiles.removeAll()
-                await loadFiles()
+                ADBManager.invalidateFolderSizeCache()
                 await deviceManager.fetchStorageInfo()
             } catch {
                 await MainActor.run {
                     errorMessage = error.localizedDescription
                     showErrorAlert = true
                 }
+                await loadFiles()
             }
         }
     }
@@ -1961,17 +1992,20 @@ struct ContentView: View {
         openPanel.begin { response in
             guard response == .OK, let directory = openPanel.url else { return }
             
-            Task {
+            Task.detached(priority: .userInitiated) {
+                
                 // Build one unified download list
                 var allItems: [(devicePath: String, fileName: String, fileSize: UInt64, localPath: String)] = []
                 
                 // 1. Add individual files
+                try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 for file in selectedFileItems {
+                    let localFileURL = directory.appendingPathComponent(file.name)
                     allItems.append((
                         devicePath: file.path,
                         fileName: file.name,
                         fileSize: file.size,
-                        localPath: directory.appendingPathComponent(file.name).path
+                        localPath: localFileURL.path
                     ))
                 }
                 
@@ -2046,7 +2080,9 @@ struct ContentView: View {
         openPanel.begin { response in
             guard response == .OK, let directory = openPanel.url else { return }
             let destination = directory.appendingPathComponent(folder.name)
-            Task {
+            
+            Task.detached(priority: .userInitiated) {
+                try? FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
                 await downloadManager.downloadFolder(
                     devicePath: folder.path,
                     folderName: folder.name,

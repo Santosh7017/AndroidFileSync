@@ -2569,6 +2569,123 @@ class ADBManager {
         }
     }
     
+    /// Deletes multiple files or folders on the device in chunks using batched `rm -rf` commands.
+    /// This drastically reduces ADB round-trips and prevents device UI freezes/watchdog reboots during bulk deletes.
+    /// - Parameters:
+    ///   - devicePaths: Array of device paths to delete
+    ///   - onChunkCompleted: Callback invoked after each chunk completes, passing deleted paths in that chunk
+    ///   - cancellationCheck: Closure checking if cancellation was requested
+    static func batchDeleteFiles(
+        devicePaths: [String],
+        onChunkCompleted: @escaping ([String]) -> Void = { _ in },
+        cancellationCheck: @escaping () -> Bool = { false }
+    ) async throws {
+        guard !devicePaths.isEmpty else { return }
+        
+        let adbPath = getADBPath()
+        let chunkSize = 20
+        
+        for i in stride(from: 0, to: devicePaths.count, by: chunkSize) {
+            if cancellationCheck() {
+                throw NSError(domain: "ADB", code: -1, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+            }
+            
+            let chunk = Array(devicePaths[i..<min(i + chunkSize, devicePaths.count)])
+            let escapedPaths = chunk.map { "'\($0.replacingOccurrences(of: "'", with: "'\\''"))'" }
+            let command = "rm -rf " + escapedPaths.joined(separator: " ")
+            
+            let (code, _, error, _) = await Shell.runWithProgressCancellable(
+                adbPath,
+                args: deviceArgs(["shell", command]),
+                progressCallback: { _ in },
+                cancellationCheck: cancellationCheck
+            )
+            
+            if cancellationCheck() {
+                throw NSError(domain: "ADB", code: -1, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+            }
+            
+            if code != 0 {
+                // Fallback to individual deletion for this chunk if batch command failed
+                print("⚠️ Batch delete chunk failed (code \(code)): \(error) — retrying individually")
+                for path in chunk {
+                    if cancellationCheck() {
+                        throw NSError(domain: "ADB", code: -1, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+                    }
+                    try await deleteFile(devicePath: path, cancellationCheck: cancellationCheck)
+                }
+            }
+            
+            onChunkCompleted(chunk)
+            
+            // Brief pause between chunks to let storage I/O and device system breathe
+            if i + chunkSize < devicePaths.count {
+                try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+            }
+        }
+    }
+    
+    /// Moves/renames multiple files in chunks using batched `mv 'src1' 'dst1' && mv 'src2' 'dst2' ...` commands.
+    /// This drastically speeds up bulk moves (e.g. moving hundreds of files to Trash or restoring them).
+    /// - Parameters:
+    ///   - moves: Array of tuple (src: String, dst: String)
+    ///   - onChunkCompleted: Callback invoked after each chunk completes, passing the completed moves in that chunk
+    ///   - cancellationCheck: Closure checking if cancellation was requested
+    static func batchMoveFiles(
+        moves: [(src: String, dst: String)],
+        onChunkCompleted: @escaping ([(src: String, dst: String)]) -> Void = { _ in },
+        cancellationCheck: @escaping () -> Bool = { false }
+    ) async throws {
+        guard !moves.isEmpty else { return }
+        
+        let adbPath = getADBPath()
+        let chunkSize = 20
+        
+        for i in stride(from: 0, to: moves.count, by: chunkSize) {
+            if cancellationCheck() {
+                throw NSError(domain: "ADB", code: -1, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+            }
+            
+            let chunk = Array(moves[i..<min(i + chunkSize, moves.count)])
+            var moveCommands: [String] = []
+            for item in chunk {
+                let parentDir = (item.dst as NSString).deletingLastPathComponent
+                let escParent = parentDir.replacingOccurrences(of: "'", with: "'\\''")
+                let escSrc = item.src.replacingOccurrences(of: "'", with: "'\\''")
+                let escDst = item.dst.replacingOccurrences(of: "'", with: "'\\''")
+                moveCommands.append("mkdir -p '\(escParent)' && mv '\(escSrc)' '\(escDst)'")
+            }
+            
+            let batchCommand = moveCommands.joined(separator: " && ")
+            let (code, _, error, _) = await Shell.runWithProgressCancellable(
+                adbPath,
+                args: deviceArgs(["shell", batchCommand]),
+                progressCallback: { _ in },
+                cancellationCheck: cancellationCheck
+            )
+            
+            if cancellationCheck() {
+                throw NSError(domain: "ADB", code: -1, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+            }
+            
+            if code != 0 {
+                print("⚠️ Batch move chunk failed (code \(code)): \(error) — retrying individually")
+                for item in chunk {
+                    if cancellationCheck() {
+                        throw NSError(domain: "ADB", code: -1, userInfo: [NSLocalizedDescriptionKey: "Operation cancelled"])
+                    }
+                    try await renameFile(oldPath: item.src, newPath: item.dst)
+                }
+            }
+            
+            onChunkCompleted(chunk)
+            
+            if i + chunkSize < moves.count {
+                try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+            }
+        }
+    }
+    
     /// Renames or moves a file/folder on the Android device
     /// - Parameters:
     ///   - oldPath: Current path of the file/folder

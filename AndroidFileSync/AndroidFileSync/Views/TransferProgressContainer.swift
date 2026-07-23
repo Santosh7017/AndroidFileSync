@@ -57,8 +57,10 @@ struct TransferProgressContainer: View {
                 },
                 concurrencyBinding: (downloadManager.isBatchDownloading || !downloadManager.activeDownloads.isEmpty) ? $downloadManager.maxConcurrent : nil,
                 uploadConcurrencyBinding: (uploadManager.isBatchUploading || !uploadManager.activeUploads.isEmpty) ? $uploadManager.maxConcurrent : nil,
-                effectiveDownloadLimit: downloadManager.effectiveConcurrentLimit,
-                effectiveUploadLimit: uploadManager.effectiveConcurrentLimit,
+                isAutoDownloadBinding: (downloadManager.isBatchDownloading || !downloadManager.activeDownloads.isEmpty) ? $downloadManager.isAutoConcurrency : nil,
+                isAutoUploadBinding: (uploadManager.isBatchUploading || !uploadManager.activeUploads.isEmpty) ? $uploadManager.isAutoConcurrency : nil,
+                effectiveDownloadLimit: (downloadManager.isBatchDownloading || !downloadManager.activeDownloads.isEmpty) ? downloadManager.effectiveConcurrentLimit : nil,
+                effectiveUploadLimit: (uploadManager.isBatchUploading || !uploadManager.activeUploads.isEmpty) ? uploadManager.effectiveConcurrentLimit : nil,
                 isWirelessConnection: deviceManager.connectionType == .wireless,
                 isAppOperationBusy: appManager.operationEngine.isBusy,
                 isScanning: downloadManager.isScanning,
@@ -138,6 +140,15 @@ struct TransferProgressContainer: View {
             ))
         }
         
-        return items
+        // Sort items so actively transferring or errored/cancelled items appear first
+        items.sort { a, b in
+            let aActive = !a.isComplete && (a.bytesTransferred > 0 || a.error != nil)
+            let bActive = !b.isComplete && (b.bytesTransferred > 0 || b.error != nil)
+            if aActive != bActive { return aActive }
+            return a.fileName < b.fileName
+        }
+        
+        // Limit display list so 200+ pending rows never clutter the transfer panel view
+        return Array(items.prefix(16))
     }
 }

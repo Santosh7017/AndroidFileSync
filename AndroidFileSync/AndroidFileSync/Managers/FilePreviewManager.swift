@@ -14,6 +14,9 @@ internal import Combine
 class FilePreviewManager: ObservableObject {
     @Published var isLoading = false
     @Published var loadingFileName = ""
+    @Published var cancellationRequested = false
+    
+    private var currentTask: Task<Void, Never>? = nil
     
     /// Cache of already-pulled files: devicePath → localTempURL
     private var cache: [String: URL] = [:]
@@ -27,6 +30,16 @@ class FilePreviewManager: ObservableObject {
     
     // MARK: - Public API
     
+    /// Cancel the current file preview pull operation
+    @MainActor
+    func cancelPreview() {
+        cancellationRequested = true
+        isLoading = false
+        loadingFileName = ""
+        currentTask?.cancel()
+        currentTask = nil
+    }
+    
     /// Pull a file from the Android device and open it with the default macOS app
     func previewFile(_ file: UnifiedFile) {
         guard !file.isDirectory else { return }
@@ -37,11 +50,15 @@ class FilePreviewManager: ObservableObject {
             return
         }
         
-        // Pull from device
-        isLoading = true
-        loadingFileName = file.name
+        // Cancel any active preview task first
+        Task { @MainActor in
+            self.cancelPreview()
+            self.cancellationRequested = false
+            self.isLoading = true
+            self.loadingFileName = file.name
+        }
         
-        Task {
+        currentTask = Task {
             let localURL = tempDir.appendingPathComponent(file.name)
             
             // Remove existing file if any
@@ -50,22 +67,33 @@ class FilePreviewManager: ObservableObject {
             let adbPath = ADBManager.getADBPath()
             guard !adbPath.isEmpty else {
                 await MainActor.run {
-                    isLoading = false
+                    self.isLoading = false
                 }
                 return
             }
             
-            // Pull file using adb
-            let (code, _, error) = await Shell.runAsync(
+            let (code, _, error, _) = await Shell.runWithProgressCancellable(
                 adbPath,
-                args: ADBManager.deviceArgs(["pull", file.path, localURL.path])
+                args: ADBManager.deviceArgs(["pull", file.path, localURL.path]),
+                progressCallback: { _ in },
+                cancellationCheck: { [weak self] in
+                    self?.cancellationRequested ?? false
+                }
             )
             
             await MainActor.run {
-                isLoading = false
+                if self.cancellationRequested {
+                    // Clean up partially pulled file
+                    try? FileManager.default.removeItem(at: localURL)
+                    self.isLoading = false
+                    self.loadingFileName = ""
+                    return
+                }
+                
+                self.isLoading = false
                 
                 if code == 0 && FileManager.default.fileExists(atPath: localURL.path) {
-                    cache[file.path] = localURL
+                    self.cache[file.path] = localURL
                     NSWorkspace.shared.open(localURL)
                 } else {
                     print("❌ Preview: Failed to pull file: \(error)")

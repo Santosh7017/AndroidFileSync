@@ -8,7 +8,7 @@
 import SwiftUI
 
 // Simple data structure for transfer items
-struct TransferItemData: Identifiable {
+struct TransferItemData: Identifiable, Equatable {
     let id: String
     let fileName: String
     let progress: Double
@@ -75,6 +75,8 @@ struct TransferProgressView: View {
     // Live concurrency control
     var concurrencyBinding: Binding<Int>? = nil
     var uploadConcurrencyBinding: Binding<Int>? = nil
+    var isAutoDownloadBinding: Binding<Bool>? = nil
+    var isAutoUploadBinding: Binding<Bool>? = nil
     var effectiveDownloadLimit: Int? = nil
     var effectiveUploadLimit: Int? = nil
     var isWirelessConnection: Bool = false
@@ -220,71 +222,117 @@ struct TransferProgressView: View {
                         }
                     }
                 }
-                
-                // Concurrency steppers (Downloads and/or Uploads)
+                             // Concurrency steppers & Single Unified Auto badge
                 if concurrencyBinding != nil || uploadConcurrencyBinding != nil {
                     Divider().frame(height: 12)
                     
-                    if let binding = concurrencyBinding {
-                        HStack(spacing: 2) {
-                            Image(systemName: "arrow.down").font(.system(size: 9, weight: .bold)).foregroundColor(.blue)
+                    let isAutoActive = (isAutoDownloadBinding?.wrappedValue ?? true) && (isAutoUploadBinding?.wrappedValue ?? true)
+                    
+                    if isAutoActive {
+                        // SINGLE UNIFIED AUTO BADGE
+                        Button {
+                            isAutoDownloadBinding?.wrappedValue = false
+                            isAutoUploadBinding?.wrappedValue = false
+                        } label: {
+                            HStack(spacing: 3) {
+                                Text("⚡ Auto")
+                                    .font(.system(size: 9, weight: .bold))
+                                let activeLimit: Int = {
+                                    if let dl = effectiveDownloadLimit, let ul = effectiveUploadLimit {
+                                        return dl + ul
+                                    }
+                                    return effectiveDownloadLimit ?? effectiveUploadLimit ?? (isWirelessConnection ? kWirelessMaxConcurrent : kWiredMaxConcurrent)
+                                }()
+                                Text("(\(activeLimit))")
+                                    .font(.system(size: 8, weight: .semibold))
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.blue.opacity(0.15))
+                            .foregroundColor(.blue)
+                            .cornerRadius(4)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Dynamic auto-concurrency active. Click to adjust manually.")
+                    } else {
+                        // MANUAL MODE: SHOW STEPPERS FOR BOTH DIRECTIONS WITH SINGLE AUTO TOGGLE
+                        HStack(spacing: 8) {
+                            if let binding = concurrencyBinding {
+                                HStack(spacing: 2) {
+                                    Image(systemName: "arrow.down").font(.system(size: 9, weight: .bold)).foregroundColor(.blue)
+                                    Button {
+                                        binding.wrappedValue = max(1, binding.wrappedValue - 1)
+                                    } label: {
+                                        Image(systemName: "minus.circle")
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Fewer simultaneous downloads")
+                                    
+                                    Text("\(binding.wrappedValue)")
+                                        .font(.system(.caption2, design: .monospaced, weight: .bold))
+                                        .frame(minWidth: 12, alignment: .center)
+                                    
+                                    Button {
+                                        let isDual = (concurrencyBinding != nil) && (uploadConcurrencyBinding != nil)
+                                        let maxLimit = isWirelessConnection ? (isAppOperationBusy ? (isDual ? kWirelessDualBusyCap : kWirelessSoloBusyCap) : (isDual ? kWirelessDualCap : kWirelessMaxConcurrent)) : (isAppOperationBusy ? (isDual ? kWiredDualBusyCap : kWiredSoloBusyCap) : (isDual ? kWiredDualCap : kWiredMaxConcurrent))
+                                        binding.wrappedValue = min(maxLimit, binding.wrappedValue + 1)
+                                    } label: {
+                                        Image(systemName: "plus.circle")
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("More simultaneous downloads")
+                                }
+                            }
+                            
+                            if let ulBinding = uploadConcurrencyBinding {
+                                HStack(spacing: 2) {
+                                    Image(systemName: "arrow.up").font(.system(size: 9, weight: .bold)).foregroundColor(.orange)
+                                    Button {
+                                        ulBinding.wrappedValue = max(1, ulBinding.wrappedValue - 1)
+                                    } label: {
+                                        Image(systemName: "minus.circle")
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Fewer simultaneous uploads")
+                                    
+                                    Text("\(ulBinding.wrappedValue)")
+                                        .font(.system(.caption2, design: .monospaced, weight: .bold))
+                                        .frame(minWidth: 12, alignment: .center)
+                                    
+                                    Button {
+                                        let isDual = (concurrencyBinding != nil) && (uploadConcurrencyBinding != nil)
+                                        let maxLimit = isWirelessConnection ? (isAppOperationBusy ? (isDual ? kWirelessDualBusyCap : kWirelessSoloBusyCap) : (isDual ? kWirelessDualCap : kWirelessMaxConcurrent)) : (isAppOperationBusy ? (isDual ? kWiredDualBusyCap : kWiredSoloBusyCap) : (isDual ? kWiredDualCap : kWiredMaxConcurrent))
+                                        ulBinding.wrappedValue = min(maxLimit, ulBinding.wrappedValue + 1)
+                                    } label: {
+                                        Image(systemName: "plus.circle")
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("More simultaneous uploads")
+                                }
+                            }
+                            
                             Button {
-                                binding.wrappedValue = max(1, binding.wrappedValue - 1)
+                                isAutoDownloadBinding?.wrappedValue = true
+                                isAutoUploadBinding?.wrappedValue = true
                             } label: {
-                                Image(systemName: "minus.circle")
+                                Text("⚡ Auto")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .fixedSize()  // prevent wrapping in dual mode
+                                    .padding(.horizontal, 5)
+                                    .padding(.vertical, 2)
+                                    .background(Color.secondary.opacity(0.15))
+                                    .foregroundColor(.primary)
+                                    .cornerRadius(3)
                             }
                             .buttonStyle(.plain)
-                            .help("Fewer simultaneous downloads")
-                            
-                            Text("\(binding.wrappedValue)")
-                                .font(.system(.caption2, design: .monospaced, weight: .bold))
-                                .frame(minWidth: 12, alignment: .center)
-                            
-                            Button {
-                                let isDual = (concurrencyBinding != nil) && (uploadConcurrencyBinding != nil)
-                                let maxLimit = isWirelessConnection ? (isAppOperationBusy ? (isDual ? 3 : 6) : (isDual ? 4 : 8)) : (isAppOperationBusy ? (isDual ? 5 : 10) : (isDual ? 6 : 12))
-                                binding.wrappedValue = min(maxLimit, binding.wrappedValue + 1)
-                            } label: {
-                                Image(systemName: "plus.circle")
-                            }
-                            .buttonStyle(.plain)
-                            .help("More simultaneous downloads")
+                            .help("Switch back to dynamic auto mode")
                         }
                         .foregroundColor(.secondary)
                     }
-                    
-                    if let ulBinding = uploadConcurrencyBinding {
-                        HStack(spacing: 2) {
-                            Image(systemName: "arrow.up").font(.system(size: 9, weight: .bold)).foregroundColor(.orange)
-                            Button {
-                                ulBinding.wrappedValue = max(1, ulBinding.wrappedValue - 1)
-                            } label: {
-                                Image(systemName: "minus.circle")
-                            }
-                            .buttonStyle(.plain)
-                            .help("Fewer simultaneous uploads")
-                            
-                            Text("\(ulBinding.wrappedValue)")
-                                .font(.system(.caption2, design: .monospaced, weight: .bold))
-                                .frame(minWidth: 12, alignment: .center)
-                            
-                            Button {
-                                let isDual = (concurrencyBinding != nil) && (uploadConcurrencyBinding != nil)
-                                let maxLimit = isWirelessConnection ? (isAppOperationBusy ? (isDual ? 3 : 6) : (isDual ? 4 : 8)) : (isAppOperationBusy ? (isDual ? 5 : 10) : (isDual ? 6 : 12))
-                                ulBinding.wrappedValue = min(maxLimit, ulBinding.wrappedValue + 1)
-                            } label: {
-                                Image(systemName: "plus.circle")
-                            }
-                            .buttonStyle(.plain)
-                            .help("More simultaneous uploads")
-                        }
-                        .foregroundColor(.secondary)
-                    }
-                    
                     // Wireless hint
                     if isWirelessConnection {
                         if isAppOperationBusy {
-                            Text("⚠️ WiFi max: 4 (backup active)")
+                            Text("⚠️ WiFi max: \(kWirelessDualBusyCap) (backup active)")
                                .font(.system(size: 9, weight: .bold))
                                 .foregroundColor(.red)
                         } else {
@@ -465,13 +513,11 @@ struct TransferProgressView: View {
     // MARK: - Computed Properties
     
     private var downloadCount: Int {
-        if let batch = batchInfo, let total = batch.downloadTotal { return total }
-        return items.filter { !$0.isUpload }.count
+        items.filter { !$0.isUpload }.count
     }
     
     private var uploadCount: Int {
-        if let batch = batchInfo, let total = batch.uploadTotal { return total }
-        return items.filter { $0.isUpload }.count
+        items.filter { $0.isUpload }.count
     }
     
     private var filteredItems: [TransferItemData] {
@@ -562,17 +608,26 @@ struct OverlayProgressRow: View {
     }
     
     private var progressColor: Color {
+        if item.isCancelled { return .orange }
         if item.isComplete { return .green }
-        if item.error != nil { return .red }
+        if item.error != nil {
+            return item.retryCount > 0 ? .orange : .red
+        }
         return item.isUpload ? .orange : .blue
     }
     
     private var statusIcon: some View {
         Group {
-            if item.isComplete {
+            if item.isCancelled {
+                Image(systemName: "xmark.circle.fill").foregroundColor(.orange)
+            } else if item.isComplete {
                 Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
             } else if item.error != nil {
-                Image(systemName: "exclamationmark.circle.fill").foregroundColor(.red)
+                if item.retryCount > 0 {
+                    Image(systemName: "arrow.clockwise.circle").foregroundColor(.orange)
+                } else {
+                    Image(systemName: "exclamationmark.circle.fill").foregroundColor(.red)
+                }
             } else if item.percentage == 0 && item.bytesTransferred == 0 {
                 Image(systemName: "clock").foregroundColor(.secondary)
             } else {
@@ -584,8 +639,11 @@ struct OverlayProgressRow: View {
     }
     
     private var statusText: String {
+        if item.isCancelled { return "Cancelled" }
         if item.isComplete { return "Done" }
-        if item.error != nil { return "Error" }
+        if item.error != nil {
+            return item.retryCount > 0 ? "Retry \(item.retryCount)/5" : "Error"
+        }
         if !item.speed.isEmpty { return item.speed }
         if item.percentage == 0 {
             if item.bytesTransferred > 0 {
@@ -598,8 +656,11 @@ struct OverlayProgressRow: View {
     }
     
     private var statusColor: Color {
+        if item.isCancelled { return .orange }
         if item.isComplete { return .green }
-        if item.error != nil { return .red }
+        if item.error != nil {
+            return item.retryCount > 0 ? .orange : .red
+        }
         if item.percentage == 0 && item.bytesTransferred == 0 { return .secondary }
         return .blue
     }

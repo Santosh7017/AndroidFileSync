@@ -58,6 +58,7 @@
 				Utilities/SidebarView.swift,
 				Utilities/TextInputDialog.swift,
 				Utilities/ThrottledPublisher.swift,
+				Utilities/TransferConstants.swift,
 				Views/ActionToolbar.swift,
 				Views/AppBrowserView.swift,
 				Views/EmptyStateView.swift,
