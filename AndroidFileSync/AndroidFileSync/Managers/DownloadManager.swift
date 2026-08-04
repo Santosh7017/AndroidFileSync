@@ -176,8 +176,7 @@ class DownloadManager: ObservableObject {
     }
     
     init() {
-        let savedAuto = UserDefaults.standard.object(forKey: "isAutoConcurrencyDownloads") as? Bool ?? true
-        self.isAutoConcurrency = savedAuto
+        self.isAutoConcurrency = true
         
         let saved = UserDefaults.standard.integer(forKey: "maxConcurrentDownloads")
         let clamped = saved > 0 ? min(max(saved, 1), kWiredMaxConcurrent) : 3
@@ -760,6 +759,7 @@ class DownloadManager: ObservableObject {
                 internalBatchCompleted = 0
                 progressLock.unlock()
                 batchCompleted = 0
+                isAutoConcurrency = true
             }
             isBatchDownloading = true
             

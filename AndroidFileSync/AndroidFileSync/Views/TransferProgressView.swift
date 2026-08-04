@@ -315,13 +315,13 @@ struct TransferProgressView: View {
                                 isAutoDownloadBinding?.wrappedValue = true
                                 isAutoUploadBinding?.wrappedValue = true
                             } label: {
-                                Text("⚡ Auto")
+                                Text("⚡ Enable Auto")
                                     .font(.system(size: 8, weight: .bold))
                                     .fixedSize()  // prevent wrapping in dual mode
-                                    .padding(.horizontal, 5)
-                                    .padding(.vertical, 2)
-                                    .background(Color.secondary.opacity(0.15))
-                                    .foregroundColor(.primary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 3)
+                                    .background(Color.blue.opacity(0.12))
+                                    .foregroundColor(.blue)
                                     .cornerRadius(3)
                             }
                             .buttonStyle(.plain)

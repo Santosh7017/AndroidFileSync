@@ -183,8 +183,7 @@ struct UploadQueueItem {
     }
     
     init() {
-        let savedAuto = UserDefaults.standard.object(forKey: "isAutoConcurrencyUploads") as? Bool ?? true
-        self.isAutoConcurrency = savedAuto
+        self.isAutoConcurrency = true
         
         let saved = UserDefaults.standard.integer(forKey: "maxConcurrentUploads")
         let clamped = saved > 0 ? min(max(saved, 1), kWiredMaxConcurrent) : 3
@@ -703,6 +702,7 @@ struct UploadQueueItem {
                 
                 self.isBatchUploading = true
                 self.batchCancelled = false
+                self.isAutoConcurrency = true
                 self.startTimerIfNeeded()
             }
             
