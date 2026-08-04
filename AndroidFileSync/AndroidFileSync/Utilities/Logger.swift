@@ -7,12 +7,12 @@ import Foundation
 
 /// Module-wide print gate for release builds. Keeps existing `print(...)` call sites
 /// but silences them unless diagnostics is explicitly enabled.
-@inline(__always)
-func print(_ items: Any..., separator: String = " ", terminator: String = "\n") {
-    guard DiagnosticsControl.isEnabled else { return }
-    let message = items.map { String(describing: $0) }.joined(separator: separator)
-    Swift.print(message, terminator: terminator)
-}
+// @inline(__always)
+// func print(_ items: Any..., separator: String = " ", terminator: String = "\n") {
+//     guard DiagnosticsControl.isEnabled else { return }
+//     let message = items.map { String(describing: $0) }.joined(separator: separator)
+//     Swift.print(message, terminator: terminator)
+// }
 
 final class DiagnosticsControl: ObservableObject {
     static let shared = DiagnosticsControl()

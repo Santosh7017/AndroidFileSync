@@ -463,9 +463,12 @@ struct WirelessConnectView: View {
     @Environment(\.dismiss) private var dismiss
     
     // Tab selection
-    @State private var selectedTab: PairingTab = .autoDiscovery
+    @State private var selectedTab: PairingTab = .qrCode
     
-    // QR Code pairing state
+    // QR Code pairing service
+    @StateObject private var qrPairingService = QRPairingService()
+
+    // Auto-Discovery pairing state
     @StateObject private var pairingBrowser = ADBPairingBrowser()
     @State private var autoPairingCode = ""
     @State private var visiblePairingPort = ""
@@ -492,8 +495,20 @@ struct WirelessConnectView: View {
     @State private var showRescanWhileConnected = false
     
     enum PairingTab: String, CaseIterable {
+        case qrCode = "QR Code"
         case autoDiscovery = "Auto-Discovery"
         case manual = "Advanced"
+    }
+
+    /// Returns the display label for a tab, dynamically renaming Auto-Discovery
+    /// to "Manage Devices" when a device is already connected.
+    private func tabLabel(for tab: PairingTab) -> String {
+        switch tab {
+        case .autoDiscovery:
+            return deviceManager.isConnected ? "Manage Devices" : tab.rawValue
+        default:
+            return tab.rawValue
+        }
     }
 
     private static let wirelessDisplayNameByServiceIDKey = "wirelessDisplayNameByServiceID"
@@ -537,7 +552,7 @@ struct WirelessConnectView: View {
             // Tab picker
             Picker("", selection: $selectedTab) {
                 ForEach(PairingTab.allCases, id: \.self) { tab in
-                    Text(tab.rawValue).tag(tab)
+                    Text(tabLabel(for: tab)).tag(tab)
                 }
             }
             .pickerStyle(.segmented)
@@ -545,7 +560,7 @@ struct WirelessConnectView: View {
             .padding(.top, 16)
             .padding(.bottom, 8)
             .onChange(of: selectedTab) { _ in
-                // Stop browsing when switching tabs
+                // Stop browsing when switching away from each tab
                 pairingBrowser.stopBrowsing()
                 pairingBrowser.status = .idle
                 statusMessage = ""
@@ -553,17 +568,22 @@ struct WirelessConnectView: View {
                 isSuccess = false
                 visiblePairingPort = ""
                 autoPairingCode = ""
+                if selectedTab != .qrCode {
+                    qrPairingService.stop()
+                }
             }
             
             // Tab content
             switch selectedTab {
+            case .qrCode:
+                qrCodeTab
             case .autoDiscovery:
                 autoDiscoveryTab
             case .manual:
                 manualTab
             }
         }
-        .frame(width: 500, height: 620)
+        .frame(width: 500, height: 660)
         .onAppear {
             // Refresh availableDevices when NWBrowser detects device changes
             let dm = deviceManager
@@ -584,6 +604,7 @@ struct WirelessConnectView: View {
         }
         .onDisappear {
             pairingBrowser.stopBrowsing()
+            qrPairingService.stop()
         }
         .sheet(isPresented: $showSetupPopup, onDismiss: {
             if selectedTab == .autoDiscovery && pairingBrowser.status == .idle {
@@ -623,6 +644,365 @@ struct WirelessConnectView: View {
         .background(.ultraThinMaterial)
     }
     
+    // MARK: - QR Code Tab
+
+    @ViewBuilder
+    private var qrCodeTab: some View {
+        let qrState = qrPairingService.state
+
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(spacing: 16) {
+
+                // ── Status banner ─────────────────────────────────────────────
+                qrStatusBanner(for: qrState)
+
+                // ── QR code or result card ────────────────────────────────────
+                Group {
+                    switch qrState {
+                    case .idle:
+                        EmptyView()
+
+                    case .advertising:
+                        qrAdvertisingCard
+
+                    case .pairing:
+                        qrPairingCard
+
+                    case .connected:
+                        qrConnectedCard
+
+                    case .failed(let msg):
+                        qrFailedCard(message: msg)
+                    }
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                .animation(.easeInOut(duration: 0.3), value: "\(qrState)")
+
+                // ── Instructions ──────────────────────────────────────────────
+                if qrState == .advertising || qrState == .idle {
+                    qrInstructionsCard
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+
+                // ── Action row ────────────────────────────────────────────────
+                HStack(spacing: 12) {
+                    Button(action: { dismiss() }) {
+                        Text("Cancel")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .keyboardShortcut(.cancelAction)
+
+                    Spacer()
+
+                    if qrState == .advertising {
+                        Button(action: { qrPairingService.regenerate() }) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .font(.caption)
+                                Text("Regenerate")
+                            }
+                            .font(.subheadline.weight(.medium))
+                            .foregroundColor(.blue)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(
+                                Capsule().fill(Color.blue.opacity(0.1))
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    if case .failed = qrState {
+                        Button(action: { qrPairingService.start() }) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.caption)
+                                Text("Try Again")
+                            }
+                            .font(.subheadline.weight(.medium))
+                            .foregroundColor(.blue)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(
+                                Capsule().fill(Color.blue.opacity(0.1))
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 12)
+            }
+            .padding(.top, 14)
+        }
+        .onAppear {
+            // Wire up the onConnected callback
+            qrPairingService.onConnected = {
+                onConnected?()
+                Task { await deviceManager.detectDevice() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { dismiss() }
+            }
+            // Start advertising automatically when tab appears
+            if qrPairingService.state == .idle {
+                qrPairingService.start()
+            }
+        }
+    }
+
+    // MARK: QR sub-views
+
+    @ViewBuilder
+    private func qrStatusBanner(for state: QRPairingState) -> some View {
+        switch state {
+        case .advertising:
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(Color.green)
+                    .frame(width: 7, height: 7)
+                    .shadow(color: Color.green.opacity(0.6), radius: 4, x: 0, y: 0)
+                Text("Ready to pair — waiting for phone to scan")
+                    .font(.caption.weight(.medium))
+                    .foregroundColor(.green)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .background(
+                Capsule()
+                    .fill(Color.green.opacity(0.08))
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.green.opacity(0.18), lineWidth: 0.5)
+                    )
+            )
+
+        default:
+            EmptyView()
+        }
+    }
+
+    private var qrAdvertisingCard: some View {
+        VStack(spacing: 18) {
+            // QR code with clean white container
+            QRCodeView(data: qrPairingService.qrPayload)
+                .frame(width: 170, height: 170)
+                .padding(14)
+                .background(
+                    RoundedRectangle(cornerRadius: 14)
+                        .fill(Color.white)
+                        .shadow(color: .black.opacity(0.06), radius: 8, x: 0, y: 3)
+                        .shadow(color: .black.opacity(0.02), radius: 2, x: 0, y: 1)
+                )
+
+            VStack(spacing: 5) {
+                Text("Scan with your phone")
+                    .font(.subheadline.weight(.semibold))
+                Text("Open Wireless Debugging → Pair device with QR code")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+            }
+
+            // Service name chip
+            HStack(spacing: 5) {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary.opacity(0.7))
+                Text(qrPairingService.serviceName)
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundColor(.secondary.opacity(0.7))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(
+                Capsule()
+                    .fill(Color(NSColor.separatorColor).opacity(0.12))
+            )
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 22)
+        .padding(.horizontal, 20)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(
+                            LinearGradient(
+                                colors: [Color.blue.opacity(0.2), Color.purple.opacity(0.1)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 0.8
+                        )
+                )
+        )
+        .padding(.horizontal, 20)
+    }
+
+    private var qrPairingCard: some View {
+        VStack(spacing: 16) {
+            ZStack {
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [Color.blue.opacity(0.12), Color.blue.opacity(0.04)],
+                            center: .center,
+                            startRadius: 0,
+                            endRadius: 40
+                        )
+                    )
+                    .frame(width: 72, height: 72)
+                ProgressView()
+                    .scaleEffect(1.2)
+                    .tint(.blue)
+            }
+            VStack(spacing: 5) {
+                Text("Pairing with your device…")
+                    .font(.headline)
+                Text("Keep Wireless Debugging open on your phone.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(28)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(Color.blue.opacity(0.15), lineWidth: 0.8)
+                )
+        )
+        .padding(.horizontal, 20)
+    }
+
+    private var qrConnectedCard: some View {
+        VStack(spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [Color.green.opacity(0.15), Color.green.opacity(0.04)],
+                            center: .center,
+                            startRadius: 0,
+                            endRadius: 38
+                        )
+                    )
+                    .frame(width: 72, height: 72)
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 36))
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [Color.green, Color.green.opacity(0.8)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+            }
+            Text("Connected!")
+                .font(.headline)
+            Text("Your device is paired and connected wirelessly.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(24)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(Color.green.opacity(0.05))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(Color.green.opacity(0.18), lineWidth: 0.8)
+                )
+        )
+        .padding(.horizontal, 20)
+    }
+
+    private func qrFailedCard(message: String) -> some View {
+        VStack(spacing: 12) {
+            ZStack {
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [Color.orange.opacity(0.12), Color.orange.opacity(0.03)],
+                            center: .center,
+                            startRadius: 0,
+                            endRadius: 34
+                        )
+                    )
+                    .frame(width: 64, height: 64)
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 30))
+                    .foregroundColor(.orange)
+            }
+            Text("Pairing Failed")
+                .font(.headline)
+            Text(message)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(24)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(Color.orange.opacity(0.04))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14)
+                        .stroke(Color.orange.opacity(0.18), lineWidth: 0.8)
+                )
+        )
+        .padding(.horizontal, 20)
+    }
+
+    private var qrInstructionsCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "info.circle.fill")
+                    .font(.caption)
+                    .foregroundColor(.blue.opacity(0.7))
+                Text("How to pair with QR code")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.primary.opacity(0.85))
+            }
+
+            VStack(alignment: .leading, spacing: 7) {
+                qrStepRow(number: 1, text: "Settings → Developer Options → Wireless Debugging")
+                qrStepRow(number: 2, text: "Tap \"Pair device with QR code\"")
+                qrStepRow(number: 3, text: "Point your camera at the QR code above")
+            }
+
+            Divider()
+                .opacity(0.4)
+
+            HStack(spacing: 5) {
+                Image(systemName: "wifi")
+                    .font(.system(size: 9))
+                    .foregroundColor(.orange.opacity(0.8))
+                Text("Both devices must be on the same Wi-Fi network")
+                    .font(.caption2)
+                    .foregroundColor(.orange.opacity(0.8))
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color(NSColor.controlBackgroundColor).opacity(0.5))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color(NSColor.separatorColor).opacity(0.3), lineWidth: 0.5)
+                )
+        )
+        .padding(.horizontal, 20)
+    }
+
     // MARK: - Auto-Discovery Tab
 
     private var autoDiscoveryTab: some View {
@@ -1600,16 +1980,25 @@ struct WirelessConnectView: View {
     }
     
     private func qrStepRow(number: Int, text: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: 7) {
             Text("\(number)")
-                .font(.caption2.weight(.bold))
+                .font(.system(size: 9, weight: .bold, design: .rounded))
                 .foregroundColor(.white)
-                .frame(width: 18, height: 18)
-                .background(Circle().fill(Color.blue))
+                .frame(width: 16, height: 16)
+                .background(
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [Color.blue, Color.blue.opacity(0.75)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
+                )
             
             Text(text)
-                .font(.subheadline)
-                .foregroundColor(.primary)
+                .font(.caption)
+                .foregroundColor(.primary.opacity(0.85))
         }
     }
     
