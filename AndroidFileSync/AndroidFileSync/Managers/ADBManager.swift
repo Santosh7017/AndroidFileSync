@@ -224,8 +224,10 @@ class ADBManager {
     
     // MARK: - ADB Server Management
     
-    /// Checks if ADB output indicates a protocol fault or stale server
-    private static func isProtocolError(_ output: String) -> Bool {
+    /// Checks if ADB output indicates a protocol fault or stale server.
+    /// Used by both `pairDevice()` and `QRPairingService` to detect transient
+    /// ADB daemon failures that can be recovered with a server restart + retry.
+    static func isProtocolError(_ output: String) -> Bool {
         let lower = output.lowercased()
         return lower.contains("protocol fault") ||
                lower.contains("couldn't read status") ||

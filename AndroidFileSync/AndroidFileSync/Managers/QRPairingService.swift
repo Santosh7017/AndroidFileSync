@@ -146,12 +146,43 @@ final class QRPairingService: ObservableObject {
                 }
 
                 print("📷 [QRPairing] Executing command: adb pair \(ipPortStr) \(code)")
-                let (pairCode, pairOut, pairErr) = await Shell.runAsyncWithTimeout(
+
+                // Protect the TLS handshake from background ADB server restarts.
+                // Without these flags, DeviceManager/mDNS recovery can kill the
+                // daemon mid-handshake, causing "protocol fault" errors.
+                ADBManager.isPairingInProgress = true
+                ADBPairingBrowser.isPairingActive = true
+
+                var (pairCode, pairOut, pairErr) = await Shell.runAsyncWithTimeout(
                     adbPath, args: ["pair", ipPortStr, code], timeoutSeconds: 12.0
                 )
-                let pairCombined = (pairOut + " " + pairErr).trimmingCharacters(in: .whitespacesAndNewlines)
-                let pairSuccess = pairCode == 0 && pairCombined.lowercased().contains("successfully paired")
+                var pairCombined = (pairOut + " " + pairErr).trimmingCharacters(in: .whitespacesAndNewlines)
+                var pairSuccess = pairCode == 0 && pairCombined.lowercased().contains("successfully paired")
                 print("📷 [QRPairing] adb pair exitCode=\(pairCode), success=\(pairSuccess), output='\(pairCombined)'")
+
+                // Protocol fault = local ADB daemon failure; the phone never saw
+                // the attempt so the pairing code is still valid.
+                // Restart the daemon and retry once (mirrors ADBManager.pairDevice).
+                if !pairSuccess && ADBManager.isProtocolError(pairCombined) {
+                    print("📷 [QRPairing] Protocol fault detected — restarting ADB server and retrying...")
+                    ADBManager.isPairingInProgress = false
+                    let restarted = await ADBManager.restartServer()
+                    ADBManager.isPairingInProgress = true
+
+                    if restarted {
+                        print("📷 [QRPairing] Retrying: adb pair \(ipPortStr) \(code)")
+                        (pairCode, pairOut, pairErr) = await Shell.runAsyncWithTimeout(
+                            adbPath, args: ["pair", ipPortStr, code], timeoutSeconds: 12.0
+                        )
+                        pairCombined = (pairOut + " " + pairErr).trimmingCharacters(in: .whitespacesAndNewlines)
+                        pairSuccess = pairCode == 0 && pairCombined.lowercased().contains("successfully paired")
+                        print("📷 [QRPairing] adb pair retry exitCode=\(pairCode), success=\(pairSuccess), output='\(pairCombined)'")
+                    }
+                }
+
+                // Clear protection flags now that the handshake is complete.
+                ADBManager.isPairingInProgress = false
+                ADBPairingBrowser.isPairingActive = false
 
                 if pairSuccess {
                     await connectAfterPair(ip: ip, adbPath: adbPath)
@@ -262,6 +293,10 @@ final class QRPairingService: ObservableObject {
         pollTask = nil
         regenerateTimer?.invalidate()
         regenerateTimer = nil
+        // Clear protection flags in case we're stopped mid-handshake,
+        // so they don't remain stuck and block future ADB restarts.
+        ADBManager.isPairingInProgress = false
+        ADBPairingBrowser.isPairingActive = false
     }
 
     deinit {

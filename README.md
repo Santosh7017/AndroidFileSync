@@ -5,7 +5,7 @@ A free, native macOS app to transfer files between your Mac and Android phone �
 No cloud. No Google account needed. Plug in via USB or connect wirelessly over WiFi.
 
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-macOS%2013%2B-blue)
-![Version](https://img.shields.io/badge/version-2.3.1-green)
+![Version](https://img.shields.io/badge/version-2.3.2-green)
 
 **[🌐 Project Website](https://santosh7017.github.io/AndroidFileSync/) • [📥 Download Latest Version](#installation) • [🖼️ View Previews](#preview) • [⌨️ Keyboard Shortcuts](#keyboard-shortcuts) • [❓ Troubleshooting](#troubleshooting) • [⚖️ License & Legal](#license-legal)**
 
@@ -39,11 +39,11 @@ No cloud. No Google account needed. Plug in via USB or connect wirelessly over W
 
 - **Finder-like Navigation** — Browse internal storage and external SD cards in a clean sidebar view.
 - **Drag & Drop** — Drag files/folders from Finder straight into the app window to upload them.
-- **Parallel Transfers** — High-speed simultaneous uploads and downloads using Swift Concurrency.
+- **Parallel Transfers & Smart Bandwidth** — High-speed simultaneous uploads and downloads with automatic bandwidth management.
 - **Spacebar Preview (Quick Look)** — Highlight any file and press spacebar to instantly preview images, videos, and PDFs.
 - **Trash & Restore** — Move files/folders to a temporary Trash and restore them later if needed.
 - **Collision Prevention** — Warns you about duplicate files during uploads, and automatically generates unique names when renaming or pasting to prevent overwrites.
-- **Batch Operations** — Rename, change extensions, or delete files in bulk.
+- **Batch Operations** — Rename, change extensions, or delete/restore files in bulk with optimized batch processing.
 - **Clipboard Actions** — Familiar copy, cut, and paste shortcuts to move files across device directories.
 - **Smart Sidebar** — Quick access to Camera, Downloads, Pictures, Music, and SD Card (hides folders that don't exist on your device).
 
@@ -58,6 +58,7 @@ No cloud. No Google account needed. Plug in via USB or connect wirelessly over W
 ### 📶 Connectivity
 
 - **USB Plug & Play** — Plug in your USB cable and start transferring instantly.
+- **Instant QR Code Pairing** — Pair wirelessly in seconds by scanning the on-screen QR code from your phone's Wireless Debugging screen.
 - **Wireless ADB** — Connect wirelessly over your home network (requires Android 11+).
 - **Auto-Discovery** — Automatically discovers and lists your Android device on the local network using mDNS.
 - **Multi-Device Support** — Seamlessly switch between multiple connected Android devices via a dropdown menu.
@@ -176,13 +177,19 @@ No cable needed. Your phone and Mac must be on the **same WiFi network**. Requir
 2. Find **Wireless Debugging** and turn it **ON**.
 3. Tap on **Wireless Debugging** to open its settings.
 
-#### Auto-Discovery Pairing (Easiest)
+#### QR Code Pairing (Fastest & Recommended)
+
+1. In the Mac app: click the **WiFi** button and select the **QR Code** tab.
+2. Inside Wireless Debugging settings on your phone, tap **Pair device with QR code**.
+3. Scan the QR code displayed on your Mac screen — AndroidFileSync pairs and connects automatically!
+
+#### Auto-Discovery Pairing
 
 1. Inside the Wireless Debugging settings, tap **Pair device with pairing code**.
 2. In the Mac app: click the **WiFi** button — the **Auto-Discovery** tab will automatically detect your phone and pre-fill the connection details.
 3. Type the **6-digit code** shown on your phone and click **Pair & Connect**.
 
-> **Got multiple phones?** Devices will appear in the list let you pick which device to connect to.
+> **Got multiple phones?** Devices will appear in the list letting you pick which device to connect to.
 
 #### Advanced Pairing (Manual)
 
@@ -231,12 +238,12 @@ AndroidFileSync supports familiar Finder-like keyboard shortcuts for fast, mouse
 
 ## 📊 How It Compares
 
-| Feature                    | **AndroidFileSync** (v2.3.1)           | **OpenMTP**                           | **MacDroid**                                   | **Blip**                           |
+| Feature                    | **AndroidFileSync** (v2.3.2)           | **OpenMTP**                           | **MacDroid**                                   | **Blip**                           |
 | :------------------------- | :------------------------------------- | :------------------------------------ | :--------------------------------------------- | :--------------------------------- |
 | **Cost & License**         | 🆓 **100% Free & Open Source**         | Free & Open Source                    | Paid Subscription ($19.99/yr for write access) | Free (Closed Source)               |
 | **macOS Integration**      | 🍎 **Native SwiftUI** (Lightweight)    | Electron (Heavy, non-native)          | Native drive mount (Uses system extensions)    | Electron                           |
 | **USB Transfers**          | ✅ **Yes (ADB)**                       | Yes (MTP - prone to connection drops) | Yes (ADB/MTP)                                  | ❌ No (Wireless only)              |
-| **Wi-Fi Transfers**        | ✅ **Yes** (Native Android Wi-Fi)      | ❌ No                                 | Yes (Pro version only)                         | Yes                                |
+| **Wi-Fi Transfers**        | ✅ **Yes** (QR Code & Auto-Discovery)  | ❌ No                                 | Yes (Pro version only)                         | Yes                                |
 | **Phone App Required**     | ❌ **No phone app needed**             | ❌ No                                 | ❌ No                                          | ⚠️ Yes (Must install app on phone) |
 | **App Sideload / Manager** | 🚀 **Yes** (Uninstall/Backup/Sideload) | ❌ No                                 | ❌ No                                          | ❌ No                              |
 | **Spacebar Previews**      | 👁️ **Yes** (Instant Quick Look)        | ❌ No                                 | ⚠️ Yes (via Finder, but mounts slowly)         | ❌ No                              |
