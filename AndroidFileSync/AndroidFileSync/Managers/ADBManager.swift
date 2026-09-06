@@ -2137,7 +2137,7 @@ class ADBManager {
                 await withTaskGroup(of: Void.self) { group in
                     // Task 1: Run the download
                     group.addTask {
-                        let (code, _, err) = await Shell.runAsync(adbPath, args: deviceArgs(["pull", devicePath, localPath]))
+                        let (code, _, err) = await Shell.runAsync(adbPath, args: deviceArgs(["pull", "-a", devicePath, localPath]))
                         exitCode = code
                         adbError = err
                     }
@@ -3396,6 +3396,47 @@ class ADBManager {
         }
         
         AppLogger.log("📱 [MediaScanner] Pre-scan complete.")
+    }
+
+    // MARK: - Remote Timestamp Preservation
+
+    /// Sets modification timestamps on Android files to match their original Mac source dates.
+    ///
+    /// Uses `touch -t` (POSIX format: `yyyyMMddHHmm.ss`, UTC), which is supported by Toybox
+    /// on all modern Android versions (Android 6+). Batches commands in chunks of 50 per
+    /// `adb shell` call to avoid Android's shell command-length limits and minimise round-trips.
+    ///
+    /// This must be called **before** `triggerMediaScanForFiles` so that MediaStore picks up
+    /// the correct modification time when it indexes the file.
+    ///
+    /// - Parameter timestamps: Array of (devicePath, date) pairs to stamp.
+    static func setRemoteTimestamps(_ timestamps: [(devicePath: String, date: Date)]) async {
+        let adbPath = getADBPath()
+        guard !adbPath.isEmpty, !timestamps.isEmpty else { return }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMddHHmm.ss"
+        // Use the Mac's local timezone — Android's `touch -t` interprets the timestamp as device
+        // local time, so formatting in UTC would shift the time by the UTC offset (e.g. -5:30 in IST).
+
+        // Chunk into groups of 50 to stay well within Android shell limits (~128 KB)
+        let chunkSize = 50
+        let chunks = stride(from: 0, to: timestamps.count, by: chunkSize).map {
+            Array(timestamps[$0..<min($0 + chunkSize, timestamps.count)])
+        }
+
+        for chunk in chunks {
+            let commands = chunk.map { entry -> String in
+                let ts = formatter.string(from: entry.date)
+                let escaped = FileNameHelper.escapeForShell(entry.devicePath)
+                return "touch -t \(ts) \(escaped)"
+            }
+            let shellCommand = commands.joined(separator: "; ")
+            let (code, _, err) = await Shell.runAsync(adbPath, args: deviceArgs(["shell", shellCommand]))
+            if code != 0 {
+                AppLogger.log("⚠️ [setRemoteTimestamps] touch failed for chunk: \(err)", level: .warning)
+            }
+        }
     }
 
     // MARK: - Get File Info

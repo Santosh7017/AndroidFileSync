@@ -172,9 +172,55 @@ class DeviceManager: ObservableObject {
                         // Reconnect saved wireless devices using mDNS
                         var connectedIPs = Set<String>()
                         var connectedSerials = Set<String>()
+                        
+                        // ── Fast path: try saved ADB targets immediately ──
+                        // This is the fastest reconnect (~200ms) — works when the
+                        // wireless debugging port hasn't rotated since last session.
+                        let targetMap = UserDefaults.standard.dictionary(forKey: Self.savedWirelessTargetByIPKey) as? [String: String] ?? [:]
+                        let portMap = UserDefaults.standard.dictionary(forKey: Self.savedWirelessPortByIPKey) as? [String: String] ?? [:]
+                        for savedIP in savedIPs {
+                            let savedTarget = targetMap[savedIP]
+                            let fallbackTarget = portMap[savedIP].map { "\(savedIP):\($0)" }
+                            let candidates = [savedTarget, fallbackTarget].compactMap { $0 }
+                            for target in candidates {
+                                print("📱 DeviceManager: [Fast] Trying saved target \(target)")
+                                let (_, out, err) = await Shell.runAsyncWithTimeout(
+                                    adbPath, args: ["connect", target], timeoutSeconds: 3.0
+                                )
+                                let lower = (out + err).lowercased()
+                                if lower.contains("connected to") || lower.contains("already connected") {
+                                    connectedIPs.insert(savedIP)
+                                    print("📱 DeviceManager: ✅ [Fast] Reconnected via saved target \(target)")
+                                    break
+                                }
+                            }
+                        }
+                        
+                        // If fast path succeeded, skip the slow mDNS hunt entirely
+                        if !connectedIPs.isEmpty {
+                            print("📱 DeviceManager: Fast reconnect succeeded, skipping mDNS hunt")
+                        } else {
+                        // ── Slow path: mDNS discovery loop ──
                         for attempt in 1...10 {
                             if Task.isCancelled { break }
-                            try? await Task.sleep(nanoseconds: 1_000_000_000) // 1.0s
+                            // Skip sleep on first attempt — start immediately
+                            if attempt > 1 {
+                                try? await Task.sleep(nanoseconds: 1_000_000_000) // 1.0s
+                            }
+                            
+                            // Quick check: device may have auto-connected via mDNS
+                            // in the background — a fast `adb devices` catches this
+                            let autoConnected = await ADBManager.listAllConnectedDevices()
+                            if !autoConnected.isEmpty {
+                                print("📱 DeviceManager: Device already connected (auto-mDNS), skipping hunt")
+                                // Mark as connected so we proceed to detectDevice()
+                                for dev in autoConnected where dev.isWireless {
+                                    if let ip = dev.serial.components(separatedBy: ":").first {
+                                        connectedIPs.insert(ip)
+                                    }
+                                }
+                                if !connectedIPs.isEmpty { break }
+                            }
                             
                             let (code, mdnsOut, _) = await ADBManager.mdnsServicesWithRecovery()
                             guard code == 0 else { continue }
@@ -183,8 +229,6 @@ class DeviceManager: ObservableObject {
                                 print("📱 DeviceManager: No mDNS connect services found, trying last-known ports...")
                                 // Fallback when mDNS connect service is missing:
                                 // attempt reconnect using last successful port for known IPs.
-                                let targetMap = UserDefaults.standard.dictionary(forKey: Self.savedWirelessTargetByIPKey) as? [String: String] ?? [:]
-                                let portMap = UserDefaults.standard.dictionary(forKey: Self.savedWirelessPortByIPKey) as? [String: String] ?? [:]
                                 for savedIP in savedIPs where !connectedIPs.contains(savedIP) {
                                     let savedTarget = targetMap[savedIP]
                                     let fallbackTarget = portMap[savedIP].map { "\(savedIP):\($0)" }
@@ -282,15 +326,8 @@ class DeviceManager: ObservableObject {
                             let serialReached = targetSerialCount > 0 && connectedSerials.count >= targetSerialCount
                             let ipReached = targetIPCount > 0 && connectedIPs.count >= targetIPCount
                             if serialReached || ipReached { break }
-                            
-                            // If first attempt didn't connect, let the UI show instructions
-                            if attempt == 1 {
-                                await MainActor.run {
-                                    guard let self = self, !self.isConnected else { return }
-                                    self.isDetecting = false
-                                }
-                            }
                         }
+                        } // end slow-path else
                         print("📱 DeviceManager: Reconnected \(connectedSerials.count) serial-based and \(connectedIPs.count) IP-based devices")
                         
                         // If we successfully reconnected in the background, refresh the UI!
@@ -412,7 +449,6 @@ class DeviceManager: ObservableObject {
             }
         }
 
-        await MainActor.run { self.availableDevices = allDevices }
 
         // Derive active device from the list (same logic as isDeviceConnected but without a second adb call)
         if !allDevices.isEmpty {
@@ -452,7 +488,6 @@ class DeviceManager: ObservableObject {
                     }
                 }
                 allDevices = validDevices
-                await MainActor.run { self.availableDevices = allDevices }
             }
             
             let updatedSerials = allDevices.map { $0.serial }
@@ -497,6 +532,11 @@ class DeviceManager: ObservableObject {
         
         // Update the state on the main thread
         await MainActor.run {
+            // Update availableDevices atomically with isConnected to prevent
+            // the UI from briefly seeing devices while isConnected is still false,
+            // which causes the "Connection Blocked" screen to flash.
+            self.availableDevices = allDevices
+
             if adbAvailable, let active = allDevices.first(where: { $0.serial == ADBManager.activeDeviceSerial }) {
                 self.deviceName = active.displayName
                 
@@ -551,6 +591,7 @@ class DeviceManager: ObservableObject {
                     self.deviceName = "No Device"
                     self.statusMessage = "No device detected. Please connect your device."
                     self.isConnected = false
+                    self.availableDevices = []
                     self.diagnosticsComplete = false
                     self.sdCardPath = nil
                     self.storageStats = [:]

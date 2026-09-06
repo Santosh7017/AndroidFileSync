@@ -547,6 +547,9 @@ class DownloadManager: ObservableObject {
             self.backgroundProgress.removeValue(forKey: devicePath)
             self.progressLock.unlock()
             
+            // Preserve Android file timestamp as macOS creation date
+            self.preserveTimestamp(at: localPath)
+            
             // Mark complete on main thread
             await MainActor.run {
                 self.internalActiveDownloads[devicePath]?.isComplete = true
@@ -664,6 +667,9 @@ class DownloadManager: ObservableObject {
             self.progressLock.lock()
             self.backgroundProgress.removeValue(forKey: devicePath)
             self.progressLock.unlock()
+            
+            // Preserve Android file timestamp as macOS creation date
+            self.preserveTimestamp(at: localPath)
             
             // Mark complete on main thread
             await MainActor.run {
@@ -1147,6 +1153,25 @@ class DownloadManager: ObservableObject {
         
         // End sleep prevention now that all downloads are done
         endPreventingSleep()
+    }
+    
+    // MARK: - Timestamp Preservation
+    
+    /// After `adb pull -a` completes, the local file's `modificationDate` matches the
+    /// Android original, but macOS `creationDate` defaults to "now". This method copies
+    /// `modificationDate` → `creationDate` so Finder's "Date Created" column is correct.
+    private func preserveTimestamp(at localPath: String) {
+        do {
+            let attrs = try FileManager.default.attributesOfItem(atPath: localPath)
+            if let modDate = attrs[.modificationDate] as? Date {
+                try FileManager.default.setAttributes([
+                    .creationDate: modDate
+                ], ofItemAtPath: localPath)
+            }
+        } catch {
+            // Non-fatal — file transferred successfully, just the date wasn't preserved
+            print("⚠️ Failed to preserve timestamp for \(localPath): \(error.localizedDescription)")
+        }
     }
     
     // MARK: - Folder Download

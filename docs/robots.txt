@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+
+# Sitemap
+Sitemap: https://santosh7017.github.io/AndroidFileSync/sitemap.xml
+
+# Crawl-delay (be polite to crawlers)
+Crawl-delay: 1

@@ -696,7 +696,7 @@ struct ContentView: View {
                     reconnectionBanner
                 }
             } else {
-                let showCustomMessage = !deviceManager.availableDevices.isEmpty
+                let showCustomMessage = !deviceManager.isDetecting && !deviceManager.availableDevices.isEmpty
                 EmptyStateView(
                     isDetecting: deviceManager.isDetecting,
                     customMessage: showCustomMessage ? deviceManager.statusMessage : nil,

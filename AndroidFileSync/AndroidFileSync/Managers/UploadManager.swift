@@ -132,6 +132,11 @@ struct UploadQueueItem {
     // Coalesced removals to avoid per-file @Published updates during batch mode
     private var pendingRemovals: Set<String> = []
     
+    // Timestamp pairs collected during batch uploads — flushed as batched `touch -t` after completion.
+    // Stored as (devicePath, macModificationDate) so we can restore the original mtime on Android.
+    private var uploadedTimestamps: [(devicePath: String, date: Date)] = []
+    private let timestampLock = NSLock()
+    
     // Active running tasks counter for queue processor
     private let activeRunningLock = NSLock()
     private var activeRunningCount: Int = 0
@@ -524,6 +529,21 @@ struct UploadQueueItem {
         
         AppLogger.log("✅ File uploaded successfully: \(fileName) (\(fileSize) bytes)")
         
+        // Preserve the Mac file's original modification date on the Android copy.
+        // In batch mode: record it for the post-batch batched touch (zero ADB overhead here).
+        // In single-file mode: apply it immediately via a single touch -t call.
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: localPath),
+           let modDate = attrs[.modificationDate] as? Date {
+            if isBatchUploading {
+                timestampLock.lock()
+                uploadedTimestamps.append((devicePath: safeDevicePath, date: modDate))
+                timestampLock.unlock()
+            } else {
+                // Single-file upload — apply immediately before media scan
+                await ADBManager.setRemoteTimestamps([(devicePath: safeDevicePath, date: modDate)])
+            }
+        }
+        
         await MainActor.run {
             if var upload = internalActiveUploads[localPath] {
                 upload.isComplete = true
@@ -639,6 +659,20 @@ struct UploadQueueItem {
                 self.internalActiveUploads[localPath]?.transferSpeed = 0
                 if !self.isBatchUploading {
                     self.activeUploads = self.internalActiveUploads
+                }
+            }
+            
+            // Preserve the Mac file's original modification date on the Android copy.
+            // Touch must run before media scan so MediaStore indexes the correct mtime.
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: localPath),
+               let modDate = attrs[.modificationDate] as? Date {
+                let isBatch = await MainActor.run { self.isBatchUploading }
+                if isBatch {
+                    self.timestampLock.lock()
+                    self.uploadedTimestamps.append((devicePath: safeDevicePath, date: modDate))
+                    self.timestampLock.unlock()
+                } else {
+                    await ADBManager.setRemoteTimestamps([(devicePath: safeDevicePath, date: modDate)])
                 }
             }
             
@@ -1119,7 +1153,19 @@ struct UploadQueueItem {
             await group.waitForAll()
         }
         
-        // Scan all modified files in chunks in the background
+        // 1. Restore original timestamps on the Android device before media scanning.
+        //    touch -t runs in chunks of 50 (~10 adb shell calls for 500 files vs 500 individual calls).
+        //    Must complete before the media scan so MediaStore picks up the correct mtime.
+        timestampLock.lock()
+        let timestampsToApply = uploadedTimestamps
+        uploadedTimestamps.removeAll()
+        timestampLock.unlock()
+        
+        if !timestampsToApply.isEmpty {
+            await ADBManager.setRemoteTimestamps(timestampsToApply)
+        }
+        
+        // 2. Scan all modified files so they appear in Gallery / Google Photos
         let filesToScan = Array(scannedFiles)
         Task.detached {
             await ADBManager.triggerMediaScanForFiles(filesToScan)

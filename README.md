@@ -26,6 +26,9 @@ No cloud. No Google account needed. Plug in via USB or connect wirelessly over W
   <img src="docs/MultiDevice Connectivity.png" width="800" alt="AndroidFileSync Multi Device Connectivity Screenshot">
   <br><em><b>Multi-Device Connectivity</b> — Connect and manage multiple Android devices simultaneously.</em><br><br>
   
+  <img src="docs/Pair with QR code.png" width="800" alt="AndroidFileSync QR Code Pairing Screenshot">
+  <br><em><b>QR Code Pairing</b> — Scan a QR code from your phone to pair wirelessly in seconds — no manual IP or port entry needed.</em><br><br>
+  
   
   <img src="docs/2026-05-19_00-23-59.png" width="800" alt="AndroidFileSync Trash view Screenshot">
   <br><em><b>Trash View</b> — Move files to trash and restore them later, just like macOS.</em><br><br>
@@ -60,6 +63,7 @@ No cloud. No Google account needed. Plug in via USB or connect wirelessly over W
 - **USB Plug & Play** — Plug in your USB cable and start transferring instantly.
 - **Instant QR Code Pairing** — Pair wirelessly in seconds by scanning the on-screen QR code from your phone's Wireless Debugging screen.
 - **Wireless ADB** — Connect wirelessly over your home network (requires Android 11+).
+- **QR Code Pairing** — Scan a QR code from your phone to pair wirelessly — no manual IP or port entry needed.
 - **Auto-Discovery** — Automatically discovers and lists your Android device on the local network using mDNS.
 - **Multi-Device Support** — Seamlessly switch between multiple connected Android devices via a dropdown menu.
 
@@ -177,11 +181,13 @@ No cable needed. Your phone and Mac must be on the **same WiFi network**. Requir
 2. Find **Wireless Debugging** and turn it **ON**.
 3. Tap on **Wireless Debugging** to open its settings.
 
-#### QR Code Pairing (Fastest & Recommended)
+#### QR Code Pairing (Easiest)
 
-1. In the Mac app: click the **WiFi** button and select the **QR Code** tab.
-2. Inside Wireless Debugging settings on your phone, tap **Pair device with QR code**.
-3. Scan the QR code displayed on your Mac screen — AndroidFileSync pairs and connects automatically!
+1. In the Mac app: click the **WiFi** button → select the **QR Code** tab.
+2. On your phone: go to **Wireless Debugging** → tap **Pair device with QR code**.
+3. Point your phone's camera at the QR code on your Mac screen — pairing happens automatically.
+
+> **No codes to type.** The QR code contains the pairing credentials — just scan and you're connected.
 
 #### Auto-Discovery Pairing
 
