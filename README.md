@@ -183,7 +183,7 @@ No cable needed. Your phone and Mac must be on the **same WiFi network**. Requir
 
 #### QR Code Pairing (Easiest)
 
-1. In the Mac app: click the **WiFi** button → select the **QR Code** tab.
+1. In the AndroidFileSync app: click the **WiFi** button → select the **QR Code** tab.
 2. On your phone: go to **Wireless Debugging** → tap **Pair device with QR code**.
 3. Point your phone's camera at the QR code on your Mac screen — pairing happens automatically.
 
