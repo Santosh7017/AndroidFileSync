@@ -8,7 +8,10 @@
 //
 
 import SwiftUI
+<<<<<<< HEAD
 import AVKit
+=======
+>>>>>>> 695f122 (Preview optimization and Connection improvement)
 
 // MARK: - Preview Panel
 
@@ -133,9 +136,13 @@ struct FilePreviewPanel: View {
         case .image(let nsImage):
             imagePreview(nsImage)
         case .videoThumbnail(let nsImage):
+<<<<<<< HEAD
             videoThumbnailPreview(nsImage)
         case .videoReady(let url):
             inlineVideoPlayer(url: url)
+=======
+            videoPreview(nsImage)
+>>>>>>> 695f122 (Preview optimization and Connection improvement)
         case .audioIcon:
             audioPreview
         case .documentIcon(let ext):
@@ -196,15 +203,22 @@ struct FilePreviewPanel: View {
         return CGSize(width: image.width * scale, height: image.height * scale)
     }
     
+<<<<<<< HEAD
     // MARK: - Video Thumbnail Preview (while pulling)
     
     private func videoThumbnailPreview(_ thumbnail: NSImage) -> some View {
+=======
+    // MARK: - Video Preview
+    
+    private func videoPreview(_ thumbnail: NSImage) -> some View {
+>>>>>>> 695f122 (Preview optimization and Connection improvement)
         ZStack {
             Image(nsImage: thumbnail)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             
+<<<<<<< HEAD
             VStack(spacing: 12) {
                 if previewManager.isLoadingFullFile {
                     // Downloading state
@@ -279,6 +293,32 @@ struct FilePreviewPanel: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.black)
             .transition(.opacity)
+=======
+            // Play button overlay
+            VStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .frame(width: 64, height: 64)
+                        .shadow(color: .black.opacity(0.25), radius: 10)
+                    
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 24, weight: .medium))
+                        .foregroundStyle(.white)
+                        .offset(x: 2)
+                }
+                
+                Text("Open in App to play")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(.black.opacity(0.5), in: Capsule())
+            }
+        }
+        .background(Color.black.opacity(0.05))
+        .accessibilityLabel("Video thumbnail preview")
+>>>>>>> 695f122 (Preview optimization and Connection improvement)
     }
     
     // MARK: - Audio Preview
