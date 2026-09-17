@@ -65,6 +65,7 @@
 				Views/EmptyStateView.swift,
 				Views/FileBrowserView.swift,
 				Views/FileInfoView.swift,
+				Views/FilePreviewPanel.swift,
 				Views/FileRowView.swift,
 				Views/HeaderView.swift,
 				Views/ReportIssuePopoverView.swift,

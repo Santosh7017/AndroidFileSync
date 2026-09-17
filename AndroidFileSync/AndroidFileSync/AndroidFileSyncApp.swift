@@ -118,6 +118,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             ADBManager.disconnectAppManagedWirelessSync()
         }
 
+        // The app-owned server can otherwise outlive the UI process with a stale
+        // network route, making a reachable paired phone fail with EHOSTUNREACH on
+        // the next launch. Never kill the shared Android Studio server on port 5037.
+        if !Shell.useDefaultServer {
+            _ = Shell.run(adbPath, args: ["kill-server"])
+        }
+
     }
 
     private func installDeleteShortcutMonitor() {

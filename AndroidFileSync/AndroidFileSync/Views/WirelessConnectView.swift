@@ -357,19 +357,19 @@ class ADBPairingBrowser: ObservableObject {
                             if !ADBPairingBrowser.autoConnectingIPs.contains(ip) {
                                 ADBPairingBrowser.autoConnectingIPs.insert(ip)
                                 print("📶 NWBrowser: Auto-reconnecting to known device \(connectAddr)")
-                                let (exitCode, out, err) = await Shell.runAsyncWithTimeout(
-                                    adbPath, args: ["connect", connectAddr], timeoutSeconds: 5.0
+                                let result = await ADBManager.connectAndVerifyWirelessTarget(
+                                    connectAddr, connectTimeout: 5.0, verificationAttempts: 2
                                 )
                                 
-                                let combined = (out + err).lowercased()
-                                if combined.contains("failed") || combined.contains("cannot connect") || exitCode != 0 {
-                                    // Connection failed (likely authorization revoked)
-                                    // Remove from saved list to stop auto-reconnect loop and allow re-pairing
-                                    var saved = UserDefaults.standard.stringArray(forKey: "connectedWirelessDevices") ?? []
-                                    if let idx = saved.firstIndex(of: ip) {
-                                        saved.remove(at: idx)
-                                        UserDefaults.standard.set(saved, forKey: "connectedWirelessDevices")
-                                        print("📶 NWBrowser: Auto-reconnect failed, removing \(ip) from known devices.")
+                                if !result.success {
+                                    // Keep the remembered pairing for transient routing,
+                                    // Wi-Fi, and sleep failures. Only an explicit TLS/auth
+                                    // rejection means the phone must be paired again.
+                                    if ADBManager.wirelessConnectionRequiresRepair(result.output) {
+                                        ADBPairingBrowser.needsRepairing.insert(ip)
+                                        print("📶 NWBrowser: ADB authorization rejected for \(ip); re-pairing is required.")
+                                    } else {
+                                        print("📶 NWBrowser: Auto-reconnect failed transiently; retaining known device \(ip).")
                                     }
                                 }
                                 
@@ -745,6 +745,9 @@ struct WirelessConnectView: View {
             }
             // Start advertising automatically when tab appears
             if qrPairingService.state == .idle {
+                // Do not let the launch reconnect hunt issue `adb connect` while
+                // the QR TLS handshake is being established.
+                deviceManager.cancelWirelessReconnectHunt()
                 qrPairingService.start()
             }
         }
