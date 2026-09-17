@@ -28,6 +28,9 @@ final class QRPairingService: ObservableObject {
         stopInternal()
         ignoredEndpoints.removeAll()
         generateCredentials()
+        // Block background mDNS auto-connect attempts for the complete QR flow,
+        // including the period before the phone opens its pairing service.
+        ADBPairingBrowser.isPairingActive = true
         state = .advertising
         print("📷 [QRPairing] Service started. State set to .advertising. Starting poll task.")
         pollTask = Task { [weak self] in
@@ -101,6 +104,19 @@ final class QRPairingService: ObservableObject {
             }
             if attempt > 1 { try? await Task.sleep(nanoseconds: 1_000_000_000) }
 
+            // Check if DeviceManager already connected a device while we
+            // were polling. This handles the case where pairing failed
+            // (e.g. server restart failed) but DeviceManager reconnected
+            // the device on its own via mDNS auto-discovery.
+            if let activeSerial = ADBManager.activeDeviceSerial, !activeSerial.isEmpty {
+                print("📷 [QRPairing] Device already connected by DeviceManager: \(activeSerial). Transitioning to .connected.")
+                await MainActor.run {
+                    state = .connected
+                    onConnected?()
+                }
+                return
+            }
+
             let (exitCode, output, stderr) = await ADBManager.mdnsServicesWithRecovery(allowRecovery: false)
             let trimmedOut = output.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -166,7 +182,16 @@ final class QRPairingService: ObservableObject {
                 if !pairSuccess && ADBManager.isProtocolError(pairCombined) {
                     print("📷 [QRPairing] Protocol fault detected — restarting ADB server and retrying...")
                     ADBManager.isPairingInProgress = false
-                    let restarted = await ADBManager.restartServer()
+                    var restarted = await ADBManager.restartServer()
+
+                    // If the first restart failed (e.g. concurrent mDNS recovery
+                    // interfered), wait briefly and try once more.
+                    if !restarted {
+                        print("📷 [QRPairing] First restart failed — retrying restart after 2s...")
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        restarted = await ADBManager.restartServer()
+                    }
+
                     ADBManager.isPairingInProgress = true
 
                     if restarted {
@@ -180,16 +205,25 @@ final class QRPairingService: ObservableObject {
                     }
                 }
 
-                // Clear protection flags now that the handshake is complete.
+                // The ADB daemon may be used again after the pair command, but keep
+                // browser auto-connect suppressed until connectAfterPair completes.
                 ADBManager.isPairingInProgress = false
-                ADBPairingBrowser.isPairingActive = false
 
                 if pairSuccess {
                     await connectAfterPair(ip: ip, adbPath: adbPath)
+                    ADBPairingBrowser.isPairingActive = false
                     return
                 } else {
-                    print("📷 [QRPairing] Pairing to \(ipPortStr) failed (\(pairCombined)). Ignoring and continuing poll...")
-                    ignoredEndpoints.insert(ipPortStr)
+                    // Only permanently ignore this endpoint if it was NOT a
+                    // protocol fault. Protocol faults are ADB daemon issues —
+                    // the phone's pairing code is still valid and may succeed
+                    // once the daemon stabilizes on the next poll iteration.
+                    if !ADBManager.isProtocolError(pairCombined) {
+                        print("📷 [QRPairing] Pairing to \(ipPortStr) failed (\(pairCombined)). Ignoring endpoint.")
+                        ignoredEndpoints.insert(ipPortStr)
+                    } else {
+                        print("📷 [QRPairing] Pairing to \(ipPortStr) failed with protocol fault (\(pairCombined)). Will retry on next poll.")
+                    }
                     await MainActor.run {
                         if state == .pairing {
                             state = .advertising
@@ -243,13 +277,18 @@ final class QRPairingService: ObservableObject {
 
         let port = connectPort ?? "5555"
         let serial = "\(ip):\(port)"
-        print("📷 [QRPairing] Executing command: adb connect \(serial)")
 
-        let (connectCode, connectOut, connectErr) = await Shell.runAsyncWithTimeout(
+        // Try connecting WITHOUT disconnecting first. DeviceManager may have
+        // already established a healthy connection in parallel. If "adb connect"
+        // says "already connected", we verify and accept it. Only if verification
+        // fails (e.g. device offline from a stale TLS session) do we do the
+        // heavier disconnect → reconnect cycle.
+        print("📷 [QRPairing] Executing command: adb connect \(serial)")
+        var (connectCode, connectOut, connectErr) = await Shell.runAsyncWithTimeout(
             adbPath, args: ["connect", serial], timeoutSeconds: 8.0
         )
-        let combined = (connectOut + " " + connectErr).lowercased()
-        let connectText = (connectOut + " " + connectErr).trimmingCharacters(in: .whitespacesAndNewlines)
+        var combined = (connectOut + " " + connectErr).lowercased()
+        var connectText = (connectOut + " " + connectErr).trimmingCharacters(in: .whitespacesAndNewlines)
         print("📷 [QRPairing] adb connect exitCode=\(connectCode), output='\(connectText)'")
 
         guard combined.contains("connected") || combined.contains("already") else {
@@ -260,17 +299,44 @@ final class QRPairingService: ObservableObject {
             return
         }
 
-        print("📷 [QRPairing] Verifying connection: adb -s \(serial) shell echo ok")
-        let (vCode, vOut, vErr) = await Shell.runAsyncWithTimeout(
-            adbPath, args: ["-s", serial, "shell", "echo", "ok"], timeoutSeconds: 5.0
-        )
-        let vText = vOut.trimmingCharacters(in: .whitespacesAndNewlines)
-        let vErrText = vErr.trimmingCharacters(in: .whitespacesAndNewlines)
-        print("📷 [QRPairing] Verify exitCode=\(vCode), stdout='\(vText)', stderr='\(vErrText)'")
+        // Verify the connection with retries. On "device offline", do a
+        // disconnect → reconnect cycle to clear stale TLS state.
+        var verified = false
+        for verifyAttempt in 1...3 {
+            guard !Task.isCancelled else { return }
+            if verifyAttempt > 1 {
+                print("📷 [QRPairing] Verification retry \(verifyAttempt)/3 after 2s delay...")
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+            print("📷 [QRPairing] Verifying connection (attempt \(verifyAttempt)/3): adb -s \(serial) shell echo ok")
+            let (vCode, vOut, vErr) = await Shell.runAsyncWithTimeout(
+                adbPath, args: ["-s", serial, "shell", "echo", "ok"], timeoutSeconds: 5.0
+            )
+            let vText = vOut.trimmingCharacters(in: .whitespacesAndNewlines)
+            let vErrText = vErr.trimmingCharacters(in: .whitespacesAndNewlines)
+            print("📷 [QRPairing] Verify exitCode=\(vCode), stdout='\(vText)', stderr='\(vErrText)'")
 
-        guard vCode == 0, vText.contains("ok") else {
+            if vCode == 0, vText.contains("ok") {
+                verified = true
+                break
+            }
+
+            // Device offline = stale TLS session. Disconnect and reconnect fresh.
+            if vErrText.lowercased().contains("offline") && verifyAttempt < 3 {
+                print("📷 [QRPairing] Device offline — disconnect and reconnect before retry...")
+                let _ = await Shell.runAsyncWithTimeout(
+                    adbPath, args: ["disconnect", serial], timeoutSeconds: 3.0
+                )
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                let _ = await Shell.runAsyncWithTimeout(
+                    adbPath, args: ["connect", serial], timeoutSeconds: 8.0
+                )
+            }
+        }
+
+        guard verified else {
             await MainActor.run {
-                print("📷 [QRPairing] Verification failed for \(serial)")
+                print("📷 [QRPairing] Verification failed for \(serial) after retries")
                 state = .failed("Paired but connection verification failed for \(serial). Try the Auto-Discovery tab.")
             }
             return

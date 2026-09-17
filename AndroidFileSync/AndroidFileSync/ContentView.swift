@@ -464,7 +464,9 @@ struct ContentView: View {
                     Button("") { handleRenameShortcut() }.keyboardShortcut("r", modifiers: [.command, .shift])
                     Button("") { handleQuickPreview() }.keyboardShortcut(.space, modifiers: [])
                     Button("") {
-                        if filePreviewManager.isLoading {
+                        if filePreviewManager.showPreviewPanel {
+                            filePreviewManager.dismissPreview()
+                        } else if filePreviewManager.isLoading {
                             filePreviewManager.cancelPreview()
                         }
                     }.keyboardShortcut(.escape, modifiers: [])
@@ -958,32 +960,10 @@ struct ContentView: View {
                     }
                 }
 
-                if filePreviewManager.isLoading {
-                    VStack(spacing: 12) {
-                        ProgressView().scaleEffect(1.2)
-                        Text("Loading preview...").font(.subheadline).foregroundColor(.secondary)
-                        Text(filePreviewManager.loadingFileName)
-                            .font(.caption).bold().lineLimit(1)
-                        
-                        Button {
-                            filePreviewManager.cancelPreview()
-                        } label: {
-                            Label("Cancel (Esc)", systemImage: "xmark.circle.fill")
-                                .font(.caption)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.red.opacity(0.8))
-                        .controlSize(.small)
-                        .keyboardShortcut(.escape, modifiers: [])
-                        .padding(.top, 4)
-                    }
-                    .padding(24)
-                    .frame(minWidth: 220)
-                    .background(RoundedRectangle(cornerRadius: 12).fill(.ultraThinMaterial))
-                    .shadow(radius: 10)
-                    .onExitCommand {
-                        filePreviewManager.cancelPreview()
-                    }
+                // In-app QuickLook-style preview panel
+                if filePreviewManager.showPreviewPanel {
+                    FilePreviewPanel(previewManager: filePreviewManager)
+                        .transition(.opacity.combined(with: .scale(scale: 0.95)))
                 }
             }
             .navigationTitle(deviceManager.isConnected ? "AndroidFileSync" : "")

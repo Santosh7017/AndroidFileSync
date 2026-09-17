@@ -150,6 +150,7 @@ class DeviceManager: ObservableObject {
         // start advertising after the app's first scan.
         let canAttemptWirelessReconnect: Bool = {
             guard !userDisconnected else { return false }
+            guard !ADBPairingBrowser.isPairingActive, !ADBManager.isPairingInProgress else { return false }
             guard wirelessHuntTask == nil || wirelessHuntTask?.isCancelled == true else { return false }
             guard let lastAttempt = lastWirelessReconnectAttemptAt else { return true }
             return Date().timeIntervalSince(lastAttempt) >= Self.wirelessReconnectCooldown
@@ -167,6 +168,10 @@ class DeviceManager: ObservableObject {
                     wirelessHuntTask = Task { [weak self] in
                     let adbPath = ADBManager.getADBPath()
                     if !adbPath.isEmpty {
+                        guard !ADBPairingBrowser.isPairingActive, !ADBManager.isPairingInProgress else {
+                            await MainActor.run { self?.wirelessHuntTask = nil }
+                            return
+                        }
                         print("📱 DeviceManager: No active devices. Attempting to reconnect wireless devices...")
                         
                         // Reconnect saved wireless devices using mDNS
@@ -181,16 +186,19 @@ class DeviceManager: ObservableObject {
                         for savedIP in savedIPs {
                             let savedTarget = targetMap[savedIP]
                             let fallbackTarget = portMap[savedIP].map { "\(savedIP):\($0)" }
-                            let candidates = [savedTarget, fallbackTarget].compactMap { $0 }
+                            var seenTargets = Set<String>()
+                            let candidates = [savedTarget, fallbackTarget].compactMap { target -> String? in
+                                guard let target, seenTargets.insert(target).inserted else { return nil }
+                                return target
+                            }
                             for target in candidates {
                                 print("📱 DeviceManager: [Fast] Trying saved target \(target)")
-                                let (_, out, err) = await Shell.runAsyncWithTimeout(
-                                    adbPath, args: ["connect", target], timeoutSeconds: 3.0
+                                let result = await ADBManager.connectAndVerifyWirelessTarget(
+                                    target, connectTimeout: 3.0, verificationAttempts: 2
                                 )
-                                let lower = (out + err).lowercased()
-                                if lower.contains("connected to") || lower.contains("already connected") {
+                                if result.success {
                                     connectedIPs.insert(savedIP)
-                                    print("📱 DeviceManager: ✅ [Fast] Reconnected via saved target \(target)")
+                                    print("📱 DeviceManager: ✅ [Fast] Reconnected and verified via saved target \(target)")
                                     break
                                 }
                             }
@@ -203,6 +211,10 @@ class DeviceManager: ObservableObject {
                         // ── Slow path: mDNS discovery loop ──
                         for attempt in 1...10 {
                             if Task.isCancelled { break }
+                            if ADBPairingBrowser.isPairingActive || ADBManager.isPairingInProgress {
+                                print("📱 DeviceManager: Pausing wireless reconnect hunt while pairing is active")
+                                break
+                            }
                             // Skip sleep on first attempt — start immediately
                             if attempt > 1 {
                                 try? await Task.sleep(nanoseconds: 1_000_000_000) // 1.0s
@@ -232,41 +244,38 @@ class DeviceManager: ObservableObject {
                                 for savedIP in savedIPs where !connectedIPs.contains(savedIP) {
                                     let savedTarget = targetMap[savedIP]
                                     let fallbackTarget = portMap[savedIP].map { "\(savedIP):\($0)" }
-                                    let candidates = [savedTarget, fallbackTarget].compactMap { $0 }
+                                    var seenTargets = Set<String>()
+                                    let candidates = [savedTarget, fallbackTarget].compactMap { target -> String? in
+                                        guard let target, seenTargets.insert(target).inserted else { return nil }
+                                        return target
+                                    }
 
                                     guard !candidates.isEmpty else {
-                                        print("📱 DeviceManager: No saved ADB 37 target or port for \(savedIP); pairing is required.")
-                                        Self.clearSavedWirelessEndpoint(for: savedIP)
+                                        print("📱 DeviceManager: No last-known endpoint for \(savedIP); keeping its pairing record and waiting for mDNS.")
                                         continue
                                     }
 
-                                    var reconnected = false
                                     for target in candidates {
                                         print("📱 DeviceManager: Trying saved ADB target \(target)")
-                                        let (_, out, err) = await Shell.runAsyncWithTimeout(
-                                            adbPath, args: ["connect", target], timeoutSeconds: 4.0
+                                        let result = await ADBManager.connectAndVerifyWirelessTarget(
+                                            target, connectTimeout: 4.0, verificationAttempts: 2
                                         )
-                                        let combined = out + err
-                                        let lower = combined.lowercased()
-                                        if lower.contains("connected to") || lower.contains("already connected") {
+                                        if result.success {
                                             connectedIPs.insert(savedIP)
-                                            reconnected = true
-                                            print("📱 DeviceManager: ✅ Reconnected using saved ADB target \(target)")
+                                            print("📱 DeviceManager: ✅ Reconnected and verified using saved ADB target \(target)")
                                             break
                                         } else {
-                                            print("📱 DeviceManager: ❌ Saved target failed: \(combined.trimmingCharacters(in: .whitespacesAndNewlines))")
+                                            print("📱 DeviceManager: ❌ Saved target failed: \(result.output.trimmingCharacters(in: .whitespacesAndNewlines))")
                                         }
                                     }
-
-                                    if !reconnected {
-                                        print("📱 DeviceManager: Saved wireless target for \(savedIP) is stale; clearing it so user can pair/connect with the current ADB 37 service.")
-                                        Self.clearSavedWirelessEndpoint(for: savedIP)
-                                    }
                                 }
-                                break
+                                // Keep polling: Android may advertise its current connect
+                                // port a few seconds after Wi-Fi or the phone wakes up.
+                                continue
                             }
                             
                             print("📱 DeviceManager: mDNS poll attempt \(attempt)/10")
+                            var attemptedTargets = Set<String>()
                             
                             // 1. First attempt to match by serial number (ADB 37+ mDNS)
                             for line in mdnsOut.split(separator: "\n") {
@@ -282,18 +291,19 @@ class DeviceManager: ObservableObject {
                                 
                                 guard let hwSerial = ADBManager.extractHardwareSerial(from: serviceName) else { continue }
                                 if savedSerials.contains(hwSerial) && !connectedSerials.contains(hwSerial) {
+                                    guard attemptedTargets.insert(ipPort).inserted else { continue }
                                     print("📱 DeviceManager: Reconnecting to serial \(hwSerial) at: \(ipPort)")
-                                    let (_, out, _) = await Shell.runAsyncWithTimeout(
-                                        adbPath, args: ["connect", ipPort], timeoutSeconds: 3.0
+                                    let result = await ADBManager.connectAndVerifyWirelessTarget(
+                                        ipPort, connectTimeout: 3.0, verificationAttempts: 2
                                     )
-                                    if out.lowercased().contains("connected") {
+                                    if result.success {
                                         connectedSerials.insert(hwSerial)
                                         if let ip = ipPort.components(separatedBy: ":").first {
                                             connectedIPs.insert(ip)
                                         }
                                         print("📱 DeviceManager: ✅ Connected serial \(hwSerial) to \(ipPort)")
                                     } else {
-                                        print("📱 DeviceManager: ❌ Failed serial reconnect: \(out.trimmingCharacters(in: .whitespacesAndNewlines))")
+                                        print("📱 DeviceManager: ❌ Failed serial reconnect: \(result.output.trimmingCharacters(in: .whitespacesAndNewlines))")
                                     }
                                 }
                             }
@@ -306,16 +316,17 @@ class DeviceManager: ObservableObject {
                                           str.contains(savedIP) else { continue }
                                     let parts = str.split(whereSeparator: { $0 == "\t" || $0 == " " }).map(String.init)
                                     guard let ipPort = parts.first(where: { $0.hasPrefix(savedIP + ":") }) else { break }
+                                    guard attemptedTargets.insert(ipPort).inserted else { break }
                                     
                                     print("📱 DeviceManager: Reconnecting to IP: \(ipPort)")
-                                    let (_, out, _) = await Shell.runAsyncWithTimeout(
-                                        adbPath, args: ["connect", ipPort], timeoutSeconds: 3.0
+                                    let result = await ADBManager.connectAndVerifyWirelessTarget(
+                                        ipPort, connectTimeout: 3.0, verificationAttempts: 2
                                     )
-                                    if out.lowercased().contains("connected") {
+                                    if result.success {
                                         connectedIPs.insert(savedIP)
                                         print("📱 DeviceManager: ✅ Connected IP to \(ipPort)")
                                     } else {
-                                        print("📱 DeviceManager: ❌ Failed IP reconnect: \(out.trimmingCharacters(in: .whitespacesAndNewlines))")
+                                        print("📱 DeviceManager: ❌ Failed IP reconnect: \(result.output.trimmingCharacters(in: .whitespacesAndNewlines))")
                                     }
                                     break
                                 }
@@ -364,6 +375,7 @@ class DeviceManager: ObservableObject {
                     var connectedAny = false
                     for attempt in 1...10 {
                         if Task.isCancelled { break }
+                        if ADBPairingBrowser.isPairingActive || ADBManager.isPairingInProgress { break }
                         if attempt > 1 {
                             try? await Task.sleep(nanoseconds: 1_000_000_000) // 1.0s
                         }
@@ -400,13 +412,11 @@ class DeviceManager: ObservableObject {
                             attempted.insert(ipPort)
 
                             print("📱 DeviceManager: Attempting mDNS connect to \(ipPort)")
-                            let (exitCode, out, err) = await Shell.runAsyncWithTimeout(
-                                adbPath, args: ["connect", ipPort], timeoutSeconds: 4.0
+                            let result = await ADBManager.connectAndVerifyWirelessTarget(
+                                ipPort, connectTimeout: 4.0, verificationAttempts: 2
                             )
-                            let combined = out + err
-                            let lower = combined.lowercased()
-                            print("📱 DeviceManager: mDNS connect result code=\(exitCode), output=\(combined.trimmingCharacters(in: .whitespacesAndNewlines))")
-                            if lower.contains("connected to") || lower.contains("already connected") {
+                            print("📱 DeviceManager: mDNS connect+verify success=\(result.success), output=\(result.output.trimmingCharacters(in: .whitespacesAndNewlines))")
+                            if result.success {
                                 connectedAny = true
                                 print("📱 DeviceManager: ✅ mDNS direct connect succeeded: \(ipPort)")
                                 break
@@ -769,6 +779,10 @@ class DeviceManager: ObservableObject {
     // MARK: - USB Device Monitor (IOKit, zero-overhead)
 
     func startMonitoring() {
+        // ContentView can appear more than once during window/view lifecycle
+        // changes. Keep the existing IOKit monitor instead of replacing it.
+        guard usbMonitor == nil else { return }
+
         // ── Wire up ConnectionHealthMonitor callbacks ──
         connectionHealthMonitor.onReconnected = { [weak self] in
             guard let self else { return }
@@ -1045,6 +1059,10 @@ class DeviceManager: ObservableObject {
     
     /// Pair and connect to an Android 11+ device wirelessly
     func pairAndConnect(ip: String, pairingPort: String, pairingCode: String, connectPort: String, hostname: String? = nil) async -> (Bool, String) {
+        cancelWirelessReconnectHunt()
+        ADBPairingBrowser.isPairingActive = true
+        defer { ADBPairingBrowser.isPairingActive = false }
+
         await MainActor.run {
             self.isDetecting = true
             self.statusMessage = "Pairing with device..."
@@ -1126,12 +1144,11 @@ class DeviceManager: ObservableObject {
             await detectDevice()
             return (true, message)
         } else {
-            // If connection fails (e.g. authorization revoked), remove from saved list
-            // so the UI falls back to "Tap to pair" and stops auto-reconnecting
-            var saved = UserDefaults.standard.stringArray(forKey: "connectedWirelessDevices") ?? []
-            if let idx = saved.firstIndex(of: ip) {
-                saved.remove(at: idx)
-                UserDefaults.standard.set(saved, forKey: "connectedWirelessDevices")
+            // A route failure or sleeping phone does not invalidate Android's saved
+            // pairing. Preserve the reconnect record; only flag an explicit ADB
+            // authentication rejection as requiring a new pairing handshake.
+            if ADBManager.wirelessConnectionRequiresRepair(message) {
+                ADBPairingBrowser.needsRepairing.insert(ip)
             }
             
             await MainActor.run {
@@ -1263,4 +1280,3 @@ class DeviceManager: ObservableObject {
         return !privateOutput.contains(" usb:")
     }
 }
-

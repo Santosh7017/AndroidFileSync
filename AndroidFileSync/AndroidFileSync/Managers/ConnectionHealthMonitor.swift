@@ -58,6 +58,9 @@ class ConnectionHealthMonitor: ObservableObject {
     private let maxReconnectAttempts = 30 // ~60 seconds of trying
     /// True when monitoring is active (prevents double-start)
     private var isMonitoring = false
+    /// Prevent the polling task and NWBrowser callback from issuing overlapping
+    /// connect/TLS verification commands for the same device.
+    private var isConnectAttemptInProgress = false
     
     // MARK: - Public API
     
@@ -85,6 +88,7 @@ class ConnectionHealthMonitor: ObservableObject {
         isReconnecting = false
         reconnectAttempt = 0
         reconnectMessage = ""
+        isConnectAttemptInProgress = false
         
         // Save the wireless target for reconnect fallback (in case port changes)
         if !ip.isEmpty {
@@ -129,6 +133,7 @@ class ConnectionHealthMonitor: ObservableObject {
         isReconnecting = false
         reconnectAttempt = 0
         reconnectMessage = ""
+        isConnectAttemptInProgress = false
     }
     
     /// Update the monitored serial after a successful reconnection changes the port.
@@ -318,15 +323,20 @@ class ConnectionHealthMonitor: ObservableObject {
     
     /// Attempts `adb connect <target>`. Returns true if connection succeeded.
     private func tryConnect(adbPath: String, target: String) async -> Bool {
-        let (_, out, err) = await Shell.runAsyncWithTimeout(
-            adbPath, args: ["connect", target], timeoutSeconds: 4.0
+        guard !isConnectAttemptInProgress else { return false }
+        isConnectAttemptInProgress = true
+        defer { isConnectAttemptInProgress = false }
+
+        let result = await ADBManager.connectAndVerifyWirelessTarget(
+            target,
+            connectTimeout: 4.0,
+            verificationAttempts: 2
         )
-        let combined = (out + err).lowercased()
-        let success = combined.contains("connected to") || combined.contains("already connected")
+        let success = result.success
         if success {
-            print("💓 [HealthMonitor] ✅ Connected to \(target)")
+            print("💓 [HealthMonitor] ✅ Connected and verified \(target)")
         } else {
-            let trimmed = (out + err).trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmed = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
                 print("💓 [HealthMonitor] ❌ Failed to connect to \(target): \(trimmed)")
             }
@@ -477,7 +487,12 @@ class ConnectionHealthMonitor: ObservableObject {
     // MARK: - Reconnection Success
     
     private func handleReconnected(newSerial: String) async {
-        guard isMonitoring else { return }
+        // The polling task and NWBrowser can discover the same endpoint at nearly
+        // the same time. Only the first verified result may complete recovery.
+        guard isMonitoring, isReconnecting else { return }
+        isReconnecting = false
+        isHealthy = true
+        reconnectMessage = ""
         
         stopReconnectBrowser()
         reconnectTask?.cancel()

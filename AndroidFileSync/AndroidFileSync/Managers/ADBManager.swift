@@ -236,6 +236,99 @@ class ADBManager {
                lower.contains("adb server version") ||
                lower.contains("kill-server")
     }
+
+    /// Returns true only when ADB explicitly reports that the saved TLS identity is
+    /// no longer authorized. Network failures such as "No route to host", timeouts,
+    /// or a sleeping phone are transient and must not erase a remembered pairing.
+    static func wirelessConnectionRequiresRepair(_ output: String) -> Bool {
+        let lower = output.lowercased()
+        return lower.contains("failed to authenticate") ||
+               lower.contains("authentication failed") ||
+               lower.contains("device unauthorized") ||
+               lower.contains("unauthorized device")
+    }
+
+    /// Connects to one wireless ADB endpoint and verifies that it can execute a
+    /// command. `adb connect` can return exit code 0 (and can even say "already
+    /// connected") for a stale transport, so its response alone is not proof that
+    /// the device is usable.
+    static func connectAndVerifyWirelessTarget(
+        _ target: String,
+        connectTimeout: Double = 5.0,
+        verificationAttempts: Int = 3
+    ) async -> (success: Bool, output: String) {
+        let adbPath = getADBPath()
+        guard !adbPath.isEmpty else { return (false, "ADB not found") }
+
+        var messages: [String] = []
+        var restartedForStaleRoute = false
+
+        // One normal attempt plus one refresh attempt for an ADB transport that is
+        // listed as connected but cannot actually run a shell command.
+        for connectAttempt in 1...2 {
+            if isPairingInProgress {
+                return (false, "Pairing is in progress")
+            }
+
+            let (connectCode, connectOut, connectErr) = await Shell.runAsyncWithTimeout(
+                adbPath,
+                args: ["connect", target],
+                timeoutSeconds: connectTimeout
+            )
+            let connectText = (connectOut + connectErr).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !connectText.isEmpty { messages.append(connectText) }
+            let lower = connectText.lowercased()
+            let connectAccepted = lower.contains("connected to") || lower.contains("already connected")
+
+            guard connectCode == 0 && connectAccepted else {
+                // A private ADB daemon can survive the app process and retain a
+                // stale macOS network path. In that state a normal TCP probe reaches
+                // the phone while the daemon reports EHOSTUNREACH. Recreate the
+                // daemon once; Android's pairing key remains persisted on disk.
+                let staleRoute = lower.contains("no route to host") || lower.contains("network is unreachable")
+                if connectAttempt == 1, staleRoute, !restartedForStaleRoute, activeDeviceSerial == nil {
+                    restartedForStaleRoute = true
+                    print("🔄 ADB: Stale network route detected — restarting private ADB server once...")
+                    if await restartServer() {
+                        try? await Task.sleep(nanoseconds: 500_000_000)
+                        continue
+                    }
+                }
+                return (false, messages.joined(separator: "\n"))
+            }
+
+            for verifyAttempt in 1...max(1, verificationAttempts) {
+                let (verifyCode, verifyOut, verifyErr) = await Shell.runAsyncWithTimeout(
+                    adbPath,
+                    args: ["-s", target, "shell", "echo", "afs-connected"],
+                    timeoutSeconds: 3.0
+                )
+                if verifyCode == 0,
+                   verifyOut.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("afs-connected") {
+                    return (true, messages.joined(separator: "\n"))
+                }
+
+                let verifyText = (verifyOut + verifyErr).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !verifyText.isEmpty { messages.append(verifyText) }
+                if verifyAttempt < max(1, verificationAttempts) {
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                }
+            }
+
+            guard connectAttempt == 1 else { break }
+
+            // Clear only this unusable transport, then make one fresh connection.
+            _ = await Shell.runAsyncWithTimeout(
+                adbPath,
+                args: ["disconnect", target],
+                timeoutSeconds: 2.0
+            )
+            try? await Task.sleep(nanoseconds: 400_000_000)
+        }
+
+        if messages.isEmpty { messages.append("Connected transport did not respond") }
+        return (false, messages.joined(separator: "\n"))
+    }
     
     /// Kills and restarts the ADB server to clear stale state.
     /// Serialized and rate-limited so concurrent discovery/pair/connect failures do not
@@ -3049,46 +3142,47 @@ class ADBManager {
             return targets
         }
 
-        // Helper: attempt a single adb connect and return whether it succeeded
+        // Helper: connect and prove that the transport can execute commands.
         func attempt(target: String) async -> (Bool, String) {
             print("📶 ADB: Connecting to \(target)...")
-            var (exitCode, output, error) = await Shell.runAsyncWithTimeout(
-                adbPath, args: ["connect", target], timeoutSeconds: 10.0
-            )
-            var combined = output + error
-            print("📶 ADB Connect result: code=\(exitCode), output=\(combined)")
+            var result = await connectAndVerifyWirelessTarget(target, connectTimeout: 10.0)
+            print("📶 ADB Connect+verify result: success=\(result.success), output=\(result.output)")
 
-            // Auto-recover from stale protocol state.
-            if isProtocolError(combined) {
+            // Auto-recover from stale local daemon state. This is intentionally
+            // limited to protocol errors; normal network failures retain pairing.
+            if !result.success && isProtocolError(result.output) {
                 print("🔄 ADB: Protocol fault during connect, restarting server and retrying...")
                 let restarted = await restartServer()
                 if restarted {
-                    (exitCode, output, error) = await Shell.runAsyncWithTimeout(
-                        adbPath, args: ["connect", target], timeoutSeconds: 10.0
-                    )
-                    combined = output + error
-                    print("📶 ADB Connect retry result: code=\(exitCode), output=\(combined)")
+                    result = await connectAndVerifyWirelessTarget(target, connectTimeout: 10.0)
+                    print("📶 ADB Connect+verify retry: success=\(result.success), output=\(result.output)")
                 }
             }
 
-            let lower = combined.lowercased()
-            if lower.contains("connected to") || lower.contains("already connected") {
-                return (true, combined)
-            }
-            if lower.contains("cannot connect") || lower.contains("failed") {
-                return (false, combined)
-            }
-            return (exitCode == 0, combined)
+            return (result.success, result.output)
         }
 
         let targets = await buildTargets()
+        var lastFailure = ""
         for target in targets {
-            let (success, _) = await attempt(target: target)
+            let (success, output) = await attempt(target: target)
             if success {
                 return (true, "Connected to \(target)", target)
             }
+            lastFailure = output
         }
-        return (false, "Cannot connect to \(ip). Make sure Wireless Debugging is enabled and re-open 'Pair device with pairing code'.", nil)
+        if wirelessConnectionRequiresRepair(lastFailure) {
+            return (
+                false,
+                "ADB authorization was rejected. Pair this Mac with the phone again. \(lastFailure)",
+                nil
+            )
+        }
+        return (
+            false,
+            "Cannot reach \(ip). Keep the phone awake and make sure both devices are on the same Wi-Fi. The saved pairing was retained.",
+            nil
+        )
     }
     
     /// Disconnects from a wireless device

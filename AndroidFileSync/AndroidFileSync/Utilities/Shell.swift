@@ -346,6 +346,127 @@ struct Shell {
         }
     }
     
+    /// Run a command and capture raw binary Data from stdout.
+    /// Used for `adb exec-out cat` and `adb exec-out head -c` which output binary data.
+    /// - Parameters:
+    ///   - command: Path to executable
+    ///   - args: Command arguments
+    ///   - maxBytes: Maximum bytes to capture (0 = unlimited). Process is killed when limit is reached.
+    ///   - cancellationCheck: Closure polled to check if the operation should be cancelled
+    /// - Returns: (exitCode, stdoutData, stderrString)
+    static func runAndCaptureData(
+        _ command: String,
+        args: [String],
+        maxBytes: Int = 0,
+        cancellationCheck: @escaping () -> Bool = { false }
+    ) async -> (Int32, Data, String) {
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                let stdout = Pipe()
+                let stderr = Pipe()
+                
+                process.executableURL = URL(fileURLWithPath: command)
+                process.arguments = args
+                process.environment = activeADBEnvironment
+                process.standardOutput = stdout
+                process.standardError = stderr
+                
+                var outputData = Data()
+                var errorData = Data()
+                var hasResumed = false
+                let resumeLock = NSLock()
+                var hitMaxBytes = false
+                
+                let stdoutHandle = stdout.fileHandleForReading
+                let stderrHandle = stderr.fileHandleForReading
+                
+                // Read stdout binary data incrementally
+                stdoutHandle.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    if data.isEmpty {
+                        handle.readabilityHandler = nil
+                        return
+                    }
+                    resumeLock.lock()
+                    outputData.append(data)
+                    // Kill process if we've exceeded maxBytes
+                    if maxBytes > 0 && outputData.count >= maxBytes {
+                        hitMaxBytes = true
+                        resumeLock.unlock()
+                        if process.isRunning {
+                            kill(process.processIdentifier, SIGKILL)
+                        }
+                        return
+                    }
+                    resumeLock.unlock()
+                }
+                
+                // Read stderr for error messages
+                stderrHandle.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    if data.isEmpty {
+                        handle.readabilityHandler = nil
+                        return
+                    }
+                    resumeLock.lock()
+                    errorData.append(data)
+                    resumeLock.unlock()
+                }
+                
+                do {
+                    try process.run()
+                    
+                    // Start cancellation monitor
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        while process.isRunning {
+                            if cancellationCheck() {
+                                let pid = process.processIdentifier
+                                kill(pid, SIGKILL)
+                                break
+                            }
+                            Thread.sleep(forTimeInterval: 0.1)
+                        }
+                    }
+                    
+                    process.waitUntilExit()
+                    
+                    // Small delay to let readability handlers flush
+                    Thread.sleep(forTimeInterval: 0.05)
+                    
+                    resumeLock.lock()
+                    if !hasResumed {
+                        hasResumed = true
+                        stdoutHandle.readabilityHandler = nil
+                        stderrHandle.readabilityHandler = nil
+                        
+                        // Trim to maxBytes if needed
+                        if maxBytes > 0 && outputData.count > maxBytes {
+                            outputData = outputData.prefix(maxBytes)
+                        }
+                        
+                        let error = String(data: errorData, encoding: .utf8) ?? ""
+                        let exitCode = hitMaxBytes ? Int32(0) : process.terminationStatus
+                        
+                        resumeLock.unlock()
+                        continuation.resume(returning: (exitCode, outputData, error))
+                    } else {
+                        resumeLock.unlock()
+                    }
+                } catch {
+                    resumeLock.lock()
+                    if !hasResumed {
+                        hasResumed = true
+                        resumeLock.unlock()
+                        continuation.resume(returning: (-1, Data(), error.localizedDescription))
+                    } else {
+                        resumeLock.unlock()
+                    }
+                }
+            }
+        }
+    }
+    
     // New: Run with progress tracking and cancellation support
     static func runWithProgressCancellable(
         _ command: String,
