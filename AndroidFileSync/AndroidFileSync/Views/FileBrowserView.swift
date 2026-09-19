@@ -64,6 +64,9 @@ struct FileBrowserView: View, Equatable {
     // Progressive loading (paginated content:// fallback)
     var isLoadingMoreFiles: Bool = false
     
+    // Thumbnail provider for inline file thumbnails
+    var thumbnailProvider: ThumbnailProvider? = nil
+    
     // Equatable — compare data that affects rendering.
     // sortVersion detects user-initiated sort changes.
     // File boundary checks detect metadata enrichment and navigation changes.
@@ -623,9 +626,19 @@ struct FileBrowserView: View, Equatable {
         Table(files, selection: $selectedFiles, sortOrder: $sortOrder) {
             TableColumn("Name", value: \.name) { file in
                 HStack(spacing: 8) {
-                    Image(systemName: getFileIcon(for: file))
-                        .foregroundColor(getFileColor(for: file))
-                        .frame(width: 18)
+                    if let provider = thumbnailProvider {
+                        FileThumbnailView(
+                            file: file,
+                            thumbnailProvider: provider,
+                            fallbackIcon: getFileIcon(for: file),
+                            fallbackColor: getFileColor(for: file)
+                        )
+                        .frame(width: 22, height: 22)
+                    } else {
+                        Image(systemName: getFileIcon(for: file))
+                            .foregroundStyle(getFileColor(for: file))
+                            .frame(width: 18)
+                    }
                     Text(file.name)
                         .lineLimit(1)
                         .truncationMode(.middle)
