@@ -24,6 +24,7 @@ struct ContentView: View {
     @State private var isUploading = false
     
     @StateObject private var filePreviewManager = FilePreviewManager()
+    @StateObject private var thumbnailProvider = ThumbnailProvider()
     @StateObject private var sidebarManager = SidebarManager()
 
     @State private var files: [UnifiedFile] = []
@@ -165,6 +166,7 @@ struct ContentView: View {
         }
         
         displayedFiles = result
+        thumbnailProvider.requestThumbnails(for: result, currentPath: currentPath)
         print("🔄 [SORT] updateDisplayedFiles — \(result.count) files, sort: \(sortOption.rawValue) \(ascending ? "ASC" : "DESC"), ver: \(sortVersion)")
     }
     
@@ -954,7 +956,8 @@ struct ContentView: View {
                             isLoadingMetadata: isLoadingMetadata,
                             metadataLoadedCount: metadataLoadedCount,
                             metadataTotalCount: metadataTotalCount,
-                            isLoadingMoreFiles: isLoadingMoreFiles
+                            isLoadingMoreFiles: isLoadingMoreFiles,
+                            thumbnailProvider: thumbnailProvider
                         )
                         .equatable()
                     }
@@ -1546,6 +1549,7 @@ struct ContentView: View {
         loadTask?.cancel()
         metadataTask?.cancel()
         metadataTask = nil
+        thumbnailProvider.cancelLoading()
         
         // Clear selection — navigating to a new folder means different files.
         selectedFiles.removeAll()

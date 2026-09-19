@@ -8,6 +8,7 @@
 //
 
 import SwiftUI
+import AVKit
 
 // MARK: - Preview Panel
 
@@ -132,7 +133,9 @@ struct FilePreviewPanel: View {
         case .image(let nsImage):
             imagePreview(nsImage)
         case .videoThumbnail(let nsImage):
-            videoPreview(nsImage)
+            videoThumbnailPreview(nsImage)
+        case .videoReady(let url):
+            inlineVideoPlayer(url: url)
         case .audioIcon:
             audioPreview
         case .documentIcon(let ext):
@@ -193,39 +196,89 @@ struct FilePreviewPanel: View {
         return CGSize(width: image.width * scale, height: image.height * scale)
     }
     
-    // MARK: - Video Preview
+    // MARK: - Video Thumbnail Preview (while pulling)
     
-    private func videoPreview(_ thumbnail: NSImage) -> some View {
+    private func videoThumbnailPreview(_ thumbnail: NSImage) -> some View {
         ZStack {
             Image(nsImage: thumbnail)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             
-            // Play button overlay
             VStack(spacing: 12) {
-                ZStack {
-                    Circle()
-                        .fill(.ultraThinMaterial)
-                        .frame(width: 64, height: 64)
-                        .shadow(color: .black.opacity(0.25), radius: 10)
+                if previewManager.isLoadingFullFile {
+                    // Downloading state
+                    ZStack {
+                        Circle()
+                            .fill(.ultraThinMaterial)
+                            .frame(width: 64, height: 64)
+                            .shadow(color: .black.opacity(0.25), radius: 10)
+                        
+                        ProgressView()
+                            .controlSize(.regular)
+                    }
                     
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 24, weight: .medium))
-                        .foregroundStyle(.white)
-                        .offset(x: 2)
+                    VStack(spacing: 8) {
+                        Text(previewManager.fullFilePullProgress.isEmpty ? "Downloading…" : previewManager.fullFilePullProgress)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
+                            .background(.black.opacity(0.5), in: Capsule())
+                        
+                        Button {
+                            previewManager.cancelPreview()
+                        } label: {
+                            Text("Cancel")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.8))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 3)
+                                .background(.red.opacity(0.6), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                } else {
+                    // Idle state — tappable play button
+                    Button {
+                        previewManager.openInExternalApp()
+                    } label: {
+                        VStack(spacing: 12) {
+                            ZStack {
+                                Circle()
+                                    .fill(.ultraThinMaterial)
+                                    .frame(width: 64, height: 64)
+                                    .shadow(color: .black.opacity(0.25), radius: 10)
+                                
+                                Image(systemName: "play.fill")
+                                    .font(.system(size: 24, weight: .medium))
+                                    .foregroundStyle(.white)
+                                    .offset(x: 2)
+                            }
+                            
+                            Text("Open in App to play")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 5)
+                                .background(.black.opacity(0.5), in: Capsule())
+                        }
+                    }
+                    .buttonStyle(.plain)
                 }
-                
-                Text("Open in App to play")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 5)
-                    .background(.black.opacity(0.5), in: Capsule())
             }
         }
         .background(Color.black.opacity(0.05))
-        .accessibilityLabel("Video thumbnail preview")
+        .accessibilityLabel("Video preview")
+    }
+    
+    // MARK: - Inline Video Player
+    
+    private func inlineVideoPlayer(url: URL) -> some View {
+        VideoPlayerView(url: url)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.black)
+            .transition(.opacity)
     }
     
     // MARK: - Audio Preview
