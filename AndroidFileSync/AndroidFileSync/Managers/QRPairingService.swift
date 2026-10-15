@@ -78,6 +78,11 @@ final class QRPairingService: ObservableObject {
         let sName = await MainActor.run { serviceName }
         print("📷 [QRPairing] Starting mDNS poll loop for phone pairing service (serviceName: \(sName), code: \(code))...")
 
+        // Snapshot the device that was already connected BEFORE the QR flow started.
+        // We must NOT short-circuit to .connected just because this pre-existing device
+        // is still active — the user may be trying to pair a DIFFERENT device.
+        let preExistingSerial = ADBManager.activeDeviceSerial
+
         // Snapshot pre-existing pairing endpoints to prevent false positives from stale mDNS
         let (_, initialOut, _) = await ADBManager.mdnsServicesWithRecovery(allowRecovery: false)
         var preExisting = Set<String>()
@@ -104,12 +109,14 @@ final class QRPairingService: ObservableObject {
             }
             if attempt > 1 { try? await Task.sleep(nanoseconds: 1_000_000_000) }
 
-            // Check if DeviceManager already connected a device while we
-            // were polling. This handles the case where pairing failed
-            // (e.g. server restart failed) but DeviceManager reconnected
-            // the device on its own via mDNS auto-discovery.
-            if let activeSerial = ADBManager.activeDeviceSerial, !activeSerial.isEmpty {
-                print("📷 [QRPairing] Device already connected by DeviceManager: \(activeSerial). Transitioning to .connected.")
+            // Check if DeviceManager connected a NEW device while we were polling.
+            // Only transition to .connected if the active serial CHANGED from
+            // what was already connected when the QR flow started — otherwise
+            // we'd immediately dismiss the QR for a pre-existing connection,
+            // preventing the user from pairing additional devices.
+            if let activeSerial = ADBManager.activeDeviceSerial, !activeSerial.isEmpty,
+               activeSerial != preExistingSerial {
+                print("📷 [QRPairing] New device connected by DeviceManager: \(activeSerial) (was: \(preExistingSerial ?? "nil")). Transitioning to .connected.")
                 await MainActor.run {
                     state = .connected
                     onConnected?()

@@ -58,8 +58,8 @@ struct Shell {
         let outputData = stdout.fileHandleForReading.readDataToEndOfFile()
         let errorData = stderr.fileHandleForReading.readDataToEndOfFile()
         
-        let output = String(data: outputData, encoding: .utf8) ?? ""
-        let error = String(data: errorData, encoding: .utf8) ?? ""
+        let output = String(data: outputData, encoding: .utf8) ?? String(data: outputData, encoding: .isoLatin1) ?? ""
+        let error = String(data: errorData, encoding: .utf8) ?? String(data: errorData, encoding: .isoLatin1) ?? ""
         
         return (process.terminationStatus, output, error)
     }
@@ -101,8 +101,8 @@ struct Shell {
                             errorData.append(stderrHandle.readDataToEndOfFile())
                         }
                         
-                        let output = String(data: outputData, encoding: .utf8) ?? ""
-                        let error = String(data: errorData, encoding: .utf8) ?? ""
+                        let output = String(data: outputData, encoding: .utf8) ?? String(data: outputData, encoding: .isoLatin1) ?? ""
+                        let error = String(data: errorData, encoding: .utf8) ?? String(data: errorData, encoding: .isoLatin1) ?? ""
                         
                         continuation.resume(returning: (status, output, error))
                     }
@@ -197,8 +197,8 @@ struct Shell {
                         errorData.append(stderrHandle.readDataToEndOfFile())
                     }
                     
-                    let output = String(data: outputData, encoding: .utf8) ?? ""
-                    var error = String(data: errorData, encoding: .utf8) ?? ""
+                    let output = String(data: outputData, encoding: .utf8) ?? String(data: outputData, encoding: .isoLatin1) ?? ""
+                    var error = String(data: errorData, encoding: .utf8) ?? String(data: errorData, encoding: .isoLatin1) ?? ""
                     
                     if let extraErrorMessage, !extraErrorMessage.isEmpty {
                         error = error.isEmpty ? extraErrorMessage : error + "\n" + extraErrorMessage

@@ -860,7 +860,7 @@ class ADBManager {
         }
         
         // Single `find` call: print size and relative path for every file
-        let cmd = "find '\(path)' -type f -printf '%s %P\\n' 2>/dev/null"
+        let cmd = "find '\(FileNameHelper.escapeForSingleQuotedShell(path))' -type f -printf '%s %P\\n' 2>/dev/null"
         let (code, output, error) = await Shell.runAsyncWithTimeout(
             adbPath,
             args: deviceArgs(["shell", cmd]),
@@ -947,7 +947,7 @@ class ADBManager {
         AppLogger.log("⚙️ [listFiles] Request to list directory: \(path)")
         
         let startTime = Date()
-        let listCommand = "ls -1a '\(path)' 2>&1"
+        let listCommand = "ls -1a '\(FileNameHelper.escapeForSingleQuotedShell(path))' 2>&1"
         AppLogger.log("⚙️ [listFiles] Executing command: ls -1a '\(path)' 2>&1")
         
         // Shorter timeout for media paths — FUSE/Scoped Storage can block ls on Android 14+
@@ -2059,7 +2059,7 @@ class ADBManager {
         var result = existing
         for name in exactNames where !parsed.contains(name) {
             let fullPath = basePath.hasSuffix("/") ? basePath + name : basePath + "/" + name
-            let escapedPath = FileNameHelper.escapeForShell(fullPath)
+            let escapedPath = FileNameHelper.escapeForSingleQuotedShell(fullPath)
             
             // Verify if the file actually exists. FUSE dcache or MediaStore might return 
             // recently deleted files as ghost entries.
