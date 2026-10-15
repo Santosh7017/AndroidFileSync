@@ -17,6 +17,15 @@ struct FileNameHelper {
         return escaped
     }
     
+    /// Escapes a string for safe use inside single quotes in a shell command.
+    ///
+    /// Inside single quotes, the ONLY character that needs special handling is `'` itself.
+    /// The idiom `'\''` ends the current quote, inserts a literal `'`, and reopens the quote.
+    /// International/Unicode characters pass through safely — single quotes preserve them as-is.
+    static func escapeForSingleQuotedShell(_ value: String) -> String {
+        return value.replacingOccurrences(of: "'", with: "'\\''")
+    }
+    
     // Sanitize filename by replacing problematic characters
     static func sanitizeFilename(_ filename: String, replacement: String = "_") -> String {
         // Replace characters that cause issues on Android
