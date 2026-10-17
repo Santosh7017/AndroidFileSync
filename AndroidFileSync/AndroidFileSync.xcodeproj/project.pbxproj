@@ -39,6 +39,7 @@
 				Managers/FileActionManager.swift,
 				Managers/FilePreviewManager.swift,
 				Managers/OperationEngine.swift,
+				Managers/PairingMDNSProbe.swift,
 				Managers/QRPairingService.swift,
 				Managers/SidebarManager.swift,
 				Managers/SupportPromptManager.swift,
@@ -46,13 +47,17 @@
 				Managers/UpdateChecker.swift,
 				Managers/UploadManager.swift,
 				Managers/USBDeviceMonitor.swift,
+				Managers/WirelessDiscovery.swift,
 				Models/AppInfo.swift,
 				Models/Models.swift,
 				Resources/adb,
+				Utilities/CommandProcess.swift,
 				Utilities/ConflictDialog.swift,
 				Utilities/DropCoordinator.swift,
+				Utilities/FileBrowserKeyboardNavigation.swift,
 				Utilities/FileDropDelegate.swift,
 				Utilities/FileNameHelper.swift,
+				Utilities/FileSelectionNavigator.swift,
 				Utilities/Logger.swift,
 				Utilities/QuickAccessItem.swift,
 				Utilities/Settings.swift,
@@ -69,6 +74,7 @@
 				Views/FilePreviewPanel.swift,
 				Views/FileRowView.swift,
 				Views/FileThumbnailView.swift,
+				Views/FileTileView.swift,
 				Views/HeaderView.swift,
 				Views/ReportIssuePopoverView.swift,
 				Views/SelectionToolbar.swift,
@@ -355,7 +361,7 @@
 					/opt/homebrew/Cellar/libmtp/1.1.22/lib,
 					/opt/homebrew/Cellar/libusb/1.0.29/lib,
 				);
-				MARKETING_VERSION = 2.3.3-beta.1;
+				MARKETING_VERSION = "2.3.3-beta.1";
 				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync1;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -404,7 +410,7 @@
 					/opt/homebrew/Cellar/libmtp/1.1.22/lib,
 					/opt/homebrew/Cellar/libusb/1.0.29/lib,
 				);
-				MARKETING_VERSION = 2.3.3-beta.1;
+				MARKETING_VERSION = "2.3.3-beta.1";
 				PRODUCT_BUNDLE_IDENTIFIER = com.santosh.AndroidFileSync1;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";

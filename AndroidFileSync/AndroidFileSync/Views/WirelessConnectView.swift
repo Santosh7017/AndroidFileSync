@@ -50,6 +50,21 @@ class ADBPairingBrowser: ObservableObject {
     @MainActor static var needsRepairing = Set<String>()
     /// When true, suppress device removal from discoveredDevices (pairing in progress)
     @MainActor static var isPairingActive = false
+
+    /// A network/port failure does not revoke an existing Android TLS pairing.
+    func recordConnectionResult(success: Bool, message: String, deviceKey: String, ip: String) {
+        if success {
+            Self.needsRepairing.remove(ip)
+            discoveredDevices[deviceKey]?.verifiedPaired = true
+            status = .paired
+        } else {
+            if ADBManager.wirelessConnectionRequiresRepair(message) {
+                Self.needsRepairing.insert(ip)
+                discoveredDevices[deviceKey]?.verifiedPaired = false
+            }
+            status = .failed(message)
+        }
+    }
     /// Called when connect services change — refresh the ADB device list
     var onDeviceListChanged: (() -> Void)?
     
@@ -83,7 +98,7 @@ class ADBPairingBrowser: ObservableObject {
         isBrowsing = true
         Self.isBrowsingGlobally = true
         
-        print("📶 NWBrowser: Browsing for _adb-tls-pairing._tcp + _adb-tls-connect._tcp...")
+        AppLogger.log("📶 [NWBrowser] Browsing for _adb-tls-pairing._tcp + _adb-tls-connect._tcp...")
 
         // ── ADB 37 approach ──────────────────────────────────────────────
         // NWBrowser gives us INSTANT event notifications (device appeared/disappeared).
@@ -98,6 +113,10 @@ class ADBPairingBrowser: ObservableObject {
         }
         pairParams.includePeerToPeer = true
         pairingBrowser = NWBrowser(for: .bonjour(type: "_adb-tls-pairing._tcp", domain: "local."), using: pairParams)
+
+        pairingBrowser?.stateUpdateHandler = { state in
+            Self.logBrowserState(state, serviceType: "_adb-tls-pairing._tcp")
+        }
 
         pairingBrowser?.browseResultsChangedHandler = { [weak self] _, changes in
             // Any change (added/removed/changed) → rapid-poll adb mdns services
@@ -122,6 +141,10 @@ class ADBPairingBrowser: ObservableObject {
         }
         connectParams.includePeerToPeer = true
         connectBrowser = NWBrowser(for: .bonjour(type: "_adb-tls-connect._tcp", domain: "local."), using: connectParams)
+
+        connectBrowser?.stateUpdateHandler = { state in
+            Self.logBrowserState(state, serviceType: "_adb-tls-connect._tcp")
+        }
 
         connectBrowser?.browseResultsChangedHandler = { [weak self] _, changes in
             for change in changes {
@@ -160,13 +183,13 @@ class ADBPairingBrowser: ObservableObject {
                                                 Task {
                                                     let adbPath = ADBManager.getADBPath()
                                                     if !adbPath.isEmpty {
-                                                        print("📡 NWBrowser: Device \(name) removed, forcing adb disconnect \(ip)")
+                                                        AppLogger.log("📡 [NWBrowser] Device \(name) removed, forcing adb disconnect \(ip)")
                                                         _ = await Shell.runAsyncWithTimeout(adbPath, args: ["disconnect", ip], timeoutSeconds: 3.0)
                                                     }
                                                     self.onDeviceListChanged?()
                                                 }
                                             } else {
-                                                print("📡 NWBrowser: Device \(name) (\(ip)) removed from mDNS, but skipping adb disconnect because it is currently connected and active.")
+                                                AppLogger.log("📡 [NWBrowser] Device \(name) (\(ip)) removed from mDNS, but skipping adb disconnect because it is currently connected and active.")
                                             }
                                         }
                                     }
@@ -201,6 +224,23 @@ class ADBPairingBrowser: ObservableObject {
             self.startMdnsPolling()
         }
     }
+
+    private static func logBrowserState(_ state: NWBrowser.State, serviceType: String) {
+        switch state {
+        case .setup:
+            AppLogger.log("📶 [NWBrowser] \(serviceType) state=setup")
+        case .ready:
+            AppLogger.log("📶 [NWBrowser] \(serviceType) state=ready")
+        case .waiting(let error):
+            AppLogger.log("📶 [NWBrowser] \(serviceType) state=waiting error=\(error)", level: .warning)
+        case .failed(let error):
+            AppLogger.log("📶 [NWBrowser] \(serviceType) state=failed error=\(error)", level: .error)
+        case .cancelled:
+            AppLogger.log("📶 [NWBrowser] \(serviceType) state=cancelled")
+        @unknown default:
+            AppLogger.log("📶 [NWBrowser] \(serviceType) state=unknown", level: .warning)
+        }
+    }
     
     func stopBrowsing() {
         pairingBrowser?.cancel()
@@ -231,7 +271,7 @@ class ADBPairingBrowser: ObservableObject {
     func pausePolling() {
         mdnsPollTimer?.invalidate()
         mdnsPollTimer = nil
-        print("📶 NWBrowser: mDNS poll timer paused for pairing.")
+        AppLogger.log("📶 [NWBrowser] mDNS poll timer paused for pairing.")
     }
     
     /// Resumes the periodic mDNS poll timer after pairing finishes.
@@ -240,7 +280,7 @@ class ADBPairingBrowser: ObservableObject {
         mdnsPollTimer = Timer.scheduledTimer(withTimeInterval: 6.0, repeats: true) { [weak self] _ in
             self?.pollADBMdnsServices()
         }
-        print("📶 NWBrowser: mDNS poll timer resumed after pairing.")
+        AppLogger.log("📶 [NWBrowser] mDNS poll timer resumed after pairing.")
     }
     
     private func startMdnsPolling() {
@@ -274,7 +314,7 @@ class ADBPairingBrowser: ObservableObject {
             //   "protocol fault (couldn't read status message): Undefined error: 0"
             let pairingActive = await ADBPairingBrowser.isPairingActive
             guard !pairingActive else {
-                print("📶 NWBrowser: Skipping mDNS poll — pairing is in progress.")
+                AppLogger.log("📶 [NWBrowser] Skipping mDNS poll — pairing is in progress.")
                 return
             }
 
@@ -294,11 +334,11 @@ class ADBPairingBrowser: ObservableObject {
 
             let (code, output, _) = await ADBManager.mdnsServicesWithRecovery()
             guard code == 0 else {
-                print("📶 NWBrowser: adb mdns services failed with code \(code)")
+                AppLogger.log("📶 [NWBrowser] adb mdns services failed with code \(code)", level: .warning)
                 return
             }
             let mdnsTrimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-            print("📶 NWBrowser: adb mdns services output:\n\(mdnsTrimmed.isEmpty ? "<empty>" : mdnsTrimmed)")
+            AppLogger.log("📶 [NWBrowser] adb mdns services output:\n\(mdnsTrimmed.isEmpty ? "<empty>" : mdnsTrimmed)")
 
             var discoveredCount = 0
             for line in output.split(separator: "\n") {
@@ -347,38 +387,12 @@ class ADBPairingBrowser: ObservableObject {
                     }
                     return false
                 }))
+                let remembered = serviceName.flatMap(ADBManager.extractHardwareSerial(from:)).map { identity in
+                    ADBManager.rememberedWirelessDevices.contains { $0.hardwareSerial == identity }
+                } ?? false
                 
-                // Auto-reconnect to previously known devices that just reappeared on mDNS
-                if isConnectService && !isPaired && !isActiveTarget && !ADBPairingBrowser.suppressAutoConnect
-                    && !ADBPairingBrowser.needsRepairing.contains(ip) {
-                    let savedIPs = UserDefaults.standard.stringArray(forKey: "connectedWirelessDevices") ?? []
-                    if savedIPs.contains(ip) {
-                        Task { @MainActor in
-                            if !ADBPairingBrowser.autoConnectingIPs.contains(ip) {
-                                ADBPairingBrowser.autoConnectingIPs.insert(ip)
-                                print("📶 NWBrowser: Auto-reconnecting to known device \(connectAddr)")
-                                let result = await ADBManager.connectAndVerifyWirelessTarget(
-                                    connectAddr, connectTimeout: 5.0, verificationAttempts: 2
-                                )
-                                
-                                if !result.success {
-                                    // Keep the remembered pairing for transient routing,
-                                    // Wi-Fi, and sleep failures. Only an explicit TLS/auth
-                                    // rejection means the phone must be paired again.
-                                    if ADBManager.wirelessConnectionRequiresRepair(result.output) {
-                                        ADBPairingBrowser.needsRepairing.insert(ip)
-                                        print("📶 NWBrowser: ADB authorization rejected for \(ip); re-pairing is required.")
-                                    } else {
-                                        print("📶 NWBrowser: Auto-reconnect failed transiently; retaining known device \(ip).")
-                                    }
-                                }
-                                
-                                ADBPairingBrowser.autoConnectingIPs.remove(ip)
-                                self.onDeviceListChanged?()
-                            }
-                        }
-                    }
-                }
+                // DeviceManager owns automatic recovery, including stable identity checks.
+                // The browser publishes discovery state and requests a device-list refresh.
 
                 await MainActor.run {
                     // Cancel any pending removal since the device is rediscovered/active
@@ -394,13 +408,13 @@ class ADBPairingBrowser: ObservableObject {
                         hostname: existing?.hostname ?? hostname,
                         pairingPort: isPairingService ? port : existing?.pairingPort,
                         connectPort: isConnectService ? port : existing?.connectPort,
-                        verifiedPaired: (isPaired && !blocked) ? true : existing?.verifiedPaired
+                        verifiedPaired: blocked ? false : (isPaired || remembered || existing?.verifiedPaired == true)
                     )
                     self.discoveredDevices[dictKey] = updatedDevice
                     self.evaluateStatus()
                 }
             }
-            print("📶 NWBrowser: parsed \(discoveredCount) discoverable ADB service lines")
+            AppLogger.log("📶 [NWBrowser] parsed \(discoveredCount) discoverable ADB service lines")
         }
     }
     
@@ -1408,7 +1422,7 @@ struct WirelessConnectView: View {
 
         } else if let cPort = deviceObj?.connectPort,
                   !ADBPairingBrowser.needsRepairing.contains(deviceIP),
-                  deviceObj?.pairingPort == nil {
+                  (deviceObj?.pairingPort == nil || isAlreadyPaired) {
             // Show "Connect Wirelessly" only when the phone's pairing dialog is NOT open.
             // If pairingPort is set, fall through to the pairing form instead.
             VStack(spacing: 10) {
@@ -1429,7 +1443,7 @@ struct WirelessConnectView: View {
                     let selectedDeviceSnapshot = deviceObj
                     connectingDeviceKey = selectedKey
                     Task {
-                        let (success, _) = await deviceManager.connectWirelessly(
+                        let (success, message) = await deviceManager.connectWirelessly(
                             ip: deviceIP,
                             port: String(cPort),
                             hostname: selectedDeviceSnapshot?.hostname
@@ -1445,18 +1459,16 @@ struct WirelessConnectView: View {
                                 onConnected?()
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { dismiss() }
                             } else {
-                                // Mark as needing re-pairing and preserve the selected row even if
-                                // Bonjour briefly removes the service during the failed connect.
-                                ADBPairingBrowser.needsRepairing.insert(deviceIP)
-                                if var dev = pairingBrowser.discoveredDevices[selectedKey] ?? selectedDeviceSnapshot {
-                                    dev.verifiedPaired = false
+                                // Keep the selected row and its saved pairing for transient failures.
+                                if let dev = pairingBrowser.discoveredDevices[selectedKey] ?? selectedDeviceSnapshot {
                                     pairingBrowser.discoveredDevices[selectedKey] = dev
                                     selectedDeviceIP = selectedKey
                                     if let port = dev.pairingPort {
                                         visiblePairingPort = String(port)
                                     }
                                 }
-                                pairingBrowser.status = .failed("Connection refused. Open 'Pair device with pairing code' on the phone, then enter the pairing port and code.")
+                                pairingBrowser.recordConnectionResult(success: false, message: message,
+                                    deviceKey: selectedKey, ip: deviceIP)
                             }
                         }
                     }
@@ -2049,7 +2061,7 @@ struct WirelessConnectView: View {
             return
         }
         
-        print("📶 PairAutoDiscovery: device=\(device.ip) port=\(visiblePairingPort)")
+        AppLogger.log("📶 [PairAutoDiscovery] device=\(device.ip) port=\(visiblePairingPort)")
         deviceManager.cancelWirelessReconnectHunt()
         pairingDeviceKey = selectedDeviceIP
         pairingBrowser.pausePolling()
@@ -2069,7 +2081,7 @@ struct WirelessConnectView: View {
                 port: visiblePairingPort,
                 code: autoPairingCode
             )
-            print("📶 PairAutoDiscovery: pair \(pairSuccess ? "✅" : "❌") — \(pairMessage)")
+            AppLogger.log("📶 [PairAutoDiscovery] pair \(pairSuccess ? "✅" : "❌") — \(pairMessage)", level: pairSuccess ? .info : .warning)
             
             guard pairSuccess else {
                 await MainActor.run {
@@ -2080,6 +2092,7 @@ struct WirelessConnectView: View {
             
             await MainActor.run {
                 ADBPairingBrowser.needsRepairing.remove(device.ip)
+                pairingBrowser.discoveredDevices[selectedDeviceIP]?.verifiedPaired = true
             }
             
             // Build list of connect ports to try.
@@ -2094,7 +2107,7 @@ struct WirelessConnectView: View {
             }
             if device.hostname == nil, !fallbackPorts.contains("5555") { fallbackPorts.append("5555") }
             
-            print("📶 PairAutoDiscovery: connect ports=\(fallbackPorts)")
+            AppLogger.log("📶 [PairAutoDiscovery] connect ports=\(fallbackPorts)")
             
             for tryPort in fallbackPorts {
                 let (s, _) = await deviceManager.connectWirelessly(
@@ -2117,11 +2130,6 @@ struct WirelessConnectView: View {
             
             // Paired but connection failed on all ports.
             await MainActor.run {
-                ADBPairingBrowser.needsRepairing.insert(device.ip)
-                if var dev = pairingBrowser.discoveredDevices[selectedDeviceIP] {
-                    dev.verifiedPaired = false
-                    pairingBrowser.discoveredDevices[selectedDeviceIP] = dev
-                }
                 pairingBrowser.status = .failed("Paired, but connection could not be established. Verify the current connect port in Wireless Debugging and tap Connect.")
             }
         }

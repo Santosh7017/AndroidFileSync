@@ -30,6 +30,11 @@ struct AndroidFileSyncApp: App {
                 downloadManager: downloadManager,
                 uploadManager: uploadManager
             )
+            .onAppear {
+                appDelegate.deviceManager = deviceManager
+                appDelegate.downloadManager = downloadManager
+                appDelegate.uploadManager = uploadManager
+            }
         }
         .defaultSize(width: 1050, height: 660)
         .windowResizability(.contentMinSize)
@@ -43,6 +48,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let dropCoordinator = DropCoordinator()
     private let showQuitDebuggingReminderKey = "showQuitDebuggingReminder"
     private var localKeyMonitor: Any?
+    private var terminationTask: Task<Void, Never>?
+    private var terminationTimer: Timer?
+    private var isTerminationInProgress = false
+    private var hasRepliedToTermination = false
+    weak var deviceManager: DeviceManager?
+    weak var downloadManager: DownloadManager?
+    weak var uploadManager: UploadManager?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         let bundleID = Bundle.main.bundleIdentifier ?? "com.santosh.AndroidFileSync1"
@@ -80,51 +92,126 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        let shouldShowReminder = UserDefaults.standard.object(forKey: showQuitDebuggingReminderKey) as? Bool ?? true
-        guard shouldShowReminder else { return .terminateNow }
-
-        let alert = NSAlert()
-        alert.messageText = "Before quitting"
-        alert.informativeText = "If you don't need debugging right now, turn off Wireless debugging (or USB debugging) on your phone for better security and battery life."
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Quit")
-        alert.addButton(withTitle: "Cancel")
-        alert.showsSuppressionButton = true
-
-        let response = alert.runModal()
-        if alert.suppressionButton?.state == .on {
-            UserDefaults.standard.set(false, forKey: showQuitDebuggingReminderKey)
+        // AppKit is already waiting for the cleanup task to call
+        // reply(toApplicationShouldTerminate:). Do not start a second cleanup.
+        if isTerminationInProgress {
+            return .terminateLater
         }
 
-        return response == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+        let shouldShowReminder = UserDefaults.standard.object(forKey: showQuitDebuggingReminderKey) as? Bool ?? true
+        if shouldShowReminder {
+            let alert = NSAlert()
+            alert.messageText = "Before quitting"
+            alert.informativeText = "If you don't need debugging right now, turn off Wireless debugging (or USB debugging) on your phone for better security and battery life."
+            alert.alertStyle = .informational
+            alert.addButton(withTitle: "Quit")
+            alert.addButton(withTitle: "Cancel")
+            alert.showsSuppressionButton = true
+
+            let response = alert.runModal()
+            if alert.suppressionButton?.state == .on {
+                UserDefaults.standard.set(false, forKey: showQuitDebuggingReminderKey)
+            }
+
+            guard response == .alertFirstButtonReturn else {
+                return .terminateCancel
+            }
+        }
+
+        beginTerminationCleanup(for: sender)
+        return .terminateLater
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        removeLocalKeyMonitor()
+        terminationTimer?.invalidate()
+        terminationTimer = nil
+        terminationTask?.cancel()
+        terminationTask = nil
+    }
+
+    /// ADB can occasionally stop responding after an OS update or device/network
+    /// change. Cleanup therefore uses AppKit's asynchronous termination contract and
+    /// a short timeout, so Command-Q can never leave a windowless app in the Dock.
+    private func beginTerminationCleanup(for application: NSApplication) {
+        isTerminationInProgress = true
+        // Snapshot actor-isolated ADB state before entering AppKit's modal quit
+        // loop. Main-actor Tasks do not run in that loop on macOS 27.
+        let adbPath = ADBManager.getADBPath()
+        let wirelessTargets = ADBManager.appManagedWirelessCleanupTargets()
+        let disconnectAll = UserDefaults.standard.object(forKey: "disconnectAllWirelessOnQuit") as? Bool ?? true
+        removeLocalKeyMonitor()
+        AppProcessLifecycle.beginTermination()
+        deviceManager?.stopMonitoring()
+        WirelessDiscovery.shared.stop()
+        downloadManager?.cancelAllDownloads()
+        uploadManager?.cancelAllUploads()
+
+        let timer = Timer(timeInterval: 4.0, repeats: false) { [weak self, weak application] _ in
+            MainActor.assumeIsolated {
+                guard let application else { return }
+                self?.finishTermination(for: application, timedOut: true)
+            }
+        }
+        terminationTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        RunLoop.main.add(timer, forMode: .modalPanel)
+
+        let reply: @Sendable () -> Void = { [weak self, weak application] in
+            MainActor.assumeIsolated {
+                guard let application else { return }
+                self?.finishTermination(for: application)
+            }
+        }
+        terminationTask = Task.detached(priority: .utility) {
+            await Self.performADBTerminationCleanup(adbPath: adbPath, wirelessTargets: wirelessTargets,
+                                                     disconnectAll: disconnectAll)
+            // DispatchQueue.main and MainActor are suspended by the modal quit
+            // loop. Schedule the reply in its run-loop mode instead.
+            RunLoop.main.perform(inModes: [.common, .modalPanel], block: reply)
+            CFRunLoopWakeUp(CFRunLoopGetMain())
+        }
+    }
+
+    private func finishTermination(for application: NSApplication, timedOut: Bool = false) {
+        guard !hasRepliedToTermination else { return }
+        hasRepliedToTermination = true
+        terminationTimer?.invalidate()
+        terminationTimer = nil
+        if timedOut { terminationTask?.cancel() }
+        AppLogger.log(timedOut ? "⚠️ Quit cleanup exceeded its deadline; allowing application termination."
+                              : "👋 Quit cleanup finished; allowing application termination.")
+        application.reply(toApplicationShouldTerminate: true)
+    }
+
+    nonisolated private static func performADBTerminationCleanup(
+        adbPath: String, wirelessTargets: [String: Int], disconnectAll: Bool
+    ) async {
+        guard !adbPath.isEmpty else { return }
+
+        // App sessions may belong to either daemon; disconnect each on its owning port.
+        await withTaskGroup(of: Void.self) { group in
+            for (target, port) in wirelessTargets {
+                group.addTask {
+                    _ = await Shell.runAsyncWithTimeout(adbPath, args: ["disconnect", target], timeoutSeconds: 1.0,
+                        environment: Shell.serverEnvironment(port: port), allowDuringTermination: true)
+                }
+            }
+        }
+        if disconnectAll {
+            _ = await Shell.runAsyncWithTimeout(adbPath, args: ["disconnect"], timeoutSeconds: 1.0,
+                environment: Shell.adbEnvironment, allowDuringTermination: true)
+        }
+        // The private daemon is app-owned even when USB uses Android Studio's server.
+        _ = await Shell.runAsyncWithTimeout(adbPath, args: ["kill-server"], timeoutSeconds: 1.0,
+            environment: Shell.adbEnvironment, allowDuringTermination: true)
+    }
+
+    private func removeLocalKeyMonitor() {
         if let localKeyMonitor {
             NSEvent.removeMonitor(localKeyMonitor)
             self.localKeyMonitor = nil
         }
-        
-        let adbPath = ADBManager.getADBPath()
-        guard !adbPath.isEmpty else { return }
-
-        // Default behavior: ensure phone does not stay "wireless debugging connected"
-        // after app exit for single-app users.
-        // Advanced/shared-ADB users can opt out via UserDefaults flag.
-        let disconnectAllOnQuit = UserDefaults.standard.object(forKey: "disconnectAllWirelessOnQuit") as? Bool ?? true
-        if disconnectAllOnQuit {
-            _ = Shell.run(adbPath, args: ["disconnect"])
-        } else {
-            ADBManager.disconnectAppManagedWirelessSync()
-        }
-
-        // The app-owned server can otherwise outlive the UI process with a stale
-        // network route, making a reachable paired phone fail with EHOSTUNREACH on
-        // the next launch. Never kill the shared Android Studio server on port 5037.
-        if !Shell.useDefaultServer {
-            _ = Shell.run(adbPath, args: ["kill-server"])
-        }
-
     }
 
     private func installDeleteShortcutMonitor() {

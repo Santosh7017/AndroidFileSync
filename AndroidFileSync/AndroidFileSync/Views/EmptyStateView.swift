@@ -18,6 +18,9 @@ struct EmptyStateView: View {
     var isClaimingUSB: Bool = false
     var onClaimUSB: (() -> Void)? = nil
 
+    // Diagnostics
+    var diagnosticsControl: DiagnosticsControl? = nil
+
     var body: some View {
         VStack(spacing: 24) {
             // USB Occupied Warning Banner — shown at the top of the homepage
@@ -74,11 +77,11 @@ struct EmptyStateView: View {
                     
                     if let onWiFi = onConnectWiFi {
                         Button(action: onWiFi) {
-                            Label("Connect via WiFi", systemImage: "wifi")
+                            Label("Connection Settings", systemImage: "gearshape")
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.large)
-                        .accessibilityLabel("Connect via WiFi")
+                        .accessibilityLabel("Connection Settings")
                     }
                 }
                 .padding(.top, 8)
@@ -89,6 +92,9 @@ struct EmptyStateView: View {
                     .foregroundColor(.secondary)
                     .padding(.top, 4)
             }
+
+            // Connection Settings + Report Issue section (always visible)
+            bottomActionsSection
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .id("empty_state_view_\(isDetecting)")
@@ -147,6 +153,41 @@ struct EmptyStateView: View {
         )
     }
 
+    // MARK: - Connection Settings & Report Issue
+
+    @ViewBuilder
+    private var bottomActionsSection: some View {
+        VStack(spacing: 16) {
+            HStack(spacing: 20) {
+                // Connection Settings button — only in scanning state
+                // (in the not-detecting state, the main action button already shows this)
+                if isDetecting, let onWiFi = onConnectWiFi {
+                    Button(action: onWiFi) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "gearshape.fill")
+                                .font(.subheadline)
+                            Text("Connection Settings")
+                                .font(.subheadline.weight(.medium))
+                        }
+                        .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Open connection settings")
+                }
+
+                // Report an Issue button (popover)
+                if let diag = diagnosticsControl {
+                    reportIssueButton(diagnosticsControl: diag)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func reportIssueButton(diagnosticsControl: DiagnosticsControl) -> some View {
+        ReportIssueInlineView(diagnosticsControl: diagnosticsControl)
+    }
+
     private var instructionsList: some View {
         VStack(alignment: .leading, spacing: 12) {
             instructionRow(number: 1, text: "Enable 'USB Debugging' in Developer Options", icon: "ant.fill")
@@ -176,6 +217,34 @@ struct EmptyStateView: View {
             Text(text)
                 .font(.subheadline)
                 .foregroundColor(.primary)
+        }
+    }
+}
+
+// MARK: - Inline Report Issue View for Empty State
+
+private struct ReportIssueInlineView: View {
+    @ObservedObject var diagnosticsControl: DiagnosticsControl
+    @State private var showPopover = false
+
+    private let githubIssueURL = URL(string: "https://github.com/Santosh7017/AndroidFileSync/issues/new")!
+
+    var body: some View {
+        Button {
+            showPopover.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.bubble.fill")
+                    .font(.subheadline)
+                Text("Report an Issue")
+                    .font(.subheadline.weight(.medium))
+            }
+            .foregroundColor(.secondary)
+        }
+        .buttonStyle(.plain)
+        .help("Report an issue or enable diagnostic logs")
+        .popover(isPresented: $showPopover, arrowEdge: .bottom) {
+            ReportIssuePopoverView(diagnosticsControl: diagnosticsControl)
         }
     }
 }

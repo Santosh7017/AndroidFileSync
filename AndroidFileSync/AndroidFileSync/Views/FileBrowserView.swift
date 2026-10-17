@@ -6,7 +6,28 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-struct FileBrowserView: View, Equatable {
+// MARK: - View Mode
+
+enum FileBrowserViewMode: String, CaseIterable {
+    case list = "list"
+    case tiles = "tiles"
+
+    var icon: String {
+        switch self {
+        case .list:  return "list.bullet"
+        case .tiles: return "square.grid.2x2"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .list:  return "List"
+        case .tiles: return "Tiles"
+        }
+    }
+}
+
+struct FileBrowserView: View {
     let files: [UnifiedFile]
     let currentPath: String
     let isLoading: Bool
@@ -49,7 +70,7 @@ struct FileBrowserView: View, Equatable {
     var sortOption: ActionToolbar.SortOption = .name
     var sortAscending: Bool = true
     /// Monotonically increasing counter — incremented every time ContentView re-sorts.
-    /// Guarantees the Equatable detects order changes even when first/last IDs happen to be the same.
+    /// Rebuilds the native table when the displayed order changes.
     var sortVersion: Int = 0
     var onSortChange: ((ActionToolbar.SortOption, Bool) -> Void)? = nil
     
@@ -66,33 +87,11 @@ struct FileBrowserView: View, Equatable {
     
     // Thumbnail provider for inline file thumbnails
     var thumbnailProvider: ThumbnailProvider? = nil
+    var isInteractionEnabled: Bool = true
     
-    // Equatable — compare data that affects rendering.
-    // sortVersion detects user-initiated sort changes.
-    // File boundary checks detect metadata enrichment and navigation changes.
-    static func == (lhs: FileBrowserView, rhs: FileBrowserView) -> Bool {
-        lhs.files.count == rhs.files.count &&
-        lhs.sortVersion == rhs.sortVersion &&
-        lhs.files.first?.id == rhs.files.first?.id &&
-        lhs.files.last?.id == rhs.files.last?.id &&
-        lhs.files.first?.size == rhs.files.first?.size &&
-        lhs.currentPath == rhs.currentPath &&
-        lhs.isLoading == rhs.isLoading &&
-        lhs.canGoBack == rhs.canGoBack &&
-        lhs.selectedFiles == rhs.selectedFiles &&
-        lhs.isPerformingAction == rhs.isPerformingAction &&
-        lhs.currentActionText == rhs.currentActionText &&
-        lhs.sortOption == rhs.sortOption &&
-        lhs.sortAscending == rhs.sortAscending &&
-        lhs.folderSizes.count == rhs.folderSizes.count &&
-        lhs.isLoadingMetadata == rhs.isLoadingMetadata &&
-        lhs.metadataLoadedCount == rhs.metadataLoadedCount &&
-        lhs.isLoadingMoreFiles == rhs.isLoadingMoreFiles &&
-        lhs.clipboardCount == rhs.clipboardCount &&
-        lhs.clipboardOperation == rhs.clipboardOperation &&
-        lhs.activeDeletions == rhs.activeDeletions
-    }
-    
+    // View mode toggle (list vs tiles)
+    @AppStorage("fileBrowserViewMode") private var viewMode: FileBrowserViewMode = .list
+
     // Guard against re-entrant sort loop:
     // Column header click → onChange(sortOrder) → onSortChange → ContentView updates displayedFiles
     // → Table re-renders → could trigger onChange(sortOrder) again.
@@ -121,6 +120,9 @@ struct FileBrowserView: View, Equatable {
     
     // Drag-and-drop visual feedback
     @State private var isDraggingOver = false
+    @State private var selectionNavigator = FileSelectionNavigator()
+    @State private var gridItemFrames: [String: CGRect] = [:]
+    @State private var marqueeRectangle: CGRect?
     
     // Delete confirmation state
     @State private var showDeleteConfirmation = false
@@ -151,6 +153,9 @@ struct FileBrowserView: View, Equatable {
                     onPermanentDelete: onPermanentDelete
                 )
             }
+        }
+        .onChange(of: currentPath) { _ in
+            selectionNavigator = FileSelectionNavigator()
         }
         .alert("Move \(fileToDelete?.name ?? "item") to Trash?", isPresented: $showDeleteConfirmation) {
             Button("Cancel", role: .cancel) {
@@ -224,10 +229,10 @@ struct FileBrowserView: View, Equatable {
             
             // Item count
             if isLoading {
-                ProgressView().controlSize(.small)
+                LoadingSpinner()
             } else if isLoadingMoreFiles {
                 HStack(spacing: 4) {
-                    ProgressView().controlSize(.small)
+                    LoadingSpinner()
                     Text("\(files.count) items")
                         .font(.system(size: 13))
                         .foregroundColor(.secondary)
@@ -235,7 +240,7 @@ struct FileBrowserView: View, Equatable {
                 .help("Loading more files from MediaStore...")
             } else if isLoadingMetadata {
                 HStack(spacing: 4) {
-                    ProgressView().controlSize(.small)
+                    LoadingSpinner()
                     Text("\(metadataLoadedCount)/\(metadataTotalCount)")
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundColor(.secondary)
@@ -247,9 +252,16 @@ struct FileBrowserView: View, Equatable {
                     .foregroundColor(.secondary)
                     .fixedSize()
             }
+
+            selectionMenu
             
             Divider().frame(height: 16).padding(.horizontal, 10)
             
+            // View mode toggle — List / Tiles
+            viewModeToggle
+
+            Divider().frame(height: 16).padding(.horizontal, 4)
+
             // Upload button — accent-tinted, non-intrusive Apple style
             Button(action: showUploadDialog) {
                 Label("Upload to Android", systemImage: "arrow.up.circle")
@@ -337,9 +349,7 @@ struct FileBrowserView: View, Equatable {
     @ViewBuilder
     private var statusIndicator: some View {
         if isLoading {
-            ProgressView()
-                .scaleEffect(0.7)
-                .frame(width: 16, height: 16)
+            LoadingSpinner()
         } else {
             Text("\(files.count) items")
                 .font(.caption)
@@ -364,10 +374,7 @@ struct FileBrowserView: View, Equatable {
     private var inlineActionStatus: some View {
         HStack(spacing: 6) {
             if isPerformingAction {
-                ProgressView()
-                    .tint(inlineActionAccentColor)
-                    .scaleEffect(0.55)
-                    .frame(width: 12, height: 12)
+                LoadingSpinner(size: 12, color: inlineActionAccentColor)
                 Text(currentActionText)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(inlineActionAccentColor.opacity(0.85))
@@ -458,9 +465,7 @@ struct FileBrowserView: View, Equatable {
                                 Spacer()
                                 
                                 if deletion.isRunning {
-                                    ProgressView()
-                                        .scaleEffect(0.5)
-                                        .frame(width: 10, height: 10)
+                                    LoadingSpinner(size: 10)
                                 } else {
                                     Text("Pending")
                                         .font(.system(size: 9))
@@ -543,13 +548,82 @@ struct FileBrowserView: View, Equatable {
         }
     }
     
+    // MARK: - View Mode Toggle
+
+    private var allFilesSelected: Bool {
+        !files.isEmpty && files.allSatisfy { selectedFiles.contains($0.id) }
+    }
+
+    private var selectionMenu: some View {
+        Menu {
+            Button {
+                selectedFiles = Set(files.map(\.id))
+            } label: {
+                Label("Select All", systemImage: "checkmark.circle")
+            }
+            .disabled(files.isEmpty || allFilesSelected)
+
+            Button {
+                selectedFiles.removeAll()
+            } label: {
+                Label("Deselect All", systemImage: "xmark.circle")
+            }
+            .disabled(selectedFiles.isEmpty)
+        } label: {
+            Image(systemName: selectedFiles.isEmpty ? "checkmark.circle" : "checkmark.circle.fill")
+                .font(.system(size: 13))
+                .foregroundStyle(selectedFiles.isEmpty ? Color.secondary : Color.accentColor)
+                .frame(width: 24, height: 22)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Selection options")
+        .accessibilityLabel("Selection options")
+    }
+
+    private var viewModeToggle: some View {
+        HStack(spacing: 2) {
+            ForEach(FileBrowserViewMode.allCases, id: \.self) { mode in
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        viewMode = mode
+                    }
+                } label: {
+                    Image(systemName: mode.icon)
+                        .font(.system(size: 12, weight: viewMode == mode ? .semibold : .regular))
+                        .foregroundColor(viewMode == mode ? .accentColor : .secondary)
+                        .frame(width: 26, height: 22)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5)
+                                .fill(viewMode == mode ? Color.accentColor.opacity(0.12) : Color.clear)
+                        )
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(mode.label)
+                .accessibilityLabel("\(mode.label) view")
+                .accessibilityValue(viewMode == mode ? "Selected" : "")
+            }
+        }
+        .padding(2)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color(NSColor.controlBackgroundColor))
+        )
+    }
+
     @ViewBuilder
     private var fileListOrEmptyState: some View {
         ZStack {
             if files.isEmpty && !isLoading {
                 emptyFolderView
             } else {
-                fileList
+                switch viewMode {
+                case .list:
+                    fileList
+                case .tiles:
+                    fileGridView
+                }
             }
 
             if isDraggingOver {
@@ -582,12 +656,13 @@ struct FileBrowserView: View, Equatable {
             }
             return true
         }
+        .background(Color(nsColor: .textBackgroundColor))
     }
     
     private func handleDeleteShortcut() {
         let items = files.filter { selectedFiles.contains($0.id) }
         guard !items.isEmpty else { return }
-        
+
         if items.count == 1 {
             fileToDelete = items.first
             showDeleteConfirmation = true
@@ -596,7 +671,83 @@ struct FileBrowserView: View, Equatable {
             showBatchDeleteConfirmation = true
         }
     }
-    
+
+    private func handleClick(_ index: Int?, modifiers: NSEvent.ModifierFlags) {
+        guard let index, files.indices.contains(index) else {
+            if modifiers.intersection([.command, .shift]).isEmpty {
+                selectedFiles.removeAll()
+                selectionNavigator = FileSelectionNavigator()
+            }
+            return
+        }
+        selectedFiles = selectionNavigator.select(
+            files[index].id, in: files.map(\.id), selection: selectedFiles,
+            extending: modifiers.contains(.shift), toggling: modifiers.contains(.command)
+        )
+    }
+
+    private func handleOpen(_ index: Int) {
+        guard files.indices.contains(index) else { return }
+        let file = files[index]
+        if file.isDirectory { onNavigate(file.path) }
+        else if FilePreviewManager.isPreviewable(file) { onPreview?(file) }
+        else { onDownload(file) }
+    }
+
+    private func handleMarquee(_ indexes: Set<Int>, anchor: Int?, focus: Int?) {
+        selectedFiles = Set(indexes.filter { files.indices.contains($0) }.map { files[$0].id })
+        selectionNavigator.setMarqueeSelection(
+            selectedFiles,
+            anchorID: anchor.flatMap { files.indices.contains($0) ? files[$0].id : nil },
+            focusedID: focus.flatMap { files.indices.contains($0) ? files[$0].id : nil }
+        )
+    }
+
+    private func keyboardNavigation(isGrid: Bool, columns: Int = 1,
+                                    frames: [String: CGRect] = [:], selectedIDs: Set<String>? = nil,
+                                    scrollTo: ((String) -> Void)? = nil) -> some View {
+        let selection = selectedIDs ?? selectedFiles
+        return FileBrowserKeyboardNavigation(isGrid: isGrid, onMove: { direction, flags in
+            let index = handleSelectionMove(direction, modifiers: flags, columns: columns)
+            if let index { scrollTo?(files[index].id) }
+            return index
+        }, itemFrames: Dictionary(uniqueKeysWithValues: files.enumerated().compactMap { index, file in
+            frames[file.id].map { (index, $0) }
+        }), selectedIndexes: Set(files.indices.filter { selection.contains(files[$0].id) }),
+            isEnabled: isInteractionEnabled, onClick: handleClick, onOpen: handleOpen,
+            onDrag: handleMarquee, onMarqueeChange: { marqueeRectangle = $0 })
+    }
+
+    @ViewBuilder
+    private var marqueeOverlay: some View {
+        if let rectangle = marqueeRectangle {
+            Rectangle()
+                .fill(Color.accentColor.opacity(0.12))
+                .overlay(Rectangle().stroke(Color.accentColor.opacity(0.75), lineWidth: 1))
+                .frame(width: rectangle.width, height: rectangle.height)
+                .offset(x: rectangle.minX, y: rectangle.minY)
+                .allowsHitTesting(false)
+        }
+    }
+
+    @discardableResult
+    private func handleSelectionMove(_ direction: MoveCommandDirection,
+                                     modifiers: NSEvent.ModifierFlags, columns: Int = 1) -> Int? {
+        let offset: Int
+        switch direction {
+        case .up: offset = -columns
+        case .down: offset = columns
+        case .left where viewMode == .tiles: offset = -1
+        case .right where viewMode == .tiles: offset = 1
+        default: return nil
+        }
+        selectedFiles = selectionNavigator.move(
+            by: offset, in: files.map(\.id), selection: selectedFiles,
+            extending: modifiers.contains(.shift)
+        )
+        return files.firstIndex { $0.id == selectionNavigator.focusedID }
+    }
+
     private var emptyFolderView: some View {
         VStack(spacing: 16) {
             Image(systemName: isDraggingOver ? "arrow.down.doc.fill" : "doc.text.magnifyingglass")
@@ -622,6 +773,53 @@ struct FileBrowserView: View, Equatable {
         return formatter
     }()
 
+    // MARK: - Grid / Tiles View
+
+    private var fileGridView: some View {
+        let frames = gridItemFrames
+        let selection = selectedFiles
+        let columns = [GridItem(.adaptive(minimum: 98, maximum: 126), spacing: 10)]
+
+        return GeometryReader { geometry in
+            let columnCount = max(1, Int((geometry.size.width - 32 + 10) / (98 + 10)))
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
+                        ForEach(files) { file in
+                            FileTileView(
+                                file: file,
+                                isSelected: selectedFiles.contains(file.id),
+                                thumbnailProvider: thumbnailProvider,
+                                fallbackIcon: getFileIcon(for: file),
+                                fallbackColor: getFileColor(for: file),
+                                detailText: tileDetailText(for: file)
+                            )
+                            .background(
+                                GeometryReader { itemGeometry in
+                                    Color.clear.preference(key: FileBrowserItemFrames.self, value: [
+                                        file.id: itemGeometry.frame(in: .named("fileBrowserGrid"))
+                                    ])
+                                }
+                            )
+                            .contextMenu {
+                                fileContextMenu(for: file)
+                            }
+                            .id(file.id)
+                        }
+                    }
+                    .padding(16)
+                }
+                .scrollContentBackground(.hidden)
+                .coordinateSpace(name: "fileBrowserGrid")
+                .onPreferenceChange(FileBrowserItemFrames.self) { gridItemFrames = $0 }
+                .background(
+                    keyboardNavigation(isGrid: true, columns: columnCount, frames: frames, selectedIDs: selection, scrollTo: { proxy.scrollTo($0) })
+                )
+                .overlay(alignment: .topLeading) { marqueeOverlay }
+            }
+        }
+    }
+
     private var fileList: some View {
         Table(files, selection: $selectedFiles, sortOrder: $sortOrder) {
             TableColumn("Name", value: \.name) { file in
@@ -633,13 +831,18 @@ struct FileBrowserView: View, Equatable {
                             fallbackIcon: getFileIcon(for: file),
                             fallbackColor: getFileColor(for: file)
                         )
-                        .frame(width: 22, height: 22)
+                        .frame(width: 26, height: 26)
+                    } else if file.isDirectory {
+                        CategorizedFolderIcon(folderName: file.name, size: 26)
                     } else {
                         Image(systemName: getFileIcon(for: file))
+                            .symbolRenderingMode(.hierarchical)
                             .foregroundStyle(getFileColor(for: file))
-                            .frame(width: 18)
+                            .font(.system(size: 15))
+                            .frame(width: 26, height: 26)
                     }
                     Text(file.name)
+                        .font(.system(size: 13))
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -657,14 +860,16 @@ struct FileBrowserView: View, Equatable {
             
             TableColumn("Type", value: \.sortableType) { file in
                 Text(file.isDirectory ? "Folder" : getFileType(for: file))
-                    .font(.callout)
+                    .font(.system(size: 12))
                     .foregroundColor(.secondary)
             }
             // No .width() — fills remaining space, eliminates trailing column separator
         }
         .id(sortVersion) // Force Table rebuild when sort changes — SwiftUI Table won't re-order rows otherwise
-        .tableStyle(.inset)
+        .tableStyle(InsetTableStyle(alternatesRowBackgrounds: true))
         .scrollContentBackground(.hidden)
+        .background(keyboardNavigation(isGrid: false))
+        .overlay(alignment: .topLeading) { marqueeOverlay }
         .onAppear {
             // Sync sortOrder when Table is (re)created by .id(sortVersion)
             isSyncingSortOrder = true
@@ -801,12 +1006,24 @@ struct FileBrowserView: View, Equatable {
     
     @ViewBuilder
     private func fileContextMenu(for file: UnifiedFile) -> some View {
-        let selectedItems = files.filter { selectedFiles.contains($0.id) }
-        let isSingleSelection = selectedFiles.count <= 1
+        // A secondary-click on an unselected tile targets that tile, rather
+        // than accidentally applying actions to a previous selection.
+        let targetIDs: Set<String> = selectedFiles.contains(file.id) ? selectedFiles : [file.id]
+        let selectedItems = files.filter { targetIDs.contains($0.id) }
+        let isSingleSelection = targetIDs.count == 1
         let hasOnlyFiles = !selectedItems.isEmpty && selectedItems.allSatisfy { !$0.isDirectory }
+
+        if isSingleSelection && !file.isDirectory && FilePreviewManager.isPreviewable(file) {
+            Button {
+                onPreview?(file)
+            } label: {
+                Label("Preview", systemImage: "eye")
+            }
+            Divider()
+        }
         
-        // Download - show for files
-        if !file.isDirectory {
+        // Batch download remains available for a mixed selection.
+        if !file.isDirectory || !isSingleSelection {
             Button(isSingleSelection ? "Download to Mac" : "Download Selected to Mac") {
                 if isSingleSelection {
                     onDownload(file)
@@ -824,17 +1041,23 @@ struct FileBrowserView: View, Equatable {
             } label: {
                 Label("Download Folder to Mac", systemImage: "folder.badge.gearshape")
             }
+
+            Button {
+                onAddToSidebar?(file)
+            } label: {
+                Label("Add to Sidebar", systemImage: "sidebar.left")
+            }
             Divider()
         }
         
         // Copy
-        Button(isSingleSelection ? "Copy" : "Copy \(selectedFiles.count) items") {
+        Button(isSingleSelection ? "Copy" : "Copy \(targetIDs.count) items") {
             let items = isSingleSelection ? [file] : selectedItems
             onCopy?(items)
         }
         
         // Cut
-        Button(isSingleSelection ? "Cut" : "Cut \(selectedFiles.count) items") {
+        Button(isSingleSelection ? "Cut" : "Cut \(targetIDs.count) items") {
             let items = isSingleSelection ? [file] : selectedItems
             onCut?(items)
         }
@@ -859,7 +1082,7 @@ struct FileBrowserView: View, Equatable {
         }
         
         // Change Extension - only for multiple files (no folders)
-        if selectedFiles.count > 1 && hasOnlyFiles {
+        if targetIDs.count > 1 && hasOnlyFiles {
             Button("Change Extension...") {
                 showExtensionDialog = true
             }
@@ -867,12 +1090,12 @@ struct FileBrowserView: View, Equatable {
         }
         
         // Move to Trash - always available
-        Button(isSingleSelection ? "Move to Trash" : "Move \(selectedFiles.count) items to Trash", role: .destructive) {
+        Button(isSingleSelection ? "Move to Trash" : "Move \(targetIDs.count) items to Trash", role: .destructive) {
             if isSingleSelection {
                 fileToDelete = file
                 showDeleteConfirmation = true
             } else {
-                batchDeleteCount = selectedFiles.count
+                batchDeleteCount = targetIDs.count
                 showBatchDeleteConfirmation = true
             }
         }
@@ -971,6 +1194,20 @@ struct FileBrowserView: View, Equatable {
         if ext.isEmpty { return "File" }
         return ext.uppercased()
     }
+
+    private func tileDetailText(for file: UnifiedFile) -> String {
+        if file.isDirectory {
+            if let size = folderSizes[file.path] {
+                return "Folder · \(formatBytes(size))"
+            }
+            return "Folder"
+        }
+
+        if file.size == 0 && file.modificationDate == nil {
+            return getFileType(for: file)
+        }
+        return "\(getFileType(for: file)) · \(formatBytes(file.size))"
+    }
     
     private var dropOverlay: some View {
         RoundedRectangle(cornerRadius: 12)
@@ -996,6 +1233,26 @@ struct FileBrowserView: View, Equatable {
     }
 }
 // MARK: - Window Drag Area
+/// Fixed dimensions avoid the AppKit progress host's fractional constraints on macOS 27.
+struct LoadingSpinner: View {
+    var size: CGFloat = 16
+    var color: Color = .secondary
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var spinning = false
+
+    var body: some View {
+        Circle()
+            .trim(from: 0, to: 0.72)
+            .stroke(color, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+            .frame(width: size, height: size)
+            .rotationEffect(.degrees(spinning ? 360 : 0))
+            .animation(reduceMotion ? nil : .linear(duration: 0.8).repeatForever(autoreverses: false), value: spinning)
+            .onAppear { spinning = true }
+            .onDisappear { spinning = false }
+            .accessibilityLabel("Loading")
+    }
+}
+
 // Allows dragging the app window from the path bar (like the title bar)
 private struct WindowDragArea: NSViewRepresentable {
     func makeNSView(context: Context) -> DraggableNSView { DraggableNSView() }

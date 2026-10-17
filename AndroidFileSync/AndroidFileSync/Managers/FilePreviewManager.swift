@@ -693,12 +693,3 @@ class FilePreviewManager: ObservableObject {
         try? FileManager.default.removeItem(at: tempDir)
     }
 }
-
-// MARK: - UnifiedFile Path Extension Helper
-
-extension UnifiedFile {
-    /// Lowercase file extension, computed once per access
-    var pathExtension: String {
-        (name as NSString).pathExtension.lowercased()
-    }
-}

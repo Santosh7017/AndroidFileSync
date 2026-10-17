@@ -66,7 +66,19 @@ playground.xcworkspace
 *.tmp
 *~
 
-# Project-specific
-AndroidFileSync/remove_bg.swift
 .continue/agents/new-config.yaml
 .codegraph
+
+
+# Project-specific & Local Test Suites
+AndroidFileSync/remove_bg.swift
+AndroidFileSync/ConnectionTests/
+AndroidFileSync/SelectionTests/
+
+# Python & Test Runner Artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Temp directories
+.tmp/
