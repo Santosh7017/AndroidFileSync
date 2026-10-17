@@ -5,7 +5,7 @@ A free, native macOS app to transfer files between your Mac and Android phone �
 No cloud. No Google account needed. Plug in via USB or connect wirelessly over WiFi.
 
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-macOS%2013%2B-blue)
-![Version](https://img.shields.io/badge/version-2.3.2-green)
+![Version](https://img.shields.io/badge/version-2.3.3--beta.2-green)
 
 **[🌐 Project Website](https://santosh7017.github.io/AndroidFileSync/) • [📥 Download Latest Version](#installation) • [🖼️ View Previews](#preview) • [⌨️ Keyboard Shortcuts](#keyboard-shortcuts) • [❓ Troubleshooting](#troubleshooting) • [⚖️ License & Legal](#license-legal)**
 
@@ -244,7 +244,7 @@ AndroidFileSync supports familiar Finder-like keyboard shortcuts for fast, mouse
 
 ## 📊 How It Compares
 
-| Feature                    | **AndroidFileSync** (v2.3.2)           | **OpenMTP**                           | **MacDroid**                                   | **Blip**                           |
+| Feature                    | **AndroidFileSync** (v2.3.3-beta.2)    | **OpenMTP**                           | **MacDroid**                                   | **Blip**                           |
 | :------------------------- | :------------------------------------- | :------------------------------------ | :--------------------------------------------- | :--------------------------------- |
 | **Cost & License**         | 🆓 **100% Free & Open Source**         | Free & Open Source                    | Paid Subscription ($19.99/yr for write access) | Free (Closed Source)               |
 | **macOS Integration**      | 🍎 **Native SwiftUI** (Lightweight)    | Electron (Heavy, non-native)          | Native drive mount (Uses system extensions)    | Electron                           |
