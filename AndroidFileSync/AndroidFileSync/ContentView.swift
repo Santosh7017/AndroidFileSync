@@ -72,7 +72,7 @@ struct ContentView: View {
     
     // Trash view state
     @State private var showTrashView = false
-    @State private var showWirelessConnect = false
+    @State private var wirelessDestination: WirelessConnectView.PairingTab?
 
     // USB Occupied (Claim USB) state — shown on homepage
     @State private var isUSBOccupied = false
@@ -309,7 +309,7 @@ struct ContentView: View {
                 
                 // Manual retry button — opens wireless connect view
                 Button {
-                    showWirelessConnect = true
+                    wirelessDestination = .qrCode
                 } label: {
                     Text("Connect")
                         .font(.system(size: 11, weight: .medium))
@@ -431,13 +431,14 @@ struct ContentView: View {
                 })
                     .frame(width: 450, height: 400)
             }
-            .sheet(isPresented: $showWirelessConnect) {
+            .sheet(item: $wirelessDestination) { destination in
                 WirelessConnectView(deviceManager: deviceManager, onConnected: {
                     Task {
                         currentPath = await deviceManager.getRealStoragePath()
                         await loadFiles()
                     }
-                })
+                }, initialTab: destination)
+                .id(destination)
             }
             .background(
                 Group {
@@ -691,14 +692,29 @@ struct ContentView: View {
                     reconnectionBanner
                 }
             } else {
-                let showCustomMessage = !deviceManager.isDetecting && !deviceManager.availableDevices.isEmpty
                 EmptyStateView(
                     isDetecting: deviceManager.isDetecting,
-                    customMessage: showCustomMessage ? deviceManager.statusMessage : nil,
+                    isCheckingDevices: deviceManager.isDetectionInProgress,
+                    isSearchingWireless: deviceManager.isWirelessReconnectHuntActive,
+                    scanStartedAt: deviceManager.connectionScanStartedAt,
+                    scanTimeout: deviceManager.connectionScanTimeout,
+                    scanTimedOut: deviceManager.connectionScanTimedOut,
+                    lastCheckedAt: deviceManager.lastDetectionDate,
+                    recognizedWirelessDevices: deviceManager.recognizedWirelessDevices,
+                    isRefreshingRecognizedDevices: deviceManager.isRefreshingRecognizedDevices,
+                    lastRecognizedRefreshDate: deviceManager.lastRecognizedRefreshDate,
+                    recognizedRefreshError: deviceManager.recognizedRefreshError,
+                    userDisconnected: deviceManager.userDisconnected,
+                    unavailableDevice: deviceManager.availableDevices.first { $0.status != "device" },
                     onRetry: {
                         Task { await deviceManager.retryDeviceDetection() }
                     },
-                    onConnectWiFi: { showWirelessConnect = true },
+                    onConnectWiFi: { tab in
+                        wirelessDestination = tab
+                    },
+                    onRefreshRecognizedDevices: {
+                        Task { await deviceManager.refreshRecognizedWirelessDevices() }
+                    },
                     isUSBOccupied: isUSBOccupied,
                     isClaimingUSB: isClaimingUSB,
                     onClaimUSB: {
@@ -844,8 +860,11 @@ struct ContentView: View {
         .task { await initializeDevice() }
         .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
             if !deviceManager.isConnected,
-               !deviceManager.isDetecting,
-               !deviceManager.isWirelessReconnectHuntActive {
+               !deviceManager.isDetectionInProgress,
+               !deviceManager.isWirelessReconnectHuntActive,
+               !deviceManager.isRefreshingRecognizedDevices,
+               !ADBPairingBrowser.isPairingActive,
+               !ADBManager.isPairingInProgress {
                 Task {
                     await deviceManager.detectDevice()
                     // Refresh USB occupied status on the homepage
@@ -1049,7 +1068,7 @@ struct ContentView: View {
                     .keyboardShortcut("r", modifiers: .command)
 
                     // Connection button — icon reflects current connection type
-                    Button { showWirelessConnect = true } label: {
+                    Button { wirelessDestination = .qrCode } label: {
                         if deviceManager.connectionType == .wireless {
                             Label("WiFi", systemImage: "wifi")
                                 .foregroundColor(.green)
@@ -1324,7 +1343,7 @@ struct ContentView: View {
         // NOTE: The earlier USB cold-start polling loop (10×0.3s) was removed because:
         //  1. detectDevice() itself calls recoverPrivateUSBTransportIfNeeded() on cold-start.
         //  2. DeviceManager's wirelessHuntTask handles wireless retry in the background.
-        //  3. The 2-second Timer in layoutContent re-calls detectDevice() automatically.
+        //  3. The 5-second timer re-calls detectDevice() automatically.
         //  All three together give fast re-detection without the 3-second stall.
     }
 

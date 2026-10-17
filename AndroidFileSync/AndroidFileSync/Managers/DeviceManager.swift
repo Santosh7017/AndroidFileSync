@@ -14,6 +14,15 @@ class DeviceManager: ObservableObject {
     @Published var connectionType: ConnectionType = .none
     @Published var deviceName = "No Device"
     @Published var statusMessage = "Scanning for devices..."
+    /// Connection dashboard feedback, driven by completed queries and live Bonjour results.
+    @Published private(set) var lastDetectionDate: Date?
+    @Published private(set) var connectionScanStartedAt: Date?
+    @Published private(set) var connectionScanTimedOut = false
+    let connectionScanTimeout: TimeInterval
+    @Published private(set) var recognizedWirelessDevices: [RecognizedWirelessDevice] = []
+    @Published private(set) var isRefreshingRecognizedDevices = false
+    @Published private(set) var lastRecognizedRefreshDate: Date?
+    @Published private(set) var recognizedRefreshError: String?
     @Published var lastWirelessIP = ""
     /// All currently connected ADB devices (USB + wireless)
     @Published var availableDevices: [ADBManager.ConnectedDevice] = []
@@ -60,8 +69,10 @@ class DeviceManager: ObservableObject {
     /// True when the background device diagnostics task has completed
     @Published var diagnosticsComplete = false
     /// Prevent overlapping detection runs that can flood ADB and mDNS queries.
-    private var isDetectionInProgress = false
+    @Published private(set) var isDetectionInProgress = false
     private var detectionGeneration = UUID()
+    private var detectionTask: Task<Void, Never>?
+    private var detectionTaskID = UUID()
     private var pendingDetection = false
     private var pendingDetectionShowsProgress = false
     /// A short window after a physical USB event where a newly listed ADB USB
@@ -70,7 +81,7 @@ class DeviceManager: ObservableObject {
     /// Rate-limit default-server USB ownership recovery during normal detection.
     private var lastUSBTransportRecoveryAt: Date? = nil
     /// Single in-flight wireless hunt task to avoid spawning one per detect cycle.
-    private var wirelessHuntTask: Task<Void, Never>? = nil
+    @Published private var wirelessHuntTask: Task<Void, Never>? = nil
     private var wirelessHuntID = UUID()
     private var prewarmedSerials = Set<String>()
     private var pendingUSBEvent = false
@@ -97,9 +108,12 @@ class DeviceManager: ObservableObject {
             ? discoveredWirelessEndpoints.filter { WirelessDiscovery.shared.acceptsSnapshot($0) } : []
     }
     private var passiveDiscoveryTask: Task<Void, Never>?
+    private var recognizedRefreshTask: Task<Void, Never>?
     private var lastPassiveDiscoveryAt = Date.distantPast
     /// Cache last liveness check timestamp per wireless serial to prevent spamming adb shell commands.
     private var lastLivenessCheckAt: [String: Date] = [:]
+    private var connectionScanTask: Task<Void, Never>?
+    private var connectionScanID = UUID()
     private var autoClaimUSB: Bool {
         UserDefaults.standard.bool(forKey: "autoClaimUSB")
     }
@@ -109,11 +123,119 @@ class DeviceManager: ObservableObject {
         case usb = "USB"
         case wireless = "WiFi"
     }
+
+    init(connectionScanTimeout: TimeInterval = 20) {
+        self.connectionScanTimeout = connectionScanTimeout
+        beginConnectionScan()
+    }
+
+    /// One deadline for the entire foreground scan, including queued USB queries
+    /// and wireless recovery. Background events must never extend this window.
+    private func beginConnectionScan() {
+        guard connectionScanStartedAt == nil else { return }
+        let id = UUID()
+        connectionScanID = id
+        connectionScanStartedAt = Date()
+        connectionScanTimedOut = false
+        isDetecting = true
+        statusMessage = "Scanning for devices..."
+        let timeout = connectionScanTimeout
+        connectionScanTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(timeout)) }
+            catch { return }
+            guard let self, self.connectionScanID == id else { return }
+            self.cancelWirelessReconnectHunt()
+            self.detectionTask?.cancel()
+            self.detectionTask = nil
+            self.detectionTaskID = UUID()
+            self.isDetectionInProgress = false
+            self.pendingDetection = false
+            self.pendingDetectionShowsProgress = false
+            self.connectionScanTimedOut = true
+            self.statusMessage = "No device found. Enable Wireless debugging or connect a USB cable."
+            AppLogger.log("📱 [DeviceDetection] Foreground scan reached its time limit; background monitoring continues.")
+        }
+    }
+
+    private func finishConnectionScan() {
+        connectionScanID = UUID()
+        connectionScanTask?.cancel()
+        connectionScanTask = nil
+        connectionScanStartedAt = nil
+        isDetecting = false
+        if isConnected { connectionScanTimedOut = false }
+    }
+
+    private func settleConnectionScan() {
+        let needsAuthorization = availableDevices.contains { $0.status == "unauthorized" }
+        if isConnected || needsAuthorization ||
+            (!isDetectionInProgress && !pendingDetection &&
+             (!isWirelessReconnectHuntActive || hasFinishedWirelessSearch)) {
+            finishConnectionScan()
+        }
+    }
+
+    private func updateWirelessDiscoverySummary() {
+        let endpoints = WirelessDiscovery.shared.endpoints + freshDiscoveredWirelessEndpoints
+        let devices = RecognizedWirelessDevice.devices(from: endpoints,
+            rememberedSerials: Set(ADBManager.rememberedWirelessSerials),
+            namesBySerial: UserDefaults.standard.dictionary(forKey: "wirelessDisplayNameBySerial") as? [String: String] ?? [:],
+            namesByService: UserDefaults.standard.dictionary(forKey: "wirelessDisplayNameByServiceID") as? [String: String] ?? [:])
+        if recognizedWirelessDevices != devices { recognizedWirelessDevices = devices }
+    }
+
+    /// Explicitly re-browse remembered wireless identities without retrying USB
+    /// or changing the user's automatic-reconnect preference.
+    func refreshRecognizedWirelessDevices() async {
+        guard !isRefreshingRecognizedDevices, !(isWirelessReconnectHuntActive && isDetecting),
+              !ADBPairingBrowser.isPairingActive, !ADBManager.isPairingInProgress,
+              !AppProcessLifecycle.isTerminating, !Task.isCancelled else { return }
+        let serials = Set(ADBManager.rememberedWirelessSerials)
+        guard !serials.isEmpty else { return }
+        // An explicit availability check takes priority over quiet reconnect work.
+        if isWirelessReconnectHuntActive { cancelWirelessReconnectHunt() }
+        let generation = detectionGeneration
+        isRefreshingRecognizedDevices = true
+        recognizedRefreshError = nil
+        passiveDiscoveryTask?.cancel()
+        passiveDiscoveryTask = nil
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.detectionGeneration == generation {
+                    self.isRefreshingRecognizedDevices = false
+                    self.recognizedRefreshTask = nil
+                }
+            }
+            guard self.detectionGeneration == generation, !Task.isCancelled else { return }
+            self.discoveredWirelessEndpoints = []
+            self.discoveredWirelessEndpointsAt = .distantPast
+            WirelessDiscovery.shared.start()
+            WirelessDiscovery.shared.refresh()
+            self.updateWirelessDiscoverySummary()
+
+            let result = await ADBManager.discoverWirelessEndpoints(for: serials)
+            guard self.detectionGeneration == generation, !Task.isCancelled,
+                  !AppProcessLifecycle.isTerminating else { return }
+            self.discoveredWirelessEndpoints = result.endpoints
+            self.discoveredWirelessEndpointsAt = Date()
+            self.lastPassiveDiscoveryAt = Date()
+            self.updateWirelessDiscoverySummary()
+            if result.error.isEmpty {
+                self.lastRecognizedRefreshDate = Date()
+            } else {
+                self.recognizedRefreshError = "Couldn’t complete the availability check. Please try again."
+            }
+        }
+        recognizedRefreshTask = task
+        await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
+    }
     
     // MARK: - Core Logic
 
     private func startWirelessReconnectIfNeeded(connectedDevices: [ADBManager.ConnectedDevice]) {
-        guard !AppProcessLifecycle.isTerminating, !userDisconnected, !ADBPairingBrowser.suppressAutoConnect,
+        guard !AppProcessLifecycle.isTerminating, !isRefreshingRecognizedDevices,
+              !userDisconnected, !ADBPairingBrowser.suppressAutoConnect,
               !ADBPairingBrowser.isPairingActive, !ADBManager.isPairingInProgress,
               wirelessHuntTask == nil, !connectionHealthMonitor.isReconnecting,
               !ADBManager.getADBPath().isEmpty else { return }
@@ -142,8 +264,8 @@ class DeviceManager: ObservableObject {
                 if self.wirelessHuntID == id {
                     self.wirelessHuntTask = nil
                     self.hasFinishedWirelessSearch = true
+                    self.settleConnectionScan()
                     if !self.isConnected, !self.isDetectionInProgress, !self.pendingDetection {
-                        self.isDetecting = false
                         if self.availableDevices.isEmpty {
                             self.statusMessage = "No matching device discovered. Enable Wireless debugging and keep the phone on the same Wi-Fi."
                         }
@@ -152,7 +274,7 @@ class DeviceManager: ObservableObject {
             }
             await self.reconnectRememberedDevices(id: id, serials: missing)
         }
-        if !hasFinishedWirelessSearch, !isConnected,
+        if !hasFinishedWirelessSearch, connectionScanStartedAt != nil, !isConnected,
            !connectedDevices.contains(where: { $0.status == "unauthorized" }) {
             isDetecting = true
             statusMessage = "Looking for your paired device..."
@@ -169,6 +291,7 @@ class DeviceManager: ObservableObject {
             guard !Task.isCancelled, !AppProcessLifecycle.isTerminating else { return }
             self.discoveredWirelessEndpoints = result.endpoints
             self.discoveredWirelessEndpointsAt = Date()
+            self.updateWirelessDiscoverySummary()
             self.startWirelessReconnectIfNeeded(connectedDevices: self.availableDevices)
         }
     }
@@ -226,6 +349,7 @@ class DeviceManager: ObservableObject {
                             self.discoveredWirelessEndpoints.removeAll { $0.serviceName == endpoint.serviceName }
                             self.discoveredWirelessEndpoints.append(endpoint)
                             self.discoveredWirelessEndpointsAt = Date()
+                            self.updateWirelessDiscoverySummary()
                         }
                         return .discovery(result.endpoints, result.error)
                     }
@@ -252,6 +376,7 @@ class DeviceManager: ObservableObject {
                     discoveryInFlight = false
                     discoveredWirelessEndpoints = endpoints
                     discoveredWirelessEndpointsAt = Date()
+                    updateWirelessDiscoverySummary()
                     if ADBManager.isProtocolError(error) { recoveryNeeded = true }
                 case .serverRecovered:
                     recoveringServer = false
@@ -281,11 +406,8 @@ class DeviceManager: ObservableObject {
     }
 
     func detectDevice(showProgress: Bool = false) async {
-        guard !AppProcessLifecycle.isTerminating else { return }
-        if showProgress {
-            isDetecting = true
-            statusMessage = "Scanning for devices..."
-        }
+        guard !AppProcessLifecycle.isTerminating, !Task.isCancelled else { return }
+        if showProgress { beginConnectionScan() }
 
         if isDetectionInProgress {
             pendingDetection = true
@@ -293,21 +415,39 @@ class DeviceManager: ObservableObject {
             return
         }
         isDetectionInProgress = true
+        let id = UUID()
+        detectionTaskID = id
         let generation = detectionGeneration
+        let task = Task<Void, Never> { [weak self] in
+            guard let self else { return }
+            await self.performDeviceDetection(id: id, generation: generation)
+        }
+        // Keep ownership of the query so the foreground deadline can cancel it.
+        detectionTask = task
+        await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
+    }
+
+    private func performDeviceDetection(id: UUID, generation: UUID) async {
         defer {
-            if detectionGeneration == generation {
+            if detectionGeneration == generation, detectionTaskID == id {
+                detectionTask = nil
                 isDetectionInProgress = false
                 if pendingDetection {
                     let showPendingProgress = pendingDetectionShowsProgress
                     pendingDetection = false
                     pendingDetectionShowsProgress = false
+                    let scanID = connectionScanID
                     Task {
-                        guard self.detectionGeneration == generation else { return }
-                        await self.detectDevice(showProgress: showPendingProgress)
+                        guard self.detectionGeneration == generation, self.detectionTaskID == id else { return }
+                        await self.detectDevice(showProgress: showPendingProgress && self.connectionScanID == scanID)
                     }
+                } else {
+                    settleConnectionScan()
                 }
             }
         }
+        guard detectionGeneration == generation, !Task.isCancelled else { return }
+        updateWirelessDiscoverySummary()
 
         AppLogger.log("📱 [DeviceDetection] Starting device detection...")
 
@@ -323,7 +463,7 @@ class DeviceManager: ObservableObject {
             await self.applyDeviceSnapshot(devices + pendingDevices, generation: generation)
         }
         guard detectionGeneration == generation else { return }
-        guard !Task.isCancelled, !AppProcessLifecycle.isTerminating else { isDetecting = false; return }
+        guard !Task.isCancelled, !AppProcessLifecycle.isTerminating else { return }
 
         // Cold-start case: USB may already be plugged in before IOKit monitoring
         // starts. In that path, no attach callback fires, so recover private ADB
@@ -331,7 +471,9 @@ class DeviceManager: ObservableObject {
         if !allDevices.contains(where: { !$0.isWireless }), autoClaimUSB, canAttemptUSBTransportRecovery() {
             lastUSBTransportRecoveryAt = Date()
             if await ADBManager.recoverPrivateUSBTransportIfNeeded() {
+                guard detectionGeneration == generation, !Task.isCancelled else { return }
                 allDevices = await ADBManager.listAllConnectedDevices()
+                guard detectionGeneration == generation, !Task.isCancelled else { return }
                 if allDevices.contains(where: { !$0.isWireless }) {
                     preferUSBUntil = Date().addingTimeInterval(2.0)
                 }
@@ -339,6 +481,8 @@ class DeviceManager: ObservableObject {
         }
         
         await applyDeviceSnapshot(allDevices, generation: generation)
+        guard detectionGeneration == generation, !Task.isCancelled, !AppProcessLifecycle.isTerminating else { return }
+        lastDetectionDate = Date()
     }
 
     private func applyDeviceSnapshot(_ snapshot: [ADBManager.ConnectedDevice], generation: UUID) async {
@@ -501,8 +645,7 @@ class DeviceManager: ObservableObject {
             // An empty snapshot during startup is provisional until the hunt
             // finishes. Keep authorization prompts visible when action is needed.
             let needsAuthorization = allDevices.contains { $0.serial == activeSerial && $0.status == "unauthorized" }
-            self.isDetecting = !self.isConnected && !needsAuthorization &&
-                ((self.isWirelessReconnectHuntActive && !self.hasFinishedWirelessSearch) || self.pendingDetection)
+            if self.isConnected || needsAuthorization { self.finishConnectionScan() }
         }
         guard detectionGeneration == generation, !Task.isCancelled else { return }
 
@@ -574,7 +717,13 @@ class DeviceManager: ObservableObject {
                             }
                             ADBManager.rememberWirelessDevice(target: target, hardwareSerial: hwSerial,
                                 hostname: WirelessDiscovery.shared.endpoints.first { $0.target == target }?.hostname)
-
+                            let name = self.deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !name.isEmpty, name != target, name != "No Device" {
+                                var names = UserDefaults.standard.dictionary(forKey: "wirelessDisplayNameBySerial") as? [String: String] ?? [:]
+                                names[hwSerial] = name
+                                UserDefaults.standard.set(names, forKey: "wirelessDisplayNameBySerial")
+                            }
+                            self.updateWirelessDiscoverySummary()
                         }
                         
                         // ── Start event-driven wireless connection health monitor ──
@@ -626,6 +775,10 @@ class DeviceManager: ObservableObject {
         wirelessHuntID = UUID()
         wirelessHuntTask?.cancel()
         wirelessHuntTask = nil
+        hasFinishedWirelessSearch = true
+        // The cancelled task no longer owns cleanup after its ID changes.
+        // Finish here so opening a pairing sheet cannot latch the dashboard spinner.
+        finishConnectionScan()
     }
 
     /// Runs a fresh, user-visible connection attempt from the empty state.
@@ -633,14 +786,16 @@ class DeviceManager: ObservableObject {
     /// the complete wireless discovery window so the UI reflects the work.
     func retryDeviceDetection() async {
         AppLogger.log("📱 [DeviceDetection] User requested a connection retry.")
-        isDetecting = true
-        statusMessage = "Scanning for devices..."
+        guard !AppProcessLifecycle.isTerminating, !Task.isCancelled else { return }
 
         let previousHunt = wirelessHuntTask
         cancelWirelessReconnectHunt()
+        beginConnectionScan()
+        let scanID = connectionScanID
         if let previousHunt {
             await previousHunt.value
         }
+        guard connectionScanID == scanID, !Task.isCancelled else { return }
 
         hasFinishedWirelessSearch = false
         attemptedWirelessEndpoints.removeAll()
@@ -650,6 +805,7 @@ class DeviceManager: ObservableObject {
         ADBPairingBrowser.suppressAutoConnect = false
 
         await detectDevice(showProgress: true)
+        guard connectionScanID == scanID, !Task.isCancelled else { return }
 
         // detectDevice starts wireless discovery as a managed background task.
         // Wait for that task so callers and accessibility state reflect the full retry.
@@ -657,9 +813,7 @@ class DeviceManager: ObservableObject {
             await activeHunt.value
         }
 
-        if !isConnected {
-            isDetecting = false
-        }
+        if connectionScanID == scanID { settleConnectionScan() }
         AppLogger.log("📱 [DeviceDetection] User retry finished. connected=\(isConnected), status='\(statusMessage)'")
     }
 
@@ -714,9 +868,11 @@ class DeviceManager: ObservableObject {
         adbMonitor.start()
         WirelessDiscovery.shared.onChange = { [weak self] in
             guard let self else { return }
+            self.updateWirelessDiscoverySummary()
             self.startWirelessReconnectIfNeeded(connectedDevices: self.availableDevices)
         }
         WirelessDiscovery.shared.start()
+        updateWirelessDiscoverySummary()
         startWirelessReconnectIfNeeded(connectedDevices: availableDevices)
 
         // ── Wire up ConnectionHealthMonitor callbacks ──
@@ -865,7 +1021,14 @@ class DeviceManager: ObservableObject {
 
     func stopMonitoring() {
         detectionGeneration = UUID()
+        detectionTask?.cancel()
+        detectionTask = nil
+        detectionTaskID = UUID()
         isDetectionInProgress = false
+        recognizedRefreshTask?.cancel()
+        recognizedRefreshTask = nil
+        isRefreshingRecognizedDevices = false
+        recognizedWirelessDevices = []
         adbMonitor.stop()
         adbMonitor.onChange = nil
         usbDetectionTask?.cancel()

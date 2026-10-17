@@ -71,6 +71,7 @@ class ADBPairingBrowser: ObservableObject {
     private var pairingBrowser: NWBrowser?
     private var connectBrowser: NWBrowser?
     private var isBrowsing = false
+    private var browseGeneration = UUID()
     private static var isBrowsingGlobally = false
     
     private var mdnsPollTimer: Timer?
@@ -96,6 +97,7 @@ class ADBPairingBrowser: ObservableObject {
         mdnsPollTimer?.invalidate()
         mdnsPollTimer = nil
         isBrowsing = true
+        browseGeneration = UUID()
         Self.isBrowsingGlobally = true
         
         AppLogger.log("📶 [NWBrowser] Browsing for _adb-tls-pairing._tcp + _adb-tls-connect._tcp...")
@@ -218,11 +220,8 @@ class ADBPairingBrowser: ObservableObject {
         connectBrowser?.start(queue: queue)
 
         ADBPairingBrowser.suppressAutoConnect = false
-        DispatchQueue.main.async {
-            // Don't clear discoveredDevices — preserve existing data across restarts
-            self.status = .searching
-            self.startMdnsPolling()
-        }
+        status = .searching
+        startMdnsPolling()
     }
 
     private static func logBrowserState(_ state: NWBrowser.State, serviceType: String) {
@@ -243,6 +242,7 @@ class ADBPairingBrowser: ObservableObject {
     }
     
     func stopBrowsing() {
+        browseGeneration = UUID()
         pairingBrowser?.cancel()
         pairingBrowser = nil
         connectBrowser?.cancel()
@@ -258,12 +258,8 @@ class ADBPairingBrowser: ObservableObject {
         }
         pendingRemovals.removeAll()
 
-        DispatchQueue.main.async {
-            if self.status == .searching {
-                self.status = .idle
-            }
-            self.discoveredDevices.removeAll()
-        }
+        if status == .searching { status = .idle }
+        discoveredDevices.removeAll()
     }
     
     /// Pauses the periodic mDNS poll timer while a pairing handshake is in flight.
@@ -307,7 +303,10 @@ class ADBPairingBrowser: ObservableObject {
     /// ADB 37+ output format:
     ///   adb-XXXX  _adb-tls-pairing._tcp  192.168.1.69:41583  adb-XXXX.local
     private func pollADBMdnsServices() {
+        guard isBrowsing else { return }
+        let generation = browseGeneration
         Task {
+            guard self.isBrowsing, self.browseGeneration == generation else { return }
             // Skip polling entirely while a pairing handshake is in flight.
             // mdnsServicesWithRecovery() can trigger an ADB server restart, which kills
             // the TLS connection and causes:
@@ -325,6 +324,7 @@ class ADBPairingBrowser: ObservableObject {
             let (_, devicesOutput, _) = await Shell.runAsyncWithTimeout(
                 adbPath, args: ["devices"], timeoutSeconds: 3.0
             )
+            guard self.isBrowsing, self.browseGeneration == generation else { return }
             let connectedSerials = devicesOutput.split(separator: "\n").compactMap { line -> String? in
                 let s = String(line)
                 guard s.contains("\tdevice") || s.contains(" device") else { return nil }
@@ -333,6 +333,7 @@ class ADBPairingBrowser: ObservableObject {
             }
 
             let (code, output, _) = await ADBManager.mdnsServicesWithRecovery()
+            guard self.isBrowsing, self.browseGeneration == generation else { return }
             guard code == 0 else {
                 AppLogger.log("📶 [NWBrowser] adb mdns services failed with code \(code)", level: .warning)
                 return
@@ -395,6 +396,7 @@ class ADBPairingBrowser: ObservableObject {
                 // The browser publishes discovery state and requests a device-list refresh.
 
                 await MainActor.run {
+                    guard self.isBrowsing, self.browseGeneration == generation else { return }
                     // Cancel any pending removal since the device is rediscovered/active
                     self.pendingRemovals[dictKey]?.cancel()
                     self.pendingRemovals.removeValue(forKey: dictKey)
@@ -508,10 +510,18 @@ struct WirelessConnectView: View {
     /// True when user taps "Re-scan" from the connected banner — shows scan UI below the card
     @State private var showRescanWhileConnected = false
     
-    enum PairingTab: String, CaseIterable {
+    enum PairingTab: String, CaseIterable, Identifiable {
         case qrCode = "QR Code"
         case autoDiscovery = "Auto-Discovery"
         case manual = "Advanced"
+
+        var id: String { rawValue }
+    }
+
+    init(deviceManager: DeviceManager, onConnected: (() -> Void)? = nil, initialTab: PairingTab = .qrCode) {
+        self.deviceManager = deviceManager
+        self.onConnected = onConnected
+        _selectedTab = State(initialValue: initialTab)
     }
 
     /// Returns the display label for a tab, dynamically renaming Auto-Discovery
@@ -585,6 +595,9 @@ struct WirelessConnectView: View {
                 if selectedTab != .qrCode {
                     qrPairingService.stop()
                 }
+                if selectedTab == .autoDiscovery {
+                    startAutoDiscovery()
+                }
             }
             
             // Tab content
@@ -605,7 +618,9 @@ struct WirelessConnectView: View {
                 Task { await dm.detectDevice() }
             }
 
-            if !hasSeenWifiSetup {
+            if selectedTab == .autoDiscovery {
+                startAutoDiscovery()
+            } else if !hasSeenWifiSetup {
                 showSetupPopup = true
             }
         }

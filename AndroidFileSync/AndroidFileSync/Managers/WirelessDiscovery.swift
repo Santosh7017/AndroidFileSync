@@ -57,6 +57,40 @@ nonisolated struct WirelessEndpoint: Equatable, Hashable, Sendable {
     }
 }
 
+/// A remembered phone with presence derived only from current discovery, never a saved address.
+nonisolated struct RecognizedWirelessDevice: Identifiable, Equatable {
+    let id: String
+    let displayName: String
+    let address: String?
+    var isNearby: Bool { address != nil }
+
+    static func devices(from endpoints: [WirelessEndpoint], rememberedSerials: Set<String>,
+                        namesBySerial: [String: String], namesByService: [String: String]) -> [Self] {
+        let phones = endpoints.filter {
+            $0.isConnectService || ($0.serviceType == "_adb-tls-pairing._tcp" && $0.serviceName.hasPrefix("adb-"))
+        }
+        return rememberedSerials.map { serial in
+            // Pairing and connect services, IPv4 and IPv6 all describe the same phone.
+            let services = phones.filter { $0.hardwareSerial == serial }.sorted {
+                if $0.isConnectService != $1.isConnectService { return $0.isConnectService }
+                if $0.host.contains(":") != $1.host.contains(":") { return !$0.host.contains(":") }
+                return $0.target < $1.target
+            }
+            let cachedServiceNames = namesByService.keys.sorted().filter {
+                WirelessEndpoint.hardwareSerial(from: $0) == serial
+            }.compactMap { namesByService[$0] }
+            let names = [namesBySerial[serial]].compactMap { $0 } + cachedServiceNames
+            let name = names.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.first { !$0.isEmpty }
+            return Self(id: serial, displayName: name ?? "Android device · \(serial.suffix(4))",
+                        address: services.first?.host)
+        }.sorted {
+            // Keep rows stable as availability changes.
+            if $0.displayName != $1.displayName { return $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+            return $0.id < $1.id
+        }
+    }
+}
+
 /// Remember identities separately from addresses; an IP address can be reassigned to another phone.
 nonisolated struct RememberedWirelessDevice: Codable, Equatable {
     var hardwareSerial: String
