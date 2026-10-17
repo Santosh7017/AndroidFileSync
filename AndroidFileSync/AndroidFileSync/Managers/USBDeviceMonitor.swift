@@ -8,6 +8,56 @@ import Foundation
 import IOKit
 import IOKit.usb
 
+/// ADB reports authorization, transport loss, and reconnection even when the USB
+/// cable never moves. Keep one subscription per running daemon; IOKit remains the
+/// signal that starts detection when no daemon exists yet.
+@MainActor
+final class ADBDeviceMonitor {
+    var onChange: (() -> Void)?
+    private var tasks: [Int: Task<Void, Never>] = [:]
+    private var generation = UUID()
+
+    func start() {
+        guard tasks.isEmpty, !AppProcessLifecycle.isTerminating else { return }
+        let id = generation
+        for port in [Shell.appADBServerPort, 5037] {
+            tasks[port] = Task { [weak self] in
+                var failures = 0
+                while !Task.isCancelled, !AppProcessLifecycle.isTerminating {
+                    // Merely watching must never launch an unused competing daemon.
+                    guard Shell.isADBServerRunning(port: port) else {
+                        try? await Task.sleep(nanoseconds: 500_000_000)
+                        continue
+                    }
+                    let path = ADBManager.getADBPath()
+                    guard !path.isEmpty else { return }
+                    let started = Date()
+                    _ = await Shell.stream(path, args: ["-P", String(port), "track-devices", "-l"],
+                                           environment: Shell.serverEnvironment(port: port)) { [weak self] _ in
+                        // The payload may arrive in chunks. DeviceManager coalesces
+                        // these notifications and reads an authoritative snapshot.
+                        Task { @MainActor [weak self] in
+                            guard let self, self.generation == id else { return }
+                            self.onChange?()
+                        }
+                    }
+                    guard !Task.isCancelled, let self, self.generation == id else { return }
+                    self.onChange?()
+                    failures = Date().timeIntervalSince(started) > 5 ? 0 : min(failures + 1, 4)
+                    // An unsupported command or a restarting daemon must not spin.
+                    try? await Task.sleep(nanoseconds: UInt64(min(5, 0.5 * pow(2, Double(failures))) * 1_000_000_000))
+                }
+            }
+        }
+    }
+
+    func stop() {
+        generation = UUID()
+        tasks.values.forEach { $0.cancel() }
+        tasks.removeAll()
+    }
+}
+
 final class USBDeviceMonitor {
 
     /// Called on the main thread when a USB device is attached.
@@ -32,7 +82,7 @@ final class USBDeviceMonitor {
 
         // Add the notification source to the main run loop so callbacks arrive on the main thread
         let source = IONotificationPortGetRunLoopSource(port).takeUnretainedValue()
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
 
         // Matching dict for any USB device
         guard let matching = IOServiceMatching(kIOUSBDeviceClassName) else {

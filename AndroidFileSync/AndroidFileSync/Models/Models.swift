@@ -67,6 +67,13 @@ struct UnifiedFile: Identifiable, Hashable {
         lhs.modificationDate == rhs.modificationDate
     }
     
+    // MARK: - Computed Properties
+    
+    /// Lowercase file extension derived from the file name
+    var pathExtension: String {
+        (name as NSString).pathExtension.lowercased()
+    }
+    
     // MARK: - Sortable Properties for Table
     var sortableDate: Date {
         modificationDate ?? Date.distantPast

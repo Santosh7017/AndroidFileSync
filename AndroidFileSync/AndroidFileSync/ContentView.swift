@@ -226,9 +226,7 @@ struct ContentView: View {
             
             VStack(spacing: 0) {
                 HStack(spacing: 12) {
-                    ProgressView()
-                        .controlSize(.small)
-                        .frame(width: 16, height: 16)
+                    LoadingSpinner()
                     
                     Text(statusText)
                         .font(.system(size: 12, weight: .medium))
@@ -307,9 +305,7 @@ struct ContentView: View {
                 
                 Spacer()
                 
-                ProgressView()
-                    .controlSize(.small)
-                    .frame(width: 16, height: 16)
+                LoadingSpinner()
                 
                 // Manual retry button — opens wireless connect view
                 Button {
@@ -455,6 +451,7 @@ struct ContentView: View {
                     Button("") { handlePermanentDeleteShortcut() }.keyboardShortcut(.delete, modifiers: [.command, .option])
 
                     // ── Finder-style navigation ───────────────────────────
+                    Button("") { handleSelectAll() }.keyboardShortcut("a", modifiers: .command)
                     Button("") { handleDeselectAll() }.keyboardShortcut("a", modifiers: [.command, .shift])
                     Button("") { handleNavigateUp() }.keyboardShortcut(.upArrow, modifiers: .command)
                     Button("") { handleOpenSelected() }.keyboardShortcut(.downArrow, modifiers: .command)
@@ -586,15 +583,14 @@ struct ContentView: View {
             .onChange(of: deviceManager.sdCardPath) { newPath in
                 sidebarManager.updateSDCard(path: newPath)
             }
-            .onChange(of: deviceManager.deviceName) { newName in
-                // Reload the file browser whenever the active device changes.
-                guard deviceManager.isConnected, !newName.isEmpty, newName != "No Device" else { return }
-                Task {
-                    currentPath = await deviceManager.getRealStoragePath()
-                    pathHistory.removeAll()
-                    forwardHistory.removeAll()
-                    await loadFiles()
-                }
+            .task(id: deviceManager.isConnected ? ADBManager.activeDeviceSerial : nil) {
+                guard deviceManager.isConnected, let serial = ADBManager.activeDeviceSerial else { return }
+                let path = await deviceManager.getRealStoragePath()
+                guard !Task.isCancelled, deviceManager.isConnected, ADBManager.activeDeviceSerial == serial else { return }
+                currentPath = path
+                pathHistory.removeAll()
+                forwardHistory.removeAll()
+                await loadFiles()
             }
             .onChange(of: deviceManager.isConnected) { connected in
                 if !connected {
@@ -618,11 +614,6 @@ struct ContentView: View {
                     _folderSizesBuffer = [:]
                     isLoading = false
                     isLoadingMetadata = false
-                } else {
-                    // Reconnected! Reload files to restore list from empty state
-                    Task {
-                        await loadFiles()
-                    }
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .afsTransferCountChanged)) { notification in
@@ -704,7 +695,9 @@ struct ContentView: View {
                 EmptyStateView(
                     isDetecting: deviceManager.isDetecting,
                     customMessage: showCustomMessage ? deviceManager.statusMessage : nil,
-                    onRetry: { Task { await initializeDevice() } },
+                    onRetry: {
+                        Task { await deviceManager.retryDeviceDetection() }
+                    },
                     onConnectWiFi: { showWirelessConnect = true },
                     isUSBOccupied: isUSBOccupied,
                     isClaimingUSB: isClaimingUSB,
@@ -724,7 +717,8 @@ struct ContentView: View {
                                 showErrorAlert = true
                             }
                         }
-                    }
+                    },
+                    diagnosticsControl: diagnosticsControl
                 )
             }
 
@@ -739,7 +733,7 @@ struct ContentView: View {
             if updateChecker.shouldShowBanner {
                 HStack(spacing: 6) {
                     if updateChecker.isUpdating {
-                        ProgressView().controlSize(.mini)
+                        LoadingSpinner(size: 12)
                     } else {
                         Image(systemName: updateChecker.updateReadyToRestart ? "checkmark.circle.fill" : "arrow.down.circle.fill")
                             .font(.system(size: 11))
@@ -849,7 +843,9 @@ struct ContentView: View {
         }
         .task { await initializeDevice() }
         .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
-            if !deviceManager.isConnected && !deviceManager.isDetecting {
+            if !deviceManager.isConnected,
+               !deviceManager.isDetecting,
+               !deviceManager.isWirelessReconnectHuntActive {
                 Task {
                     await deviceManager.detectDevice()
                     // Refresh USB occupied status on the homepage
@@ -957,9 +953,9 @@ struct ContentView: View {
                             metadataLoadedCount: metadataLoadedCount,
                             metadataTotalCount: metadataTotalCount,
                             isLoadingMoreFiles: isLoadingMoreFiles,
-                            thumbnailProvider: thumbnailProvider
+                            thumbnailProvider: thumbnailProvider,
+                            isInteractionEnabled: !filePreviewManager.showPreviewPanel
                         )
-                        .equatable()
                     }
                 }
 
@@ -1174,6 +1170,19 @@ struct ContentView: View {
 
     // MARK: - Keyboard Shortcut Handlers
     
+    private func handleSelectAll() {
+        guard activeAppFilter == nil else { return }
+
+        // Keep the standard Command-A behavior while editing search or rename text.
+        if let textView = NSApp.keyWindow?.firstResponder as? NSTextView,
+           textView.isFieldEditor {
+            textView.selectAll(nil)
+            return
+        }
+
+        selectedFiles = Set(displayedFiles.map(\.id))
+    }
+
     private func handleDeselectAll() {
         guard activeAppFilter == nil else { return }
         selectedFiles.removeAll()
@@ -1309,8 +1318,7 @@ struct ContentView: View {
         await deviceManager.detectDevice()
         
         // NOTE: We do NOT call loadFiles() here.
-        // The .onChange(of: deviceManager.deviceName) observer fires whenever detectDevice()
-        // sets a new device name, and it is the single source of truth for loading files.
+        // The task keyed to the connected transport is the single source for the initial load.
         // Calling loadFiles() here too caused a race condition where files were loaded twice.
         //
         // NOTE: The earlier USB cold-start polling loop (10×0.3s) was removed because:
@@ -2155,7 +2163,7 @@ struct LiveOperationRow: View {
                 .font(.system(size: 10))
             Spacer()
             if case .running = op.state {
-                ProgressView().controlSize(.mini)
+                LoadingSpinner(size: 12)
             }
         }
         .padding(.leading, 8)

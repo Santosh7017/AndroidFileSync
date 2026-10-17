@@ -37,6 +37,10 @@ class ThumbnailProvider: ObservableObject {
     
     /// The directory currently being loaded — prevents duplicate loads
     private var currentLoadingPath: String?
+
+    /// Latest request received while the current directory is still loading.
+    /// Progressive directory updates can otherwise leave later files without thumbnails.
+    private var pendingRequest: (files: [UnifiedFile], path: String)?
     
     /// Extensions we attempt to fetch image thumbnails for
     private static let imageExtensions: Set<String> = [
@@ -58,12 +62,30 @@ class ThumbnailProvider: ObservableObject {
         case image
         case video
         
-        /// The content:// URI prefix for this media type
-        var contentUri: String {
+        /// Type-specific MediaStore collections, newest volume name first after
+        /// the broadly compatible legacy alias.
+        var contentUris: [String] {
             switch self {
-            case .image: return "content://media/external/images/media"
-            case .video: return "content://media/external/video/media"
+            case .image:
+                return [
+                    "content://media/external/images/media",
+                    "content://media/external_primary/images/media"
+                ]
+            case .video:
+                return [
+                    "content://media/external/video/media",
+                    "content://media/external_primary/video/media"
+                ]
             }
+        }
+
+        var querySources: [(queryUri: String, thumbnailUri: String)] {
+            [
+                (contentUris[0], contentUris[0]),
+                (contentUris[1], contentUris[1]),
+                ("content://media/external/file", contentUris[0]),
+                ("content://media/external_primary/file", contentUris[1])
+            ]
         }
     }
     
@@ -72,8 +94,10 @@ class ThumbnailProvider: ObservableObject {
     /// Request thumbnails for a list of files in a directory.
     /// Cancels any in-flight loading from a previous directory.
     func requestThumbnails(for files: [UnifiedFile], currentPath: String) {
-        // Skip if already loading this exact directory
-        if currentLoadingPath == currentPath { return }
+        if currentLoadingPath == currentPath, loadingTask != nil {
+            pendingRequest = (files, currentPath)
+            return
+        }
         
         // Cancel previous loading
         cancelLoading()
@@ -107,6 +131,15 @@ class ThumbnailProvider: ObservableObject {
             if !remainingFiles.isEmpty, !Task.isCancelled {
                 await loadThumbnailsBatch(files: remainingFiles, currentPath: currentPath)
             }
+
+            guard !Task.isCancelled, currentLoadingPath == currentPath else { return }
+            loadingTask = nil
+            currentLoadingPath = nil
+
+            if let pending = pendingRequest, pending.path == currentPath {
+                pendingRequest = nil
+                requestThumbnails(for: pending.files, currentPath: pending.path)
+            }
         }
     }
     
@@ -115,6 +148,7 @@ class ThumbnailProvider: ObservableObject {
         loadingTask?.cancel()
         loadingTask = nil
         currentLoadingPath = nil
+        pendingRequest = nil
     }
     
     /// Clear the entire cache (e.g. on device disconnect)
@@ -136,14 +170,12 @@ class ThumbnailProvider: ObservableObject {
         
         // Normalize the directory path for MediaStore
         let physicalDir = FilePreviewManager.resolveToPhysicalPath(currentPath)
-        let escapedDir = physicalDir.replacingOccurrences(of: "'", with: "'\\''")
-        
         // Fetch image thumbnails
         if !imageFiles.isEmpty, !Task.isCancelled {
             await fetchMediaStoreThumbnails(
                 files: imageFiles,
                 mediaType: .image,
-                escapedDir: escapedDir,
+                physicalDir: physicalDir,
                 adbPath: adbPath
             )
         }
@@ -153,7 +185,7 @@ class ThumbnailProvider: ObservableObject {
             await fetchMediaStoreThumbnails(
                 files: videoFiles,
                 mediaType: .video,
-                escapedDir: escapedDir,
+                physicalDir: physicalDir,
                 adbPath: adbPath
             )
         }
@@ -163,42 +195,80 @@ class ThumbnailProvider: ObservableObject {
     private func fetchMediaStoreThumbnails(
         files: [UnifiedFile],
         mediaType: MediaType,
-        escapedDir: String,
-        adbPath: String
+        physicalDir: String,
+        adbPath: String,
+        allowMediaScanRetry: Bool = true
     ) async {
         // Build name → file lookup
         var nameToFile: [String: UnifiedFile] = [:]
-        for file in files { nameToFile[file.name] = file }
-        
-        // Batch query: get all _id + _display_name for this media type in directory
-        let queryCmd = "content query --uri \"\(mediaType.contentUri)\" --projection _id:_display_name --where \"_data LIKE '\(escapedDir)/%' AND _data NOT LIKE '\(escapedDir)/%/%'\""
-        
-        let (queryCode, queryOutput, queryErr) = await Shell.runAsyncWithTimeout(
-            adbPath, args: ADBManager.deviceArgs(["shell", queryCmd]), timeoutSeconds: 10
-        )
-        
-        guard !Task.isCancelled else { return }
-        
-        print("🖼️ Thumbnails [\(mediaType.rawValue)]: query code=\(queryCode), output length=\(queryOutput.count), err='\(queryErr.prefix(100))'")
+        for file in files {
+            nameToFile[file.name] = file
+            nameToFile[file.name.lowercased()] = file
+        }
+
+        let escapedDir = physicalDir.replacingOccurrences(of: "'", with: "'\\''")
+        var selections = ["_data LIKE '\(escapedDir)/%' AND _data NOT LIKE '\(escapedDir)/%/%'"]
+        if let relativeDir = Self.mediaStoreRelativeDirectory(for: physicalDir) {
+            let escapedRelativeDir = relativeDir.replacingOccurrences(of: "'", with: "'\\''")
+            selections.append("relative_path='\(escapedRelativeDir)'")
+        }
+        let escapedNames = files.prefix(100).map {
+            "'\($0.name.replacingOccurrences(of: "'", with: "'\\''"))'"
+        }
+        if !escapedNames.isEmpty {
+            selections.append("_display_name IN (\(escapedNames.joined(separator: ",")))")
+        }
         
         // Parse the batch response into (id, file) pairs
-        var entries: [(id: String, file: UnifiedFile)] = []
-        
-        if queryCode == 0, !queryOutput.isEmpty {
-            let rows = queryOutput.components(separatedBy: "\n")
-            for row in rows where row.contains("_id=") {
-                guard let mediaId = FilePreviewManager.parseMediaStoreId(from: row),
-                      let displayName = Self.parseDisplayName(from: row),
-                      let file = nameToFile[displayName] else { continue }
-                entries.append((id: mediaId, file: file))
+        var entries: [(id: String, file: UnifiedFile, thumbnailUri: String)] = []
+        var matchedPaths = Set<String>()
+
+        queryLoop: for source in mediaType.querySources {
+            for selection in selections {
+                let queryCmd = "content query --uri \"\(source.queryUri)\" --projection _id:_display_name --where \"\(selection)\""
+                let (queryCode, queryOutput, queryErr) = await Shell.runAsyncWithTimeout(
+                    adbPath,
+                    args: ADBManager.deviceArgs(["shell", queryCmd]),
+                    timeoutSeconds: 4
+                )
+
+                guard !Task.isCancelled else { return }
+
+                print("🖼️ Thumbnails [\(mediaType.rawValue)] \(source.queryUri): code=\(queryCode), output=\(queryOutput.count), err='\(queryErr.prefix(100))'")
+
+                guard queryCode == 0, !queryOutput.isEmpty else { continue }
+                for row in queryOutput.components(separatedBy: "\n") where row.contains("_id=") {
+                    guard let mediaId = FilePreviewManager.parseMediaStoreId(from: row),
+                          let displayName = Self.parseDisplayName(from: row),
+                          let file = nameToFile[displayName] ?? nameToFile[displayName.lowercased()],
+                          matchedPaths.insert(file.path).inserted else { continue }
+                    entries.append((id: mediaId, file: file, thumbnailUri: source.thumbnailUri))
+                }
+
+                if matchedPaths.count == files.count {
+                    break queryLoop
+                }
             }
         }
         
         guard !Task.isCancelled else { return }
         
         if entries.isEmpty {
-            print("⚠️ Thumbnails [\(mediaType.rawValue)]: No MediaStore entries found, trying individual queries...")
-            await loadThumbnailsIndividually(files: files, mediaType: mediaType, adbPath: adbPath)
+            if allowMediaScanRetry {
+                print("⚠️ Thumbnails [\(mediaType.rawValue)]: No MediaStore entries; requesting an on-device media scan...")
+                await ADBManager.triggerMediaScanForFiles(files.map(\.path))
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard !Task.isCancelled else { return }
+                await fetchMediaStoreThumbnails(
+                    files: files,
+                    mediaType: mediaType,
+                    physicalDir: physicalDir,
+                    adbPath: adbPath,
+                    allowMediaScanRetry: false
+                )
+            } else {
+                print("⚠️ Thumbnails [\(mediaType.rawValue)]: MediaStore unavailable after scan; using file icons.")
+            }
             return
         }
         
@@ -217,8 +287,11 @@ class ThumbnailProvider: ObservableObject {
                 
                 group.addTask { [weak self] in
                     guard !Task.isCancelled else { return nil }
-                    let thumb = await self?.fetchSingleThumbnail(
-                        mediaId: entry.id, mediaType: mediaType, adbPath: adbPath
+                    guard let self else { return nil }
+                    let thumb = await self.fetchSingleThumbnail(
+                        mediaId: entry.id,
+                        contentUri: entry.thumbnailUri,
+                        adbPath: adbPath
                     )
                     return (entry.file.path, thumb)
                 }
@@ -241,59 +314,13 @@ class ThumbnailProvider: ObservableObject {
                     
                     group.addTask { [weak self] in
                         guard !Task.isCancelled else { return nil }
-                        let thumb = await self?.fetchSingleThumbnail(
-                            mediaId: entry.id, mediaType: mediaType, adbPath: adbPath
+                        guard let self else { return nil }
+                        let thumb = await self.fetchSingleThumbnail(
+                            mediaId: entry.id,
+                            contentUri: entry.thumbnailUri,
+                            adbPath: adbPath
                         )
                         return (entry.file.path, thumb)
-                    }
-                }
-            }
-        }
-    }
-    
-    /// Fallback: load thumbnails one by one when batch query fails
-    private func loadThumbnailsIndividually(
-        files: [UnifiedFile],
-        mediaType: MediaType,
-        adbPath: String
-    ) async {
-        await withTaskGroup(of: (String, NSImage?)?.self) { group in
-            var activeTasks = 0
-            var fileIndex = 0
-            
-            while activeTasks < maxConcurrentFetches && fileIndex < files.count {
-                let file = files[fileIndex]
-                fileIndex += 1
-                activeTasks += 1
-                
-                group.addTask { [weak self] in
-                    guard !Task.isCancelled else { return nil }
-                    let thumb = await self?.fetchThumbnailByName(
-                        fileName: file.name, mediaType: mediaType, adbPath: adbPath
-                    )
-                    return (file.path, thumb)
-                }
-            }
-            
-            for await result in group {
-                guard !Task.isCancelled else { break }
-                activeTasks -= 1
-                
-                if let (path, image) = result, let thumb = image {
-                    storeThumbnail(thumb, forPath: path)
-                }
-                
-                if fileIndex < files.count {
-                    let file = files[fileIndex]
-                    fileIndex += 1
-                    activeTasks += 1
-                    
-                    group.addTask { [weak self] in
-                        guard !Task.isCancelled else { return nil }
-                        let thumb = await self?.fetchThumbnailByName(
-                            fileName: file.name, mediaType: mediaType, adbPath: adbPath
-                        )
-                        return (file.path, thumb)
                     }
                 }
             }
@@ -305,12 +332,10 @@ class ThumbnailProvider: ObservableObject {
     /// Fetch a thumbnail for a specific MediaStore _id using the correct URI for image/video.
     private func fetchSingleThumbnail(
         mediaId: String,
-        mediaType: MediaType,
+        contentUri: String,
         adbPath: String
     ) async -> NSImage? {
-        // Use the type-specific URI: content://media/external/images/media/<id>/thumbnail
-        //                         or: content://media/external/video/media/<id>/thumbnail
-        let thumbnailUri = "\(mediaType.contentUri)/\(mediaId)/thumbnail"
+        let thumbnailUri = "\(contentUri)/\(mediaId)/thumbnail"
         
         let readArgs = ADBManager.deviceArgs([
             "exec-out", "content", "read",
@@ -330,27 +355,10 @@ class ThumbnailProvider: ObservableObject {
         
         // Log failure for debugging (only first few)
         if data.isEmpty {
-            print("⚠️ Thumbnails: content read returned empty for \(mediaType.rawValue) id=\(mediaId)")
+            print("⚠️ Thumbnails: content read returned empty for \(thumbnailUri)")
         }
         
         return nil
-    }
-    
-    /// Fetch thumbnail by querying MediaStore with display_name
-    private func fetchThumbnailByName(
-        fileName: String,
-        mediaType: MediaType,
-        adbPath: String
-    ) async -> NSImage? {
-        let escapedName = fileName.replacingOccurrences(of: "'", with: "'\\''")
-        let queryCmd = "content query --uri \"\(mediaType.contentUri)\" --projection _id --where \"_display_name='\(escapedName)'\""
-        
-        let (_, output, _) = await Shell.runAsyncWithTimeout(
-            adbPath, args: ADBManager.deviceArgs(["shell", queryCmd]), timeoutSeconds: 5
-        )
-        
-        guard let mediaId = FilePreviewManager.parseMediaStoreId(from: output) else { return nil }
-        return await fetchSingleThumbnail(mediaId: mediaId, mediaType: mediaType, adbPath: adbPath)
     }
     
     // MARK: - Cache Management
@@ -374,7 +382,20 @@ class ThumbnailProvider: ObservableObject {
     }
     
     // MARK: - Parsing
-    
+
+    private nonisolated static func mediaStoreRelativeDirectory(for physicalDirectory: String) -> String? {
+        let prefixes = [
+            "/storage/emulated/0/",
+            "/storage/self/primary/",
+            "/mnt/user/0/primary/"
+        ]
+        guard let prefix = prefixes.first(where: { physicalDirectory.hasPrefix($0) }) else {
+            return nil
+        }
+        let relative = String(physicalDirectory.dropFirst(prefix.count))
+        return relative.isEmpty ? nil : relative + (relative.hasSuffix("/") ? "" : "/")
+    }
+
     /// Parse `_display_name` from a content query row.
     /// Handles formats like:
     ///   "Row: 0 _id=12345, _display_name=IMG_20260801.jpg"

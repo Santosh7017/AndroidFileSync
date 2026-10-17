@@ -31,8 +31,6 @@ class ConnectionHealthMonitor: ObservableObject {
     private(set) var monitoredSerial: String?
     /// The IP address of the monitored device
     private(set) var monitoredIP: String?
-    /// The last known ADB connect target (serial or ip:port)
-    private var lastKnownTarget: String?
     /// The device's hardware serial for mDNS service matching (e.g. "RF8RC1L57RY")
     private var monitoredHWSerial: String?
     
@@ -40,6 +38,7 @@ class ConnectionHealthMonitor: ObservableObject {
     private var disconnectWatchTask: Task<Void, Never>?
     /// Background task attempting reconnection
     private var reconnectTask: Task<Void, Never>?
+    private var staleCleanupTask: Task<Void, Never>?
     /// NWBrowser for detecting when the device re-advertises its connect service
     private var reconnectBrowser: NWBrowser?
     /// Queue for NWBrowser events
@@ -55,12 +54,15 @@ class ConnectionHealthMonitor: ObservableObject {
     var onDisconnected: (() -> Void)?
     
     /// Maximum number of reconnection attempts before giving up
-    private let maxReconnectAttempts = 30 // ~60 seconds of trying
+    private let maxReconnectAttempts = 30
+    private var monitoringID = UUID()
+    private var reconnectDeadline: Date?
     /// True when monitoring is active (prevents double-start)
     private var isMonitoring = false
     /// Prevent the polling task and NWBrowser callback from issuing overlapping
     /// connect/TLS verification commands for the same device.
     private var isConnectAttemptInProgress = false
+    private var reconnectTargetsAttempted: [String: Int] = [:]
     
     // MARK: - Public API
     
@@ -73,7 +75,7 @@ class ConnectionHealthMonitor: ObservableObject {
     ///   - deviceManager: The DeviceManager instance
     func startMonitoring(serial: String, ip: String, hwSerial: String? = nil, deviceManager: DeviceManager) {
         // Don't restart if we're already monitoring the same device
-        if isMonitoring && monitoredSerial == serial { return }
+        if isMonitoring && monitoredSerial == serial && isHealthy { return }
         
         // Clean up any existing monitoring
         forceStop()
@@ -81,7 +83,6 @@ class ConnectionHealthMonitor: ObservableObject {
         self.deviceManager = deviceManager
         monitoredSerial = serial
         monitoredIP = ip
-        lastKnownTarget = serial
         monitoredHWSerial = hwSerial
         isMonitoring = true
         isHealthy = true
@@ -89,19 +90,7 @@ class ConnectionHealthMonitor: ObservableObject {
         reconnectAttempt = 0
         reconnectMessage = ""
         isConnectAttemptInProgress = false
-        
-        // Save the wireless target for reconnect fallback (in case port changes)
-        if !ip.isEmpty {
-            var targetMap = UserDefaults.standard.dictionary(forKey: "wirelessLastKnownTargetByIP") as? [String: String] ?? [:]
-            targetMap[ip] = serial
-            UserDefaults.standard.set(targetMap, forKey: "wirelessLastKnownTargetByIP")
-            
-            if let port = serial.split(separator: ":").last {
-                var portMap = UserDefaults.standard.dictionary(forKey: "wirelessLastKnownPortByIP") as? [String: String] ?? [:]
-                portMap[ip] = String(port)
-                UserDefaults.standard.set(portMap, forKey: "wirelessLastKnownPortByIP")
-            }
-        }
+        reconnectTargetsAttempted.removeAll()
         
         print("💓 [HealthMonitor] Started monitoring wireless device: \(serial) (IP: \(ip), HW: \(hwSerial ?? "unknown"))")
         
@@ -117,34 +106,34 @@ class ConnectionHealthMonitor: ObservableObject {
     
     /// Internal: cancel all tasks and reset state.
     private func forceStop() {
+        monitoringID = UUID()
+        reconnectDeadline = nil
         disconnectWatchTask?.cancel()
         disconnectWatchTask = nil
         reconnectTask?.cancel()
         reconnectTask = nil
+        staleCleanupTask?.cancel()
+        staleCleanupTask = nil
         stopReconnectBrowser()
         
         isMonitoring = false
         deviceManager = nil
         monitoredSerial = nil
         monitoredIP = nil
-        lastKnownTarget = nil
         monitoredHWSerial = nil
         isHealthy = true
         isReconnecting = false
         reconnectAttempt = 0
         reconnectMessage = ""
         isConnectAttemptInProgress = false
+        reconnectTargetsAttempted.removeAll()
     }
     
     /// Update the monitored serial after a successful reconnection changes the port.
     func updateSerial(_ newSerial: String) {
         let oldSerial = monitoredSerial
         monitoredSerial = newSerial
-        lastKnownTarget = newSerial
-        if let ip = newSerial.components(separatedBy: ":").first,
-           ip.range(of: #"^\d{1,3}(\.\d{1,3}){3}$"#, options: .regularExpression) != nil {
-            monitoredIP = ip
-        }
+        if let address = WirelessEndpoint.address(from: newSerial) { monitoredIP = address.host }
         print("💓 [HealthMonitor] Serial updated: \(oldSerial ?? "nil") → \(newSerial)")
     }
     
@@ -155,6 +144,7 @@ class ConnectionHealthMonitor: ObservableObject {
     /// When the process exits, we know IMMEDIATELY that the device is gone.
     private func startDisconnectWatcher(serial: String) {
         disconnectWatchTask?.cancel()
+        let id = monitoringID
         
         disconnectWatchTask = Task { [weak self] in
             let adbPath = ADBManager.getADBPath()
@@ -175,14 +165,19 @@ class ConnectionHealthMonitor: ObservableObject {
                 return
             }
             
-            guard let self else { return }
+            guard let self, self.monitoringID == id, self.monitoredSerial == serial else { return }
             
             print("💓 [HealthMonitor] ⚡ Device disconnected! (wait-for-disconnect exited with code \(exitCode))")
             
             // Verify the device is actually gone (guard against spurious exits)
             let stillAlive = await self.quickLivenessCheck(serial: serial)
+            guard !Task.isCancelled, self.monitoringID == id, self.monitoredSerial == serial else { return }
             if stillAlive {
                 print("💓 [HealthMonitor] False alarm — device still responds. Restarting watcher.")
+                // Older/shared daemons can reject wait-for-disconnect immediately.
+                // Avoid an unbounded process/shell loop in that case.
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard !Task.isCancelled, self.monitoringID == id else { return }
                 self.startDisconnectWatcher(serial: serial)
                 return
             }
@@ -229,6 +224,9 @@ class ConnectionHealthMonitor: ObservableObject {
     /// Starts both event-driven (NWBrowser) and targeted (adb connect) reconnection.
     private func startReconnection() {
         reconnectTask?.cancel()
+        reconnectDeadline = Date().addingTimeInterval(30)
+        reconnectTargetsAttempted.removeAll()
+        let id = monitoringID
         
         // Start NWBrowser to detect when the device re-advertises
         startReconnectBrowser()
@@ -239,18 +237,13 @@ class ConnectionHealthMonitor: ObservableObject {
             let adbPath = ADBManager.getADBPath()
             guard !adbPath.isEmpty else { return }
             
-            // Snapshot IP/targets at start of reconnect (safe to read; only set on main actor before this point)
+            // The physical identity selects a current service, independently of old addresses.
             let ip = await MainActor.run { self.monitoredIP ?? "" }
-            let lastTarget = await MainActor.run { self.lastKnownTarget ?? "" }
             let hwSerial = await MainActor.run { self.monitoredHWSerial }
-            
-            // Load saved targets for this IP (same keys as DeviceManager)
-            let savedTarget = UserDefaults.standard.dictionary(forKey: "wirelessLastKnownTargetByIP")?[ip] as? String
-            let savedPort = UserDefaults.standard.dictionary(forKey: "wirelessLastKnownPortByIP")?[ip] as? String
-            
+
             for attempt in 1...self.maxReconnectAttempts {
-                guard !Task.isCancelled else { return }
-                guard await MainActor.run(body: { self.isMonitoring }) else { return }
+                guard !Task.isCancelled, self.monitoringID == id, self.isMonitoring, self.isReconnecting else { return }
+                if let deadline = self.reconnectDeadline, Date() >= deadline { break }
                 
                 await MainActor.run {
                     self.reconnectAttempt = attempt
@@ -264,37 +257,10 @@ class ConnectionHealthMonitor: ObservableObject {
                 // ── Strategy 1: mDNS lookup FIRST (port always changes on toggle) ──
                 // Android assigns a new port every time wireless debugging is toggled.
                 // We query mDNS immediately in every attempt — it's the most reliable signal.
-                if !ip.isEmpty {
+                if !ip.isEmpty || hwSerial != nil {
                     if let newTarget = await self.findDeviceViaMdns(adbPath: adbPath, ip: ip, hwSerial: hwSerial) {
                         if await self.tryConnect(adbPath: adbPath, target: newTarget) {
                             await self.handleReconnected(newSerial: newTarget)
-                            return
-                        }
-                    }
-                }
-                
-                // ── Strategy 2: Try last known target (only useful if port didn't change) ──
-                if !lastTarget.isEmpty, lastTarget != "\(ip):0" {
-                    if await self.tryConnect(adbPath: adbPath, target: lastTarget) {
-                        await self.handleReconnected(newSerial: lastTarget)
-                        return
-                    }
-                }
-                
-                // ── Strategy 3: Try saved target from UserDefaults ──
-                if let savedTarget, savedTarget != lastTarget {
-                    if await self.tryConnect(adbPath: adbPath, target: savedTarget) {
-                        await self.handleReconnected(newSerial: savedTarget)
-                        return
-                    }
-                }
-                
-                // ── Strategy 4: Try saved port with IP ──
-                if let savedPort, !ip.isEmpty {
-                    let portTarget = "\(ip):\(savedPort)"
-                    if portTarget != lastTarget && portTarget != savedTarget {
-                        if await self.tryConnect(adbPath: adbPath, target: portTarget) {
-                            await self.handleReconnected(newSerial: portTarget)
                             return
                         }
                     }
@@ -311,10 +277,12 @@ class ConnectionHealthMonitor: ObservableObject {
             }
             
             // Exhausted all attempts
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled, self.monitoringID == id else { return }
             
             await MainActor.run {
                 self.isReconnecting = false
+                self.deviceManager?.isConnected = false
+                self.deviceManager?.statusMessage = "Could not reconnect. Open connection settings to retry."
                 self.reconnectMessage = "Could not reconnect. Please open connection settings."
                 print("💓 [HealthMonitor] ❌ Reconnection failed after \(self.maxReconnectAttempts) attempts.")
             }
@@ -323,19 +291,30 @@ class ConnectionHealthMonitor: ObservableObject {
     
     /// Attempts `adb connect <target>`. Returns true if connection succeeded.
     private func tryConnect(adbPath: String, target: String) async -> Bool {
-        guard !isConnectAttemptInProgress else { return false }
+        let id = monitoringID
+        let remaining = reconnectDeadline?.timeIntervalSinceNow ?? 1.5
+        guard !Task.isCancelled, isMonitoring, isReconnecting, remaining > 0,
+              !isConnectAttemptInProgress, (reconnectTargetsAttempted[target] ?? 0) < 2 else { return false }
         isConnectAttemptInProgress = true
-        defer { isConnectAttemptInProgress = false }
+        reconnectTargetsAttempted[target, default: 0] += 1
+        defer { if monitoringID == id { isConnectAttemptInProgress = false } }
 
         let result = await ADBManager.connectAndVerifyWirelessTarget(
             target,
-            connectTimeout: 4.0,
-            verificationAttempts: 2
+            connectTimeout: min(1.5, remaining),
+            verificationAttempts: 1,
+            expectedHardwareSerial: monitoredHWSerial
         )
+        guard !Task.isCancelled, monitoringID == id, isMonitoring, isReconnecting else { return false }
         let success = result.success
         if success {
             print("💓 [HealthMonitor] ✅ Connected and verified \(target)")
         } else {
+            let lower = result.output.lowercased()
+            if lower.contains("refused") || lower.contains("host is down") || lower.contains("no route") ||
+               ADBManager.wirelessConnectionRequiresRepair(result.output) {
+                reconnectTargetsAttempted[target] = 2
+            }
             let trimmed = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
                 print("💓 [HealthMonitor] ❌ Failed to connect to \(target): \(trimmed)")
@@ -344,51 +323,16 @@ class ConnectionHealthMonitor: ObservableObject {
         return success
     }
     
-    /// Queries `adb mdns services` for the device's connect service.
-    /// Matches by IP address first, then by hardware serial as fallback.
+    /// Resolve a currently advertised connect service for the exact hardware identity.
     /// Returns the new IP:port if found, nil otherwise.
     private func findDeviceViaMdns(adbPath: String, ip: String, hwSerial: String?) async -> String? {
-        let (code, output, _) = await ADBManager.mdnsServicesWithRecovery()
-        guard code == 0, !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        
-        // Pass 1: Match by IP (most reliable — same IP unless device changed network)
-        for line in output.split(separator: "\n") {
-            let str = String(line)
-            guard str.contains("_adb-tls-connect._tcp"),
-                  str.contains(ip) else { continue }
-            
-            let parts = str.split(whereSeparator: { $0 == "\t" || $0 == " " }).map(String.init)
-            if let ipPort = parts.first(where: { $0.hasPrefix(ip + ":") }) {
-                print("💓 [HealthMonitor] 📡 mDNS found device by IP at: \(ipPort)")
-                return ipPort
-            }
-        }
-        
-        // Pass 2: Match by hardware serial (handles IP change edge case)
-        if let hwSerial {
-            for line in output.split(separator: "\n") {
-                let str = String(line)
-                guard str.contains("_adb-tls-connect._tcp") else { continue }
-                
-                let parts = str.split(whereSeparator: { $0 == "\t" || $0 == " " }).map(String.init)
-                guard let serviceName = parts.first,
-                      let extractedSerial = ADBManager.extractHardwareSerial(from: serviceName),
-                      extractedSerial == hwSerial else { continue }
-                
-                // Find the ip:port in this line
-                if let ipPort = parts.first(where: { part in
-                    let comps = part.split(separator: ":")
-                    return comps.count >= 2 && UInt16(comps.last ?? "") != nil
-                }) {
-                    print("💓 [HealthMonitor] 📡 mDNS found device by HW serial at: \(ipPort)")
-                    return ipPort
-                }
-            }
-        }
-        
-        return nil
+        guard let hwSerial, !hwSerial.isEmpty else { return nil }
+        let result = await ADBManager.discoverWirelessEndpoints(for: [hwSerial])
+        guard !Task.isCancelled else { return nil }
+        return result.endpoints.first { $0.hardwareSerial == hwSerial }?.target
+
     }
-    
+
     // MARK: - NWBrowser for Reconnection (Event-Driven)
     
     /// Starts an NWBrowser specifically for detecting when our device
@@ -404,6 +348,7 @@ class ConnectionHealthMonitor: ObservableObject {
         }
         params.includePeerToPeer = true
         
+        let id = monitoringID
         let browser = NWBrowser(
             for: .bonjour(type: "_adb-tls-connect._tcp", domain: "local."),
             using: params
@@ -418,7 +363,7 @@ class ConnectionHealthMonitor: ObservableObject {
                     // A connect service appeared — check if it belongs to our device
                     if case let .service(name, _, _, _) = result.endpoint {
                         Task { @MainActor in
-                            guard self.isReconnecting else { return }
+                            guard self.isReconnecting, self.monitoringID == id else { return }
                             print("💓 [HealthMonitor] 📡 NWBrowser: connect service appeared: \(name)")
                             
                             let ip = self.monitoredIP ?? ""
@@ -445,6 +390,7 @@ class ConnectionHealthMonitor: ObservableObject {
                                 
                                 // Small delay — give ADB's mDNS daemon time to index
                                 try? await Task.sleep(nanoseconds: 300_000_000) // 300ms
+                                guard self.monitoringID == id, self.isReconnecting else { return }
                                 
                                 if let newTarget = await self.findDeviceViaMdns(adbPath: adbPath, ip: ip, hwSerial: hwSerial) {
                                     if await self.tryConnect(adbPath: adbPath, target: newTarget) {
@@ -459,6 +405,7 @@ class ConnectionHealthMonitor: ObservableObject {
                                     let adbPath = ADBManager.getADBPath()
                                     guard !adbPath.isEmpty else { return }
                                     try? await Task.sleep(nanoseconds: 300_000_000)
+                                    guard self.monitoringID == id, self.isReconnecting else { return }
                                     if let newTarget = await self.findDeviceViaMdns(adbPath: adbPath, ip: "", hwSerial: hwSerial) {
                                         if await self.tryConnect(adbPath: adbPath, target: newTarget) {
                                             await self.handleReconnected(newSerial: newTarget)
@@ -495,52 +442,39 @@ class ConnectionHealthMonitor: ObservableObject {
         reconnectMessage = ""
         
         stopReconnectBrowser()
-        reconnectTask?.cancel()
         reconnectTask = nil
+        reconnectDeadline = nil
+        let id = monitoringID
         
         let oldSerial = monitoredSerial
         monitoredSerial = newSerial
-        lastKnownTarget = newSerial
-        if let ip = newSerial.components(separatedBy: ":").first,
-           ip.range(of: #"^\d{1,3}(\.\d{1,3}){3}$"#, options: .regularExpression) != nil {
-            monitoredIP = ip
-        }
+        if let address = WirelessEndpoint.address(from: newSerial) { monitoredIP = address.host }
         
         print("💓 [HealthMonitor] ✅ Successfully reconnected! \(oldSerial ?? "?") → \(newSerial) (Waiting for DeviceManager confirmation)")
+
+        if let hwSerial = monitoredHWSerial {
+            ADBManager.rememberWirelessDevice(target: newSerial, hardwareSerial: hwSerial,
+                hostname: WirelessDiscovery.shared.endpoints.first { $0.target == newSerial }?.hostname)
+        }
+        deviceManager?.markDeviceAsLive(newSerial)
+        onReconnected?()
+        startDisconnectWatcher(serial: newSerial)
         
-        // ── Clean up other stale ports on the same IP ──
-        if let ip = monitoredIP {
+        // Clean up only transports belonging to the same physical device.
+        staleCleanupTask?.cancel()
+        staleCleanupTask = Task { [weak self] in
+            guard let self, let hwSerial = self.monitoredHWSerial else { return }
             let adbPath = ADBManager.getADBPath()
             let allConnected = await ADBManager.listAllConnectedDevices()
+            guard !Task.isCancelled, monitoringID == id, isMonitoring else { return }
             for dev in allConnected {
-                if dev.isWireless, dev.serial.hasPrefix(ip + ":"), dev.serial != newSerial {
-                    print("💓 [HealthMonitor] Disconnecting stale wireless target on same IP: \(dev.serial)")
+                guard !Task.isCancelled, monitoringID == id, monitoredSerial == newSerial else { return }
+                if dev.isWireless, dev.derivedHardwareSerial == hwSerial, dev.serial != newSerial {
+                    print("💓 [HealthMonitor] Disconnecting stale target for serial=\(hwSerial): \(dev.serial)")
                     let _ = await Shell.runAsyncWithTimeout(adbPath, args: ["disconnect", dev.serial], timeoutSeconds: 2.0)
                     deviceManager?.clearLivenessCheck(for: dev.serial)
                 }
             }
         }
-        
-        // Persist the new target (port may have changed)
-        if let ip = monitoredIP {
-            var targetMap = UserDefaults.standard.dictionary(forKey: "wirelessLastKnownTargetByIP") as? [String: String] ?? [:]
-            targetMap[ip] = newSerial
-            UserDefaults.standard.set(targetMap, forKey: "wirelessLastKnownTargetByIP")
-            
-            if let port = newSerial.split(separator: ":").last {
-                var portMap = UserDefaults.standard.dictionary(forKey: "wirelessLastKnownPortByIP") as? [String: String] ?? [:]
-                portMap[ip] = String(port)
-                UserDefaults.standard.set(portMap, forKey: "wirelessLastKnownPortByIP")
-            }
-        }
-        
-        // Mark the device as live in DeviceManager's cache to skip initial liveness check in detectDevice()
-        deviceManager?.markDeviceAsLive(newSerial)
-        
-        // Notify DeviceManager to refresh state
-        onReconnected?()
-        
-        // Restart the disconnect watcher for the new serial
-        startDisconnectWatcher(serial: newSerial)
     }
 }
