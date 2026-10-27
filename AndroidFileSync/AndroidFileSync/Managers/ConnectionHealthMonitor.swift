@@ -310,9 +310,7 @@ class ConnectionHealthMonitor: ObservableObject {
         if success {
             print("💓 [HealthMonitor] ✅ Connected and verified \(target)")
         } else {
-            let lower = result.output.lowercased()
-            if lower.contains("refused") || lower.contains("host is down") || lower.contains("no route") ||
-               ADBManager.wirelessConnectionRequiresRepair(result.output) {
+            if ADBManager.shouldRejectWirelessEndpoint(result.output) {
                 reconnectTargetsAttempted[target] = 2
             }
             let trimmed = result.output.trimmingCharacters(in: .whitespacesAndNewlines)

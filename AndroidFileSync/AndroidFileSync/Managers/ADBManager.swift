@@ -9,8 +9,11 @@ class ADBManager {
     private static var adbPath: String?
     private static var hardwareSerialCache: [String: String] = [:]
     private static var wirelessConnectTasks: [String: Task<(success: Bool, output: String), Never>] = [:]
+    private static var wirelessIdentityGenerations: [String: Int] = [:]
 
     private static let rememberedSerialsKey = "wirelessRememberedHardwareSerials"
+    private static let forgottenSerialsKey = "wirelessForgottenHardwareSerials"
+    private static let forgottenTargetsKey = "wirelessForgottenTargetsBySerial"
     /// Endpoint details live only in this process; automatic recovery persists identities.
     private static var currentWirelessEndpoints: [String: RememberedWirelessDevice] = [:]
 
@@ -41,17 +44,79 @@ class ADBManager {
 
     static func rememberWirelessDevice(target: String, hardwareSerial: String, hostname: String? = nil) {
         guard isWirelessSerial(target), !hardwareSerial.isEmpty, !isWirelessSerial(hardwareSerial) else { return }
+        // A late connection or metadata callback must not undo Remove. Explicit
+        // pairing/connection can recognize this phone again below.
+        guard !isForgottenWirelessDevice(hardwareSerial: hardwareSerial) else { return }
         let serials = Array(Set(rememberedWirelessSerials + [hardwareSerial])).sorted()
         UserDefaults.standard.set(serials, forKey: rememberedSerialsKey)
         currentWirelessEndpoints[hardwareSerial] = RememberedWirelessDevice(hardwareSerial: hardwareSerial,
             target: target, hostname: hostname ?? currentWirelessEndpoints[hardwareSerial]?.hostname)
     }
 
-    static func forgetWirelessDevice(hardwareSerial: String) {
+    static func isForgottenWirelessDevice(hardwareSerial: String) -> Bool {
+        (UserDefaults.standard.stringArray(forKey: forgottenSerialsKey) ?? []).contains(hardwareSerial)
+    }
+
+    static var hasForgottenWirelessDevices: Bool {
+        !(UserDefaults.standard.stringArray(forKey: forgottenSerialsKey) ?? []).isEmpty
+    }
+
+    /// An existing ADB transport does not make a removed phone recognized again.
+    static func isForgottenWirelessTarget(_ target: String, hardwareSerial: String? = nil) -> Bool {
+        guard isWirelessSerial(target) else { return false }
+        let identity = hardwareSerial ?? hardwareSerialCache[target] ?? extractHardwareSerial(from: target)
+            ?? WirelessDiscovery.shared.endpoints.first { $0.target == target }?.hardwareSerial
+        if let identity { return isForgottenWirelessDevice(hardwareSerial: identity) }
+        return (UserDefaults.standard.dictionary(forKey: forgottenTargetsKey) as? [String: String] ?? [:])[target] != nil
+    }
+
+    @discardableResult
+    static func forgetWirelessDevice(hardwareSerial: String, additionalTargets: Set<String> = []) -> Set<String> {
+        var targets = additionalTargets.filter { isWirelessSerial($0) }
+        targets.formUnion(hardwareSerialCache.filter { $0.value == hardwareSerial && isWirelessSerial($0.key) }.keys)
+        targets.formUnion(WirelessDiscovery.shared.endpoints.filter { $0.hardwareSerial == hardwareSerial }.map(\.target))
+        targets.formUnion(Shell.serverPortBySerial.keys.filter { extractHardwareSerial(from: $0) == hardwareSerial })
+        if let target = currentWirelessEndpoints[hardwareSerial]?.target, !target.isEmpty { targets.insert(target) }
+        // DHCP can reuse an old saved endpoint for a different verified phone.
+        targets = targets.filter { hardwareSerialCache[$0].map { $0 == hardwareSerial } ?? true }
+        var forgottenTargets = UserDefaults.standard.dictionary(forKey: forgottenTargetsKey) as? [String: String] ?? [:]
+        for target in targets { forgottenTargets[target] = hardwareSerial }
+        UserDefaults.standard.set(forgottenTargets, forKey: forgottenTargetsKey)
+        let forgotten = Set(UserDefaults.standard.stringArray(forKey: forgottenSerialsKey) ?? []).union([hardwareSerial])
+        UserDefaults.standard.set(forgotten.sorted(), forKey: forgottenSerialsKey)
+        wirelessIdentityGenerations[hardwareSerial, default: 0] += 1
+        for (key, task) in wirelessConnectTasks where key.hasSuffix("/\(hardwareSerial)") || targets.contains(where: { key.contains("/\($0)/") }) {
+            task.cancel()
+        }
         let serials = rememberedWirelessSerials.filter { $0 != hardwareSerial }
         UserDefaults.standard.set(serials, forKey: rememberedSerialsKey)
         currentWirelessEndpoints.removeValue(forKey: hardwareSerial)
         hardwareSerialCache = hardwareSerialCache.filter { $0.value != hardwareSerial }
+        appManagedWirelessTargets.subtract(targets)
+        for target in targets {
+            Shell.serverPortBySerial.removeValue(forKey: target)
+            if let host = WirelessEndpoint.address(from: target)?.host {
+                ADBPairingBrowser.needsRepairing.remove(host)
+                ADBPairingBrowser.autoConnectingIPs.remove(host)
+            }
+        }
+        if let active = activeDeviceSerial, targets.contains(active) { activeDeviceSerial = nil }
+        bonjourServicesCache = nil
+        pairingProbeCache = nil
+        var names = UserDefaults.standard.dictionary(forKey: "wirelessDisplayNameBySerial") as? [String: String] ?? [:]
+        names.removeValue(forKey: hardwareSerial)
+        UserDefaults.standard.set(names, forKey: "wirelessDisplayNameBySerial")
+        let serviceNames = UserDefaults.standard.dictionary(forKey: "wirelessDisplayNameByServiceID") as? [String: String] ?? [:]
+        UserDefaults.standard.set(serviceNames.filter { WirelessEndpoint.hardwareSerial(from: $0.key) != hardwareSerial },
+                                  forKey: "wirelessDisplayNameByServiceID")
+        return targets
+    }
+
+    private static func recognizeWirelessDeviceAgain(hardwareSerial: String) {
+        let forgotten = UserDefaults.standard.stringArray(forKey: forgottenSerialsKey) ?? []
+        UserDefaults.standard.set(forgotten.filter { $0 != hardwareSerial }, forKey: forgottenSerialsKey)
+        let targets = UserDefaults.standard.dictionary(forKey: forgottenTargetsKey) as? [String: String] ?? [:]
+        UserDefaults.standard.set(targets.filter { $0.value != hardwareSerial }, forKey: forgottenTargetsKey)
     }
 
     // Cache folder sizes: [folderPath: sizeInBytes]
@@ -76,7 +141,8 @@ class ADBManager {
     /// ADB mDNS can be empty while Bonjour works. Cache the fallback briefly so UI actions
     /// don't spawn multiple dns-sd browse/lookup/resolve commands per second.
     private static var bonjourServicesCache: (output: String, timestamp: Date)?
-    private static var pairingProbeCache: (serviceName: String, output: String, timestamp: Date)?
+    private static var pairingProbeCache: (serviceName: String, hosts: [String], output: String, timestamp: Date)?
+    private static var lastPairingProbeLog: (serviceName: String, timestamp: Date)?
     private static var bonjourServicesTask: Task<String, Never>?
     private static var lastBonjourFallbackLogAt: Date?
     private static var restartServerTask: Task<Bool, Never>?
@@ -172,8 +238,8 @@ class ADBManager {
                     if oldReady == newReady && previousOwners[serial] != port { continue }
                     devices.remove(at: existing)
                 }
-                Shell.serverPortBySerial[serial] = port
                 let hw = hardwareSerialCache[serial] ?? (isWirelessSerial(serial) ? extractHardwareSerial(from: serial) : serial)
+                if !isForgottenWirelessTarget(serial, hardwareSerial: hw) { Shell.serverPortBySerial[serial] = port }
                 let model = parts.first(where: { $0.hasPrefix("model:") }).map { String($0.dropFirst(6)).replacingOccurrences(of: "_", with: " ") }
                 let name = hw.flatMap { names[$0] } ?? model ?? serial
                 devices.append(ConnectedDevice(serial: serial, displayName: name, status: parts[1], hardwareSerial: hw))
@@ -201,9 +267,8 @@ class ADBManager {
     
     // MARK: - ADB Server Management
     
-    /// Checks if ADB output indicates a protocol fault or stale server.
-    /// Used by both `pairDevice()` and `QRPairingService` to detect transient
-    /// ADB daemon failures that can be recovered with a server restart + retry.
+    /// A protocol error can originate in either a command or the local daemon.
+    /// Pairing must check daemon health independently before restarting it.
     static func isProtocolError(_ output: String) -> Bool {
         let lower = output.lowercased()
         return lower.contains("protocol fault") ||
@@ -229,7 +294,7 @@ class ADBManager {
     /// A timeout can mean the phone's TLS or shell service is still waking up.
     static func shouldRejectWirelessEndpoint(_ output: String) -> Bool {
         let lower = output.lowercased()
-        return lower.contains("refused") || lower.contains("host is down") || lower.contains("no route") ||
+        return lower.contains("refused") ||
             wirelessConnectionRequiresRepair(output) || lower.contains("identity did not match")
     }
 
@@ -239,17 +304,21 @@ class ADBManager {
     /// the device is usable.
     static func connectAndVerifyWirelessTarget(
         _ target: String, connectTimeout: Double = 5.0, verificationAttempts: Int = 3,
-        expectedHardwareSerial: String? = nil, refreshStaleTransport: Bool = true
+        expectedHardwareSerial: String? = nil, refreshStaleTransport: Bool = true,
+        explicitlyRequested: Bool = false
     ) async -> (success: Bool, output: String) {
         guard !Task.isCancelled, !isPairingInProgress else { return (false, "Connection cancelled or pairing in progress") }
+        if !explicitlyRequested, isForgottenWirelessTarget(target, hardwareSerial: expectedHardwareSerial) {
+            return (false, "Connection cancelled; device was removed")
+        }
         let port = Shell.serverPortBySerial[target] ?? (Shell.useDefaultServer ? 5037 : Shell.appADBServerPort)
         Shell.serverPortBySerial[target] = port
-        let key = "\(port)/\(target)/\(expectedHardwareSerial ?? "")"
+        let key = "\(port)/\(target)/\(explicitlyRequested ? "explicit" : "automatic")/\(expectedHardwareSerial ?? "")"
         if let task = wirelessConnectTasks[key] { return await task.value }
         let task = Task {
             await performWirelessConnect(target, serverPort: port, connectTimeout: connectTimeout,
                 verificationAttempts: verificationAttempts, expectedHardwareSerial: expectedHardwareSerial,
-                refreshStaleTransport: refreshStaleTransport)
+                refreshStaleTransport: refreshStaleTransport, explicitlyRequested: explicitlyRequested)
         }
         wirelessConnectTasks[key] = task
         let result = await withTaskCancellationHandler {
@@ -277,11 +346,12 @@ class ADBManager {
 
     private static func performWirelessConnect(
         _ target: String, serverPort: Int, connectTimeout: Double, verificationAttempts: Int,
-        expectedHardwareSerial: String?, refreshStaleTransport: Bool
+        expectedHardwareSerial: String?, refreshStaleTransport: Bool, explicitlyRequested: Bool
     ) async -> (success: Bool, output: String) {
         let path = getADBPath()
         guard !path.isEmpty else { return (false, "ADB not found") }
         let environment = Shell.serverEnvironment(port: serverPort)
+        let identityGenerations = wirelessIdentityGenerations
         var messages: [String] = []
         for attempt in 1...(refreshStaleTransport ? 2 : 1) {
             guard !Task.isCancelled, !isPairingInProgress else { return (false, "Connection cancelled or pairing in progress") }
@@ -306,7 +376,15 @@ class ADBManager {
                     if let expectedHardwareSerial, identity != expectedHardwareSerial {
                         return (false, "Device identity did not match remembered device")
                     }
+                    if !explicitlyRequested, let identity, isForgottenWirelessDevice(hardwareSerial: identity) {
+                        return (false, "Connection cancelled; device was removed")
+                    }
+                    if let identity,
+                       wirelessIdentityGenerations[identity, default: 0] != identityGenerations[identity, default: 0] {
+                        return (false, "Connection cancelled; device was removed")
+                    }
                     if let identity {
+                        if explicitlyRequested { recognizeWirelessDeviceAgain(hardwareSerial: identity) }
                         hardwareSerialCache[target] = identity
                         rememberWirelessDevice(target: target, hardwareSerial: identity,
                             hostname: WirelessDiscovery.shared.endpoints.first { $0.target == target }?.hostname)
@@ -366,21 +444,30 @@ class ADBManager {
             guard !path.isEmpty else { return false }
 
             print("🔄 ADB: Restarting ADB server...")
+            AppLogger.log("📶 [Pairing] restartServer: killing ADB server on port \(Shell.appADBServerPort)")
 
             let (killCode, _, killError) = await Shell.runAsyncWithTimeout(
-                path, args: ["kill-server"], timeoutSeconds: 2.0, environment: Shell.adbEnvironment
+                path, args: ["-P", String(Shell.appADBServerPort), "kill-server"],
+                timeoutSeconds: 2.0, environment: Shell.adbEnvironment
             )
             print("🔄 ADB: kill-server result: code=\(killCode), error=\(killError)")
+
+            // Wait for the daemon to fully release its socket. Without this
+            // delay, start-server can reconnect to the dying daemon and think
+            // it succeeded, but the daemon exits moments later.
+            try? await Task.sleep(nanoseconds: 700_000_000)
 
             guard !Task.isCancelled, !isPairingInProgress, activeDeviceSerial == nil else { return false }
 
             let (startCode, startOutput, startError) = await Shell.runAsyncWithTimeout(
-                path, args: ["start-server"], timeoutSeconds: 3.0, environment: Shell.adbEnvironment
+                path, args: ["-P", String(Shell.appADBServerPort), "start-server"],
+                timeoutSeconds: 3.0, environment: Shell.adbEnvironment
             )
             print("🔄 ADB: start-server result: code=\(startCode), output=\(startOutput), error=\(startError)")
 
             let success = startCode == 0 || startError.lowercased().contains("started successfully")
             print("🔄 ADB: Server restart \(success ? "✅ succeeded" : "❌ failed")")
+            AppLogger.log("📶 [Pairing] restartServer: start-server exitCode=\(startCode), success=\(success)")
             hasRestarted = true
             return success
         }
@@ -547,13 +634,20 @@ class ADBManager {
             if Task.isCancelled || satisfiesRequest(nativeOutput) || (result.0 == 0 && satisfiesRequest(result.1)) {
                 bonjourOutput = nativeOutput
             } else {
-                async let direct = directPairingServices(serviceName: requiredPairingService)
+                let visible = nativeOutput + "\n" + result.1 + "\n" + (bonjourServicesCache?.output ?? "")
+                let hosts = Array(Set(WirelessEndpoint.parse(visible).filter { $0.isConnectService }.map(\.host))).sorted()
+                async let direct = directPairingServices(serviceName: requiredPairingService, knownHosts: hosts)
                 let fallback = await cachedBonjourADBServices()
                 bonjourOutput = nativeOutput + "\n" + fallback + "\n" + (await direct)
             }
+
+            // Native SRV/address callbacks can arrive while the command-line
+            // fallback is resolving a hostname. Use the snapshot at completion,
+            // so that hostname cannot hide the numeric address just discovered.
+            let currentNativeOutput = WirelessDiscovery.shared.endpoints.map(\.outputLine).joined(separator: "\n")
             
             // If Bonjour is empty and ADB output is empty, return the original empty result
-            if bonjourOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (result.0 != 0 || result.1.isEmpty) {
+            if currentNativeOutput.isEmpty && bonjourOutput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (result.0 != 0 || result.1.isEmpty) {
                 return result
             }
             
@@ -580,7 +674,7 @@ class ADBManager {
             }
             
             // A current native resolution takes precedence over an ADB snapshot.
-            addLines(nativeOutput)
+            addLines(currentNativeOutput)
             if result.0 == 0 { addLines(result.1) }
             addLines(bonjourOutput)
             
@@ -625,14 +719,21 @@ class ADBManager {
         output.contains("_adb-tls-connect._tcp") || output.contains("_adb-tls-pairing._tcp")
     }
 
-    private static func directPairingServices(serviceName: String?) async -> String {
+    private static func directPairingServices(serviceName: String?, knownHosts: [String]) async -> String {
         guard let serviceName, !Task.isCancelled else { return "" }
         if let cache = pairingProbeCache, cache.serviceName == serviceName,
+           cache.hosts == knownHosts,
            Date().timeIntervalSince(cache.timestamp) < 2 { return cache.output }
-        let endpoints = await PairingMDNSProbe.discover(serviceName: serviceName)
+        let startedAt = Date()
+        let endpoints = await PairingMDNSProbe.discover(serviceName: serviceName, knownHosts: knownHosts)
         guard !Task.isCancelled else { return "" }
         let output = endpoints.map(\.outputLine).joined(separator: "\n")
-        pairingProbeCache = (serviceName, output, Date())
+        pairingProbeCache = (serviceName, knownHosts, output, Date())
+        if lastPairingProbeLog?.serviceName != serviceName ||
+            Date().timeIntervalSince(lastPairingProbeLog?.timestamp ?? .distantPast) >= 10 {
+            AppLogger.log("📷 [QRPairing] Exact mDNS query service=\(serviceName), knownHosts=\(knownHosts), endpoints=\(endpoints.count), elapsed=\(String(format: "%.2f", Date().timeIntervalSince(startedAt)))s")
+            lastPairingProbeLog = (serviceName, Date())
+        }
         for endpoint in endpoints {
             AppLogger.log("📷 [QRPairing] source=mdns-direct-reply, service=\(serviceName), target=\(endpoint.target)")
         }
@@ -3062,61 +3163,120 @@ class ADBManager {
     ///   - code: 6-digit pairing code (shown on device)
     /// - Returns: Tuple of (success, message)
     static func pairDevice(ip: String, port: String, code: String) async -> (Bool, String) {
-        let adbPath = getADBPath()
-        guard !adbPath.isEmpty else {
-            return (false, "ADB not found")
+        guard !ip.isEmpty, let pairingPort = UInt16(port), pairingPort > 0 else {
+            return (false, "Invalid pairing address or port")
         }
-        
-        let target = "\(ip):\(port)"
-        
-        // Protect the TLS handshake from background restartServer() calls.
-        isPairingInProgress = true
-        defer { isPairingInProgress = false }
-        
-        func attemptPairing() async -> (Int32, String, String) {
-            print("📶 ADB: Pairing with \(target)...")
-            return await Shell.runAsyncWithTimeout(
-                adbPath, args: ["pair", target, code], timeoutSeconds: 15.0
-            )
+        let (exitCode, output, error) = await performPairing(
+            target: WirelessEndpoint.target(host: ip, port: pairingPort), code: code, timeoutSeconds: 15)
+        let combined = (output + " " + error).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if combined.lowercased().contains("unable to start pairing client") {
+            return (false, pairingConnectionFailureMessage(combined, usingQRCode: false) + " " + combined)
         }
-        
-        var (exitCode, output, error) = await attemptPairing()
-        var combined = output + error
-        print("📶 ADB Pair result: code=\(exitCode), output=\(combined)")
-        
-        // Protocol fault = local ADB daemon failure; phone never saw the attempt
-        // so the pairing code is still valid. Restart daemon and retry once.
+
         if isProtocolError(combined) {
-            print("🔄 ADB: Protocol fault during pairing — restarting and retrying...")
-            isPairingInProgress = false
-            let restarted = await restartServer()
-            isPairingInProgress = true
-            
-            if restarted {
-                (exitCode, output, error) = await attemptPairing()
-                combined = output + error
-                print("📶 ADB Pair retry result: code=\(exitCode), output=\(combined)")
-            }
+            return (false, "The pairing handshake could not complete. Re-open 'Pair device with pairing code' on your phone and enter the new code.")
         }
-        
-        if isProtocolError(combined) {
-            return (false, "Connection to ADB service was interrupted. Please re-open 'Pair device with pairing code' on your phone and enter the new code.")
-        }
-        
-        if exitCode == 0 && (combined.lowercased().contains("successfully paired") || combined.lowercased().contains("paired")) {
+
+        if exitCode == 0 && combined.lowercased().contains("successfully paired") {
             hasRestarted = false
             return (true, "Successfully paired with device")
         } else if combined.lowercased().contains("failed") {
-            return (false, "Pairing failed. Check the pairing code and try again.")
+            return (false, combined)
         } else if exitCode != 0 {
             return (false, error.isEmpty ? "Pairing failed (code \(exitCode))" : error)
         }
         
-        return (true, combined)
+        return (false, combined.isEmpty ? "Pairing did not report success. Re-open the pairing dialog and try again." : combined)
     }
 
+    static func pairingConnectionFailureMessage(_ output: String, usingQRCode: Bool) -> String {
+        let lower = output.lowercased()
+        let retry = usingQRCode
+            ? "Keep 'Pair device with QR code' open on your phone, click Try Again and scan the new QR."
+            : "Re-open 'Pair device with pairing code' on your phone and enter its current address and code."
+        if lower.contains("operation not permitted") || lower.contains("permission denied") {
+            return "Phone detected, but macOS blocked the pairing connection. Allow AndroidFileSync in System Settings → Privacy & Security → Local Network, then retry."
+        }
+        if lower.contains("connection refused") {
+            return "Phone detected, but its pairing port is closed. " + retry
+        }
+        if lower.contains("host is down") || lower.contains("no route to host") || lower.contains("network is unreachable") || lower.contains("timed out") {
+            return "Phone detected, but its pairing port cannot be reached. Use the same Wi-Fi network and check whether a VPN or router blocks connections between devices. " + retry
+        }
+        return "Phone detected, but ADB could not open the pairing connection. " + retry
+            + " Check AndroidFileSync's Local Network access and whether a VPN or router blocks connections between devices."
+    }
 
-    
+    /// Run at most two handshakes, pinned to the same server. A remote pairing
+    /// failure does not justify restarting a healthy daemon or changing servers.
+    static func performPairing(target: String, code: String, timeoutSeconds: Double = 12,
+                               isCurrent: () -> Bool = { true }) async -> (Int32, String, String) {
+        let cancelled: (Int32, String, String) = (-999, "", "Pairing cancelled")
+        guard !Task.isCancelled, isCurrent() else { return cancelled }
+        let path = getADBPath()
+        guard !path.isEmpty else { return (-1, "", "ADB not found") }
+        let environment = Shell.activeADBEnvironment
+        let port = Int(environment["ANDROID_ADB_SERVER_PORT"] ?? "") ?? Shell.appADBServerPort
+
+        if let restart = restartServerTask {
+            _ = await restart.value
+            guard !Task.isCancelled, isCurrent() else { return cancelled }
+        }
+        isPairingInProgress = true
+        // A cancelled QR generation must not clear its replacement's guard.
+        defer { if isCurrent() { isPairingInProgress = false } }
+        let diagnostics = ADBPairingDiagnostics(environment: environment)
+
+        func attempt(_ number: Int) async -> (Int32, String, String) {
+            AppLogger.log("📶 [Pairing] Attempt \(number)/2: adb -P \(port) pair \(target) <redacted>")
+            let result = await Shell.runAsyncWithTimeout(path,
+                args: ["-P", String(port), "pair", target, code], timeoutSeconds: timeoutSeconds,
+                environment: environment)
+            let combined = (result.1 + " " + result.2).trimmingCharacters(in: .whitespacesAndNewlines)
+            AppLogger.log("📶 [Pairing] Attempt \(number)/2 exitCode=\(result.0), output='\(combined)'",
+                          level: result.0 == 0 ? .info : .warning)
+            return result
+        }
+
+        let first = await attempt(1)
+        guard !Task.isCancelled, isCurrent() else { return cancelled }
+        guard first.0 != 0, isProtocolError(first.1 + first.2) else { return first }
+
+        let health = await Shell.runAsyncWithTimeout(path, args: ["-P", String(port), "devices"],
+            timeoutSeconds: 2, environment: environment)
+        guard !Task.isCancelled, isCurrent() else { return cancelled }
+        let daemonFault = health.0 != 0 && isProtocolError(health.1 + health.2)
+        AppLogger.log("📶 [Pairing] Server health on port \(port): exitCode=\(health.0), daemonFault=\(daemonFault)",
+                      level: daemonFault ? .warning : .info)
+        if daemonFault {
+            guard port == Shell.appADBServerPort, !Shell.useDefaultServer else { return first }
+            isPairingInProgress = false
+            let restarted = await restartServer()
+            guard !Task.isCancelled, isCurrent() else { return cancelled }
+            isPairingInProgress = true
+            guard restarted else { return first }
+            return await attempt(2)
+        }
+
+        // The bundled CLI misreads the daemon's OKAY + FAIL framing. Decode the
+        // second reply directly so a TCP failure is not presented as a bad code.
+        AppLogger.log("📶 [Pairing] Keeping the healthy ADB server; reading the second pairing response.", level: .warning)
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        guard !Task.isCancelled, isCurrent() else { return cancelled }
+        var result = await ADBPairingResponse.pair(serverPort: port, target: target, code: code,
+                                                  timeout: timeoutSeconds)
+        guard !Task.isCancelled, isCurrent() else { return cancelled }
+        if result.0 != 0, result.2.lowercased().contains("unable to start pairing client"),
+           let reason = diagnostics.socketFailure(target: target, code: code) {
+            result.2 += " " + reason
+        }
+        let combined = (result.1 + " " + result.2).trimmingCharacters(in: .whitespacesAndNewlines)
+        AppLogger.log("📶 [Pairing] Attempt 2/2 exitCode=\(result.0), response='\(combined)'",
+                      level: result.0 == 0 ? .info : .warning)
+        return result
+    }
+
     /// Connects to a device over WiFi after pairing.
     /// ADB 37+ supports stable mDNS hostnames (e.g. `adb-XXXX.local`) that remain valid
     /// even when the phone's IP changes. When `hostname` is provided, this method tries
@@ -3166,7 +3326,7 @@ class ADBManager {
                 attemptedAt[target] = Date()
                 let result = await connectAndVerifyWirelessTarget(target,
                     connectTimeout: min(2, deadline.timeIntervalSinceNow), verificationAttempts: 1,
-                    expectedHardwareSerial: expected)
+                    expectedHardwareSerial: expected, explicitlyRequested: true)
                 guard !Task.isCancelled else { return (false, "Connection cancelled", nil) }
                 if result.success { return (true, "Connected to \(target)", target) }
                 lastFailure = result.output
@@ -3304,7 +3464,7 @@ class ADBManager {
         if let cached = hardwareSerialCache[target] { return cached }
         if !isWirelessSerial(target) { return target }
         if let serial = extractHardwareSerial(from: target) {
-            hardwareSerialCache[target] = serial
+            if !isForgottenWirelessDevice(hardwareSerial: serial) { hardwareSerialCache[target] = serial }
             return serial
         }
         let path = getADBPath()
@@ -3316,7 +3476,7 @@ class ADBManager {
               let serial = output.split(whereSeparator: { $0.isNewline })
                 .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
                 .first(where: { !$0.isEmpty && $0 != "unknown" && !isWirelessSerial($0) }) else { return nil }
-        hardwareSerialCache[target] = serial
+        if !isForgottenWirelessDevice(hardwareSerial: serial) { hardwareSerialCache[target] = serial }
         return serial
     }
 

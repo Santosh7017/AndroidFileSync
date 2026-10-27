@@ -18,11 +18,15 @@ struct EmptyStateView: View {
     var isRefreshingRecognizedDevices = false
     var lastRecognizedRefreshDate: Date? = nil
     var recognizedRefreshError: String? = nil
+    var connectingWirelessSerials: Set<String> = []
+    var recognizedConnectionErrors: [String: String] = [:]
     var userDisconnected = false
     var unavailableDevice: ADBManager.ConnectedDevice? = nil
     var onRetry: (() -> Void)? = nil
     var onConnectWiFi: ((WirelessConnectView.PairingTab) -> Void)? = nil
     var onRefreshRecognizedDevices: (() -> Void)? = nil
+    var onConnectRecognizedDevice: ((String) -> Void)? = nil
+    var onRemoveRecognizedDevice: ((String) -> Void)? = nil
     var isUSBOccupied = false
     var isClaimingUSB = false
     var onClaimUSB: (() -> Void)? = nil
@@ -33,6 +37,9 @@ struct EmptyStateView: View {
     private var needsAuthorization: Bool { unavailableDevice?.status == "unauthorized" }
     private var needsAttention: Bool { unavailableDevice != nil || isUSBOccupied }
     private var scanInProgress: Bool { isDetecting }
+    private var connectingDevice: RecognizedWirelessDevice? {
+        recognizedWirelessDevices.first { connectingWirelessSerials.contains($0.id) }
+    }
 
     var body: some View {
         GeometryReader { geometry in
@@ -89,6 +96,7 @@ struct EmptyStateView: View {
         }
         if unavailableDevice != nil { return "Your device needs attention" }
         if isUSBOccupied { return "USB is being used by another app" }
+        if let connectingDevice { return "Connecting to \(connectingDevice.displayName)…" }
         if userDisconnected { return "Wireless reconnect is paused" }
         if isSearchingWireless && scanInProgress { return "Looking for your paired device" }
         if isDetecting { return "Checking for connected devices" }
@@ -108,10 +116,11 @@ struct EmptyStateView: View {
             return "\(device.displayName) is offline. \(device.isWireless ? "Enable Wireless debugging and check that both devices are on the same Wi-Fi." : "Reconnect the USB cable and keep your phone unlocked.")"
         }
         if isUSBOccupied { return "Use Claim USB below to release the connection and try again." }
+        if connectingDevice != nil { return "Keep Wireless debugging enabled and both devices on the same Wi-Fi." }
         if userDisconnected { return "Scan USB & Wi-Fi to resume, or open Nearby devices to connect to a phone." }
         if isSearchingWireless && scanInProgress { return "Checking the local network for a previously paired phone. You can also connect below." }
         if isDetecting { return "Checking USB and existing wireless connections. Setup options are ready to use." }
-        if recognizedWirelessDevices.contains(where: \.isNearby) { return "Open Nearby devices to connect, or pair a new phone with a QR code." }
+        if recognizedWirelessDevices.contains(where: \.isNearby) { return "Click Connect next to your recognized phone, or pair a new phone with a QR code." }
         if scanTimedOut { return "Enable Wireless debugging on the same Wi-Fi, or connect a USB cable. We’ll keep checking in the background." }
         return "No device connected yet. Plug in a USB cable or pair your phone over Wi-Fi."
     }
@@ -119,7 +128,7 @@ struct EmptyStateView: View {
     private var discoveryStatus: some View {
         HStack(alignment: .center, spacing: 14) {
             Group {
-                if scanInProgress && !needsAttention && !userDisconnected {
+                if (scanInProgress || connectingDevice != nil) && !needsAttention && !userDisconnected {
                     ProgressView().controlSize(.small)
                 } else {
                     Image(systemName: needsAttention ? "exclamationmark.circle.fill" : "dot.radiowaves.left.and.right")
@@ -280,7 +289,7 @@ struct EmptyStateView: View {
                         .font(.system(size: 11, weight: .medium))
                     }
                     .buttonStyle(.borderless)
-                    .disabled(isRefreshingRecognizedDevices || scanInProgress || recognizedWirelessDevices.isEmpty)
+                    .disabled(isRefreshingRecognizedDevices || scanInProgress || !connectingWirelessSerials.isEmpty || recognizedWirelessDevices.isEmpty)
                     .accessibilityLabel("Refresh previously recognized devices")
                     .help("Check which recognized Wi-Fi devices are currently available")
                 }
@@ -304,7 +313,7 @@ struct EmptyStateView: View {
                         }
                     }
                 }
-                .frame(height: CGFloat(min(recognizedWirelessDevices.count, 2)) * 44 - 8)
+                .frame(height: CGFloat(min(recognizedWirelessDevices.count, 2)) * 52 - 8)
                 if recognizedWirelessDevices.count > 2 {
                     Text("\(recognizedWirelessDevices.count) recognized devices · Scroll to see all")
                         .font(.system(size: 10))
@@ -315,7 +324,11 @@ struct EmptyStateView: View {
     }
 
     private func recognizedDeviceRow(_ device: RecognizedWirelessDevice) -> some View {
-        HStack(spacing: 10) {
+        let isConnecting = connectingWirelessSerials.contains(device.id)
+        let error = recognizedConnectionErrors[device.id]
+        let detail = isConnecting ? "Connecting…" : error ?? (isRefreshingRecognizedDevices ? "Checking availability…" :
+            (device.address.map { "Available now · \($0)" } ?? "Not currently found"))
+        return HStack(spacing: 8) {
             Image(systemName: "iphone")
                 .font(.system(size: 16))
                 .foregroundStyle(device.isNearby ? Color.teal : .secondary)
@@ -327,16 +340,42 @@ struct EmptyStateView: View {
                     .font(.system(size: 12, weight: .medium))
                     .lineLimit(1)
                     .help(device.displayName)
-                Text(isRefreshingRecognizedDevices ? "Checking availability…" :
-                        (device.address.map { "Available now · \($0)" } ?? "Not currently found"))
+                Text(detail)
                     .font(.system(size: 10))
-                    .foregroundStyle(device.isNearby ? Color.teal : .secondary)
+                    .foregroundStyle(isConnecting ? Color.accentColor : error != nil ? .orange : device.isNearby ? .teal : .secondary)
                     .lineLimit(1)
+                    .help(detail)
             }
             Spacer(minLength: 0)
+            if let onConnectRecognizedDevice {
+                Button { onConnectRecognizedDevice(device.id) } label: {
+                    HStack(spacing: 4) {
+                        if isConnecting {
+                            ProgressView().controlSize(.mini).accessibilityHidden(true)
+                        }
+                        Text(isConnecting ? "Connecting…" : "Connect")
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.borderless)
+                .disabled(isConnecting)
+                .accessibilityLabel(isConnecting ? "Connecting to \(device.displayName)" : "Connect to \(device.displayName)")
+                .help("Connect to this phone using its current Wi-Fi address")
+            }
+            if let onRemoveRecognizedDevice {
+                Button { onRemoveRecognizedDevice(device.id) } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 11))
+                        .frame(width: 24, height: 28)
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Remove \(device.displayName) from known devices")
+                .help("Remove from known devices")
+            }
         }
-        .frame(height: 36)
-        .accessibilityElement(children: .combine)
+        .frame(height: 44)
+        .accessibilityElement(children: .contain)
     }
 
     private var cardBackground: some View {

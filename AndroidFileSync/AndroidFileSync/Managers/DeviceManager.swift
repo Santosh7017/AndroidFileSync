@@ -23,6 +23,8 @@ class DeviceManager: ObservableObject {
     @Published private(set) var isRefreshingRecognizedDevices = false
     @Published private(set) var lastRecognizedRefreshDate: Date?
     @Published private(set) var recognizedRefreshError: String?
+    @Published private(set) var connectingWirelessSerials: Set<String> = []
+    @Published private(set) var recognizedConnectionErrors: [String: String] = [:]
     @Published var lastWirelessIP = ""
     /// All currently connected ADB devices (USB + wireless)
     @Published var availableDevices: [ADBManager.ConnectedDevice] = []
@@ -83,6 +85,7 @@ class DeviceManager: ObservableObject {
     /// Single in-flight wireless hunt task to avoid spawning one per detect cycle.
     @Published private var wirelessHuntTask: Task<Void, Never>? = nil
     private var wirelessHuntID = UUID()
+    private var explicitlyConnectingSerial: String?
     private var prewarmedSerials = Set<String>()
     private var pendingUSBEvent = false
     private var metadataTask: Task<Void, Never>?
@@ -109,6 +112,7 @@ class DeviceManager: ObservableObject {
     }
     private var passiveDiscoveryTask: Task<Void, Never>?
     private var recognizedRefreshTask: Task<Void, Never>?
+    private var recognizedRefreshID = UUID()
     private var lastPassiveDiscoveryAt = Date.distantPast
     /// Cache last liveness check timestamp per wireless serial to prevent spamming adb shell commands.
     private var lastLivenessCheckAt: [String: Date] = [:]
@@ -187,7 +191,8 @@ class DeviceManager: ObservableObject {
     /// Explicitly re-browse remembered wireless identities without retrying USB
     /// or changing the user's automatic-reconnect preference.
     func refreshRecognizedWirelessDevices() async {
-        guard !isRefreshingRecognizedDevices, !(isWirelessReconnectHuntActive && isDetecting),
+        guard !isRefreshingRecognizedDevices, explicitlyConnectingSerial == nil,
+              !(isWirelessReconnectHuntActive && isDetecting),
               !ADBPairingBrowser.isPairingActive, !ADBManager.isPairingInProgress,
               !AppProcessLifecycle.isTerminating, !Task.isCancelled else { return }
         let serials = Set(ADBManager.rememberedWirelessSerials)
@@ -195,6 +200,8 @@ class DeviceManager: ObservableObject {
         // An explicit availability check takes priority over quiet reconnect work.
         if isWirelessReconnectHuntActive { cancelWirelessReconnectHunt() }
         let generation = detectionGeneration
+        let refreshID = UUID()
+        recognizedRefreshID = refreshID
         isRefreshingRecognizedDevices = true
         recognizedRefreshError = nil
         passiveDiscoveryTask?.cancel()
@@ -202,12 +209,13 @@ class DeviceManager: ObservableObject {
         let task = Task { [weak self] in
             guard let self else { return }
             defer {
-                if self.detectionGeneration == generation {
+                if self.detectionGeneration == generation, self.recognizedRefreshID == refreshID {
                     self.isRefreshingRecognizedDevices = false
                     self.recognizedRefreshTask = nil
                 }
             }
-            guard self.detectionGeneration == generation, !Task.isCancelled else { return }
+            guard self.detectionGeneration == generation, self.recognizedRefreshID == refreshID,
+                  !Task.isCancelled else { return }
             self.discoveredWirelessEndpoints = []
             self.discoveredWirelessEndpointsAt = .distantPast
             WirelessDiscovery.shared.start()
@@ -215,7 +223,7 @@ class DeviceManager: ObservableObject {
             self.updateWirelessDiscoverySummary()
 
             let result = await ADBManager.discoverWirelessEndpoints(for: serials)
-            guard self.detectionGeneration == generation, !Task.isCancelled,
+            guard self.detectionGeneration == generation, self.recognizedRefreshID == refreshID, !Task.isCancelled,
                   !AppProcessLifecycle.isTerminating else { return }
             self.discoveredWirelessEndpoints = result.endpoints
             self.discoveredWirelessEndpointsAt = Date()
@@ -229,6 +237,86 @@ class DeviceManager: ObservableObject {
         }
         recognizedRefreshTask = task
         await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
+    }
+
+    /// Connect only the selected saved identity, using its current advertisements.
+    func connectRecognizedWirelessDevice(serial: String) async {
+        guard ADBManager.rememberedWirelessSerials.contains(serial),
+              !connectingWirelessSerials.contains(serial), explicitlyConnectingSerial != serial,
+              !ADBPairingBrowser.isPairingActive, !ADBManager.isPairingInProgress,
+              !AppProcessLifecycle.isTerminating, !Task.isCancelled else { return }
+        let previousHunt = wirelessHuntTask
+        cancelWirelessReconnectHunt()
+        recognizedRefreshID = UUID()
+        recognizedRefreshTask?.cancel()
+        recognizedRefreshTask = nil
+        isRefreshingRecognizedDevices = false
+        passiveDiscoveryTask?.cancel()
+        passiveDiscoveryTask = nil
+        userDisconnected = false
+        ADBPairingBrowser.suppressAutoConnect = false
+        let id = UUID()
+        wirelessHuntID = id
+        explicitlyConnectingSerial = serial
+        connectingWirelessSerials.insert(serial)
+        recognizedConnectionErrors.removeValue(forKey: serial)
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.wirelessHuntID == id {
+                    self.wirelessHuntTask = nil
+                    self.explicitlyConnectingSerial = nil
+                    self.connectingWirelessSerials.removeAll()
+                    self.hasFinishedWirelessSearch = true
+                    self.settleConnectionScan()
+                }
+            }
+            if let previousHunt { await previousHunt.value }
+            guard self.wirelessHuntID == id, !Task.isCancelled,
+                  ADBManager.rememberedWirelessSerials.contains(serial) else { return }
+            WirelessDiscovery.shared.start()
+            await self.reconnectRememberedDevices(id: id, serials: [serial])
+        }
+        wirelessHuntTask = task
+        await withTaskCancellationHandler(operation: { await task.value }, onCancel: { task.cancel() })
+    }
+
+    /// Forget this phone locally and prevent in-flight discovery from reconnecting it.
+    func removeRecognizedWirelessDevice(serial: String) {
+        guard ADBManager.rememberedWirelessSerials.contains(serial) else { return }
+        let endpoints = WirelessDiscovery.shared.endpoints + discoveredWirelessEndpoints
+        let matchingDevices = availableDevices.filter { $0.isWireless && $0.derivedHardwareSerial == serial }
+        let matchingTransports = Set(matchingDevices.map(\.serial))
+        let targets = Set(endpoints.filter { $0.hardwareSerial == serial }.map(\.target) + matchingDevices.map(\.serial))
+        let wasActive = matchingDevices.contains { $0.serial == ADBManager.activeDeviceSerial }
+        if explicitlyConnectingSerial == serial { cancelWirelessReconnectHunt() }
+        let forgottenTargets = ADBManager.forgetWirelessDevice(hardwareSerial: serial, additionalTargets: targets)
+        connectingWirelessSerials.remove(serial)
+        recognizedConnectionErrors.removeValue(forKey: serial)
+        for target in forgottenTargets {
+            attemptedWirelessEndpoints.removeValue(forKey: target)
+            lastLivenessCheckAt.removeValue(forKey: target)
+            prewarmedSerials.remove(target)
+        }
+        discoveredWirelessEndpoints.removeAll { $0.hardwareSerial == serial }
+        availableDevices.removeAll { matchingTransports.contains($0.serial) }
+        if wasActive {
+            metadataTask?.cancel()
+            diagnosticsTask?.cancel()
+            initializedSerial = nil
+            diagnosticsComplete = false
+            connectionHealthMonitor.stopMonitoring()
+            lastWirelessIP = ""
+            sdCardPath = nil
+            storageStats = [:]
+            isConnected = false
+            connectionType = .none
+            deviceName = "No Device"
+            statusMessage = "Device removed. Connect or pair it again to add it."
+            ADBManager.invalidateFolderSizeCache()
+        }
+        updateWirelessDiscoverySummary()
+        AppLogger.log("📱 [RecognizedDevices] Removed remembered serial=\(serial)")
     }
     
     // MARK: - Core Logic
@@ -263,6 +351,7 @@ class DeviceManager: ObservableObject {
             defer {
                 if self.wirelessHuntID == id {
                     self.wirelessHuntTask = nil
+                    self.connectingWirelessSerials.removeAll()
                     self.hasFinishedWirelessSearch = true
                     self.settleConnectionScan()
                     if !self.isConnected, !self.isDetectionInProgress, !self.pendingDetection {
@@ -308,6 +397,7 @@ class DeviceManager: ObservableObject {
         var recoveryNeeded = false
         var recoveryAttempted = false
         var recoveringServer = false
+        var lastFailures: [String: String] = [:]
         AppLogger.log("📱 [StartupReconnect] Resolving current connect services for serials=\(serials.sorted())")
         await withTaskGroup(of: ReconnectEvent.self) { group in
             while Date() < deadline, !Task.isCancelled, wirelessHuntID == id,
@@ -318,8 +408,9 @@ class DeviceManager: ObservableObject {
                 connectedIDs.formUnion(availableDevices.filter {
                     $0.status == "device" && $0.isWireless && lastLivenessCheckAt[$0.serial] != nil
                 }.compactMap(\.derivedHardwareSerial))
-                if serials.isSubset(of: connectedIDs) { group.cancelAll(); return }
-                let missing = serials.subtracting(connectedIDs)
+                let currentSerials = serials.intersection(ADBManager.rememberedWirelessSerials)
+                if currentSerials.isSubset(of: connectedIDs) { group.cancelAll(); return }
+                let missing = currentSerials.subtracting(connectedIDs)
                 let candidates = WirelessReconnectPolicy.candidates(
                     endpoints: WirelessDiscovery.shared.endpoints + freshDiscoveredWirelessEndpoints, rememberedSerials: missing)
                 let shouldRecover = recoveryNeeded && !recoveryAttempted && active.isEmpty &&
@@ -332,6 +423,10 @@ class DeviceManager: ObservableObject {
                     lastAttempts[candidate.target] = Date()
                     attemptedWirelessEndpoints[candidate.target] = Date()
                     active.insert(candidate.target)
+                    if let serial = candidate.hardwareSerial {
+                        connectingWirelessSerials.insert(serial)
+                        recognizedConnectionErrors.removeValue(forKey: serial)
+                    }
                     group.addTask {
                         let result = await ADBManager.connectAndVerifyWirelessTarget(candidate.target,
                             connectTimeout: 2.5, verificationAttempts: 1,
@@ -384,17 +479,24 @@ class DeviceManager: ObservableObject {
                     lastAttempts.removeAll()
                 case .connected(let candidate, let success, let output):
                     active.remove(candidate.target)
+                    guard let hardwareSerial = candidate.hardwareSerial,
+                          ADBManager.rememberedWirelessSerials.contains(hardwareSerial) else { continue }
                     AppLogger.log("📱 [StartupReconnect] serial=\(candidate.hardwareSerial ?? "unknown"), target=\(candidate.target), result=\(success ? "connected" : output)")
                     if ADBManager.isProtocolError(output) { recoveryNeeded = true }
                     if success {
-                        if let hw = candidate.hardwareSerial { connectedIDs.insert(hw) }
+                        if let hw = candidate.hardwareSerial {
+                            connectedIDs.insert(hw)
+                            connectingWirelessSerials.remove(hw)
+                            recognizedConnectionErrors.removeValue(forKey: hw)
+                        }
                         markDeviceAsLive(candidate.target)
                         await detectDevice()
-                        if serials.isSubset(of: connectedIDs) { group.cancelAll(); return }
+                        if serials.intersection(ADBManager.rememberedWirelessSerials).isSubset(of: connectedIDs) {
+                            group.cancelAll(); return
+                        }
                     } else {
-                        let lower = output.lowercased()
-                        if lower.contains("refused") || lower.contains("host is down") || lower.contains("no route") ||
-                           ADBManager.wirelessConnectionRequiresRepair(output) || lower.contains("identity did not match") {
+                        if let hw = candidate.hardwareSerial { lastFailures[hw] = output }
+                        if ADBManager.shouldRejectWirelessEndpoint(output) {
                             // A closed port is obsolete. Wait for a different resolved endpoint.
                             attempts[candidate.target] = 2
                         }
@@ -402,6 +504,15 @@ class DeviceManager: ObservableObject {
                 }
             }
             group.cancelAll()
+        }
+        guard wirelessHuntID == id, !Task.isCancelled, !AppProcessLifecycle.isTerminating,
+              !ADBPairingBrowser.isPairingActive, !ADBManager.isPairingInProgress else { return }
+        for serial in serials.subtracting(connectedIDs) where ADBManager.rememberedWirelessSerials.contains(serial) {
+            recognizedConnectionErrors[serial] = lastFailures[serial].map { output in
+                ADBManager.wirelessConnectionRequiresRepair(output)
+                    ? "Pair this phone again to allow access."
+                    : "Couldn’t connect. Check Wireless debugging and Wi-Fi."
+            } ?? "Not found. Enable Wireless debugging on the same Wi-Fi."
         }
     }
 
@@ -487,7 +598,22 @@ class DeviceManager: ObservableObject {
 
     private func applyDeviceSnapshot(_ snapshot: [ADBManager.ConnectedDevice], generation: UUID) async {
         guard detectionGeneration == generation, !Task.isCancelled, !AppProcessLifecycle.isTerminating else { return }
-        var allDevices = snapshot
+        var allDevices = snapshot.filter {
+            !ADBManager.isForgottenWirelessTarget($0.serial, hardwareSerial: $0.derivedHardwareSerial)
+        }
+        // An ADB daemon can retain authorization and reconnect on a new port.
+        // Resolve an unknown transport before selecting it when phones have
+        // been removed, so a port change cannot bypass the forgotten identity.
+        if ADBManager.hasForgottenWirelessDevices {
+            for device in allDevices where device.isWireless && device.derivedHardwareSerial == nil {
+                let identity = await ADBManager.getHardwareSerial(for: device.serial)
+                guard detectionGeneration == generation, !Task.isCancelled else { return }
+                if let identity, ADBManager.isForgottenWirelessDevice(hardwareSerial: identity) {
+                    allDevices.removeAll { $0.serial == device.serial }
+                    Shell.serverPortBySerial.removeValue(forKey: device.serial)
+                }
+            }
+        }
         lastLivenessCheckAt = lastLivenessCheckAt.filter { serial, _ in
             snapshot.contains { $0.serial == serial && $0.status == "device" }
         }
@@ -518,6 +644,10 @@ class DeviceManager: ObservableObject {
                 }
             }
 
+            // Remove may run while the liveness query above is suspended.
+            allDevices.removeAll {
+                ADBManager.isForgottenWirelessTarget($0.serial, hardwareSerial: $0.derivedHardwareSerial)
+            }
             let readyDevices = allDevices.filter { $0.status == "device" }
             let usbSerial = readyDevices.first(where: { !$0.isWireless })?.serial
             let wirelessSerial = readyDevices.first(where: { $0.isWireless })?.serial
@@ -718,7 +848,8 @@ class DeviceManager: ObservableObject {
                             ADBManager.rememberWirelessDevice(target: target, hardwareSerial: hwSerial,
                                 hostname: WirelessDiscovery.shared.endpoints.first { $0.target == target }?.hostname)
                             let name = self.deviceName.trimmingCharacters(in: .whitespacesAndNewlines)
-                            if !name.isEmpty, name != target, name != "No Device" {
+                            if !ADBManager.isForgottenWirelessDevice(hardwareSerial: hwSerial),
+                               !name.isEmpty, name != target, name != "No Device" {
                                 var names = UserDefaults.standard.dictionary(forKey: "wirelessDisplayNameBySerial") as? [String: String] ?? [:]
                                 names[hwSerial] = name
                                 UserDefaults.standard.set(names, forKey: "wirelessDisplayNameBySerial")
@@ -775,6 +906,8 @@ class DeviceManager: ObservableObject {
         wirelessHuntID = UUID()
         wirelessHuntTask?.cancel()
         wirelessHuntTask = nil
+        explicitlyConnectingSerial = nil
+        connectingWirelessSerials.removeAll()
         hasFinishedWirelessSearch = true
         // The cancelled task no longer owns cleanup after its ID changes.
         // Finish here so opening a pairing sheet cannot latch the dashboard spinner.
@@ -1025,10 +1158,12 @@ class DeviceManager: ObservableObject {
         detectionTask = nil
         detectionTaskID = UUID()
         isDetectionInProgress = false
+        recognizedRefreshID = UUID()
         recognizedRefreshTask?.cancel()
         recognizedRefreshTask = nil
         isRefreshingRecognizedDevices = false
         recognizedWirelessDevices = []
+        recognizedConnectionErrors.removeAll()
         adbMonitor.stop()
         adbMonitor.onChange = nil
         usbDetectionTask?.cancel()
