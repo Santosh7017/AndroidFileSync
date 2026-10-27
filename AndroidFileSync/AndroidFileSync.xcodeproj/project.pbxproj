@@ -32,6 +32,7 @@
 				Assets.xcassets,
 				ContentView.swift,
 				Managers/ADBManager.swift,
+				Managers/ADBPairingResponse.swift,
 				Managers/AppManager.swift,
 				Managers/ConnectionHealthMonitor.swift,
 				Managers/DeviceManager.swift,
@@ -350,6 +351,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
 				HEADER_SEARCH_PATHS = /opt/homebrew/include;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -399,6 +401,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
 				HEADER_SEARCH_PATHS = /opt/homebrew/include;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (

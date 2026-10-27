@@ -268,6 +268,8 @@ AndroidFileSync supports familiar Finder-like keyboard shortcuts for fast, mouse
 | Trash won't empty                   | Disconnect and reconnect your device, then try again.                                        |
 | App won't launch                    | Make sure you're on macOS 13.0 or newer, and that you ran the `xattr` command from step 3.   |
 
+If QR pairing detects the phone but reports **Unable to start pairing client**, ADB could not start the connection to the phone's pairing port. Keep **Pair device with QR code** open while scanning a fresh QR. On macOS versions with Local Network permissions, allow AndroidFileSync in **System Settings → Privacy & Security → Local Network**. Check that a VPN, guest Wi-Fi, or router isolation is not blocking connections between your Mac and phone. Trying a pairing code uses the same network connection and may fail for the same reason. Enable diagnostics and share a fresh failed attempt if the problem continues; the log now includes the underlying socket error when ADB provides it.
+
 ---
 
 ## Tech Stack

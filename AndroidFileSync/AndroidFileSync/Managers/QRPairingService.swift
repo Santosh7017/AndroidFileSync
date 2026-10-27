@@ -20,18 +20,20 @@ final class QRPairingService: ObservableObject {
 
     private var generation = UUID()
     private var pollTask: Task<Void, Never>?
-    private var regenerateTimer: Timer?
-    private let qrLifetimeSecs: TimeInterval = 60.0
+    private let discoveryTimeout: TimeInterval
 
-    private var ignoredEndpoints = Set<String>()
+    init(discoveryTimeout: TimeInterval = 60) {
+        self.discoveryTimeout = discoveryTimeout
+    }
 
     func start() {
         stopInternal()
-        ignoredEndpoints.removeAll()
         generateCredentials()
         // Block background mDNS auto-connect attempts for the complete QR flow,
         // including the period before the phone opens its pairing service.
         ADBPairingBrowser.isPairingActive = true
+        WirelessDiscovery.shared.watchPairingService(name: serviceName)
+        AppLogger.log("📷 [QRPairing] Resolving exact QR service=\(serviceName) through Bonjour.")
         state = .advertising
         AppLogger.log("📷 [QRPairing] Service started. State set to .advertising. Starting poll task.")
         let id = generation
@@ -39,13 +41,9 @@ final class QRPairingService: ObservableObject {
             guard let self else { return }
             await self.pairWhenPhoneAppears(generation: id)
         }
-        regenerateTimer = Timer.scheduledTimer(withTimeInterval: qrLifetimeSecs, repeats: false) { [weak self] _ in
-            DispatchQueue.main.async {
-                guard let self, self.generation == id, self.state == .advertising else { return }
-                AppLogger.log("📷 [QRPairing] QR lifetime expired (60s). Regenerating...", level: .warning)
-                self.start()
-            }
-        }
+        // Keep the displayed credentials until an explicit retry. Rotating them
+        // on a separate timer can discard a QR the phone has just scanned while
+        // its matching mDNS advertisement is still arriving.
     }
 
     func stop() {
@@ -76,8 +74,7 @@ final class QRPairingService: ObservableObject {
         defer {
             // A cancelled generation must not release a newer QR session's guards.
             if generation == id {
-                regenerateTimer?.invalidate()
-                regenerateTimer = nil
+                WirelessDiscovery.shared.stopWatchingPairingService(name: serviceName)
                 ADBManager.isPairingInProgress = false
                 ADBPairingBrowser.isPairingActive = false
             }
@@ -96,8 +93,9 @@ final class QRPairingService: ObservableObject {
         // Match the generated service identity, not a newly active transport or
         // an IP/port that may have belonged to a previous pairing advertisement.
         let startedAt = Date()
-        let deadline = startedAt.addingTimeInterval(qrLifetimeSecs)
+        let deadline = startedAt.addingTimeInterval(discoveryTimeout)
         var attempt = 0
+        var sawWirelessDebugging = false
         while Date() < deadline {
             attempt += 1
             guard !Task.isCancelled else {
@@ -111,9 +109,11 @@ final class QRPairingService: ObservableObject {
                 allowRecovery: false, requiredPairingService: sName)
             guard !Task.isCancelled, generation == id else { return }
             let trimmedOut = output.trimmingCharacters(in: .whitespacesAndNewlines)
+            let endpoints = WirelessEndpoint.parse(output)
+            sawWirelessDebugging = sawWirelessDebugging || endpoints.contains { $0.isConnectService }
 
             if attempt == 1 || attempt % 5 == 0 || trimmedOut.contains("_adb-tls-pairing._tcp") {
-                AppLogger.log("📷 [QRPairing] Poll \(attempt), elapsed=\(Int(Date().timeIntervalSince(startedAt)))s/\(Int(qrLifetimeSecs))s: mdns exitCode=\(exitCode), output=\(trimmedOut.isEmpty ? "<empty>" : trimmedOut)")
+                AppLogger.log("📷 [QRPairing] Poll \(attempt), elapsed=\(Int(Date().timeIntervalSince(startedAt)))s/\(Int(discoveryTimeout))s: mdns exitCode=\(exitCode), output=\(trimmedOut.isEmpty ? "<empty>" : trimmedOut)")
             }
 
             guard exitCode == 0 else {
@@ -123,109 +123,55 @@ final class QRPairingService: ObservableObject {
                 continue
             }
 
-            for endpoint in WirelessEndpoint.parse(output) where
-                endpoint.serviceType == "_adb-tls-pairing._tcp" && endpoint.serviceName == sName {
-                let ipPortStr = endpoint.target
-                if ignoredEndpoints.contains(ipPortStr) {
-                    continue
-                }
-                let ip = endpoint.host
-                AppLogger.log("📷 [QRPairing] Found matching service=\(sName), pairing target=\(ipPortStr)")
+            // A live numeric address may arrive while the discovery command
+            // returns its older hostname fallback. Recheck before invoking ADB.
+            let currentEndpoints = WirelessDiscovery.shared.endpoints + endpoints
+            guard let endpoint = currentEndpoints.first(where: {
+                $0.serviceType == "_adb-tls-pairing._tcp" && $0.serviceName == sName
+            }) else { continue }
+            AppLogger.log("📷 [QRPairing] Found matching service=\(sName), pairing target=\(endpoint.target)")
+            state = .pairing
+            AppLogger.log("📷 [QRPairing] State transitioned to .pairing")
 
-                if state == .advertising {
-                    state = .pairing
-                    regenerateTimer?.invalidate()
-                    regenerateTimer = nil
-                    AppLogger.log("📷 [QRPairing] State transitioned to .pairing")
-                }
-
-                AppLogger.log("📷 [QRPairing] Executing command: adb pair \(ipPortStr) <redacted>")
-
-                // Protect the TLS handshake from background ADB server restarts.
-                // Without these flags, DeviceManager/mDNS recovery can kill the
-                // daemon mid-handshake, causing "protocol fault" errors.
-                ADBManager.isPairingInProgress = true
-                ADBPairingBrowser.isPairingActive = true
-
-                var (pairCode, pairOut, pairErr) = await Shell.runAsyncWithTimeout(
-                    adbPath, args: ["pair", ipPortStr, code], timeoutSeconds: 12.0
-                )
-                guard !Task.isCancelled, generation == id else { return }
-                var pairCombined = (pairOut + " " + pairErr).trimmingCharacters(in: .whitespacesAndNewlines)
-                var pairSuccess = pairCode == 0 && pairCombined.lowercased().contains("successfully paired")
-                AppLogger.log("📷 [QRPairing] adb pair exitCode=\(pairCode), success=\(pairSuccess), output='\(pairCombined)'", level: pairSuccess ? .info : .warning)
-
-                // Protocol fault = local ADB daemon failure; the phone never saw
-                // the attempt so the pairing code is still valid.
-                // Restart the daemon and retry once (mirrors ADBManager.pairDevice).
-                if !pairSuccess && ADBManager.isProtocolError(pairCombined) {
-                    AppLogger.log("📷 [QRPairing] Protocol fault detected — restarting ADB server and retrying...", level: .warning)
-                    ADBManager.isPairingInProgress = false
-                    var restarted = await ADBManager.restartServer()
-                    guard !Task.isCancelled, generation == id else { return }
-
-                    // If the first restart failed (e.g. concurrent mDNS recovery
-                    // interfered), wait briefly and try once more.
-                    if !restarted {
-                        AppLogger.log("📷 [QRPairing] First restart failed — retrying restart after 2s...", level: .warning)
-                        try? await Task.sleep(nanoseconds: 2_000_000_000)
-                        restarted = await ADBManager.restartServer()
-                        guard !Task.isCancelled, generation == id else { return }
-                    }
-
-                    ADBManager.isPairingInProgress = true
-
-                    if restarted {
-                        AppLogger.log("📷 [QRPairing] Retrying: adb pair \(ipPortStr) <redacted>")
-                        (pairCode, pairOut, pairErr) = await Shell.runAsyncWithTimeout(
-                            adbPath, args: ["pair", ipPortStr, code], timeoutSeconds: 12.0
-                        )
-                        guard !Task.isCancelled, generation == id else { return }
-                        pairCombined = (pairOut + " " + pairErr).trimmingCharacters(in: .whitespacesAndNewlines)
-                        pairSuccess = pairCode == 0 && pairCombined.lowercased().contains("successfully paired")
-                        AppLogger.log("📷 [QRPairing] adb pair retry exitCode=\(pairCode), success=\(pairSuccess), output='\(pairCombined)'", level: pairSuccess ? .info : .warning)
-                    }
-                }
-
-                // The ADB daemon may be used again after the pair command, but keep
-                // browser auto-connect suppressed until connectAfterPair completes.
-                ADBManager.isPairingInProgress = false
-
-                if pairSuccess {
-                    await connectAfterPair(ip: ip)
-                    guard !Task.isCancelled, generation == id else { return }
-                    ADBPairingBrowser.isPairingActive = false
-                    return
+            let (pairCode, pairOut, pairErr) = await ADBManager.performPairing(
+                target: endpoint.target, code: code, isCurrent: { self.generation == id })
+            guard !Task.isCancelled, generation == id else { return }
+            let combined = (pairOut + " " + pairErr).trimmingCharacters(in: .whitespacesAndNewlines)
+            if pairCode == 0 && combined.lowercased().contains("successfully paired") {
+                await connectAfterPair(endpoint: endpoint)
+            } else {
+                AppLogger.log("📷 [QRPairing] Pairing handshake failed for \(endpoint.target): \(combined)", level: .error)
+                if combined.lowercased().contains("unable to start pairing client") {
+                    state = .failed(ADBManager.pairingConnectionFailureMessage(combined, usingQRCode: true))
+                } else if combined.lowercased().contains("wrong password or connection was dropped") {
+                    state = .failed("Phone detected, but it rejected the pairing code or closed the connection. Re-open 'Pair device with QR code', click Try Again and scan the fresh QR. If it repeats, use pairing code in Advanced.")
+                } else if ADBManager.isProtocolError(combined) {
+                    state = .failed("Phone detected, but the pairing handshake could not complete. Re-open 'Pair device with QR code' on your phone, then click Try Again and scan the new QR. If it still fails, use pairing code.")
                 } else {
-                    // Only permanently ignore this endpoint if it was NOT a
-                    // protocol fault. Protocol faults are ADB daemon issues —
-                    // the phone's pairing code is still valid and may succeed
-                    // once the daemon stabilizes on the next poll iteration.
-                    if !ADBManager.isProtocolError(pairCombined) {
-                        AppLogger.log("📷 [QRPairing] Pairing to \(ipPortStr) failed (\(pairCombined)). Ignoring endpoint.", level: .error)
-                        ignoredEndpoints.insert(ipPortStr)
-                    } else {
-                        AppLogger.log("📷 [QRPairing] Pairing to \(ipPortStr) failed with protocol fault (\(pairCombined)). Will retry on next poll.", level: .warning)
-                    }
-                    if state == .pairing {
-                        state = .advertising
-                        AppLogger.log("📷 [QRPairing] Reverted state to .advertising to keep QR code active for scan.")
-                    }
+                    state = .failed("Phone detected, but pairing failed. Re-open 'Pair device with QR code' on your phone, then click Try Again and scan the new QR." + (combined.isEmpty ? "" : " \(combined)"))
                 }
             }
+            // A detected phone gets one bounded pairing operation. Do not return
+            // to discovery and re-attempt the same service on every poll.
+            return
         }
 
         if state == .advertising || state == .pairing {
-            AppLogger.log("📷 [QRPairing] Poll loop finished (60s) without successful pairing.", level: .error)
-            state = .failed("Phone not detected within 60s. Make sure 'Pair device with QR code' was used and both devices are on the same Wi-Fi.")
+            AppLogger.log("📷 [QRPairing] Discovery finished (\(Int(discoveryTimeout))s) without a matching phone.", level: .error)
+            state = .failed(sawWirelessDebugging
+                ? "Wireless debugging was detected, but the QR pairing service did not respond. Re-open 'Pair device with QR code' and try again. If your phone stays on Pairing, use pairing code in Auto-Discovery."
+                : "QR pairing service not detected within \(Int(discoveryTimeout))s. Make sure 'Pair device with QR code' was used and both devices are on the same Wi-Fi.")
         }
     }
 
-    private func connectAfterPair(ip: String) async {
+    private func connectAfterPair(endpoint pairedEndpoint: WirelessEndpoint) async {
         let id = generation
-        let endpoint = WirelessDiscovery.shared.endpoints.first { $0.isConnectService && $0.host == ip }
+        let ip = pairedEndpoint.host
+        let endpoint = WirelessDiscovery.shared.endpoints.first {
+            $0.isConnectService && ($0.host == ip || (pairedEndpoint.hostname != nil && $0.hostname == pairedEndpoint.hostname))
+        }
         let result = await ADBManager.connectWireless(ip: ip, port: endpoint.map { String($0.port) } ?? "5555",
-            hostname: endpoint?.hostname)
+            hostname: endpoint?.hostname ?? pairedEndpoint.hostname)
         guard !Task.isCancelled, generation == id else { return }
         guard result.0, let target = result.2 else {
             state = .failed("Paired but could not connect. Keep Wireless debugging open and try Connect.")
@@ -238,11 +184,10 @@ final class QRPairingService: ObservableObject {
     }
 
     private func stopInternal() {
+        WirelessDiscovery.shared.stopWatchingPairingService(name: serviceName)
         generation = UUID()
         pollTask?.cancel()
         pollTask = nil
-        regenerateTimer?.invalidate()
-        regenerateTimer = nil
         // Clear protection flags in case we're stopped mid-handshake,
         // so they don't remain stuck and block future ADB restarts.
         ADBManager.isPairingInProgress = false
@@ -251,6 +196,5 @@ final class QRPairingService: ObservableObject {
 
     deinit {
         pollTask?.cancel()
-        regenerateTimer?.invalidate()
     }
 }

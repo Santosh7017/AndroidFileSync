@@ -33,6 +33,13 @@ struct DiscoveredDevice: Identifiable, Equatable {
     var pairingPort: UInt16?
     var connectPort: UInt16?
     var verifiedPaired: Bool?
+    var isRecognized: Bool {
+        if let serial = serviceName.flatMap(WirelessEndpoint.hardwareSerial(from:)),
+           ADBManager.isForgottenWirelessDevice(hardwareSerial: serial) { return false }
+        if let connectPort,
+           ADBManager.isForgottenWirelessTarget(WirelessEndpoint.target(host: ip, port: connectPort)) { return false }
+        return verifiedPaired == true
+    }
 }
 
 /// Browses the local network for ADB pairing services via mDNS.
@@ -403,7 +410,10 @@ class ADBPairingBrowser: ObservableObject {
 
                     let existing = self.discoveredDevices[dictKey]
                     // Don't mark as paired if this IP needs re-pairing
-                    let blocked = ADBPairingBrowser.needsRepairing.contains(ip)
+                    let forgotten = serviceName.flatMap(WirelessEndpoint.hardwareSerial(from:)).map {
+                        ADBManager.isForgottenWirelessDevice(hardwareSerial: $0)
+                    } ?? false
+                    let blocked = ADBPairingBrowser.needsRepairing.contains(ip) || forgotten
                     let updatedDevice = DiscoveredDevice(
                         ip: ip,
                         serviceName: existing?.serviceName ?? serviceName,
@@ -546,6 +556,8 @@ struct WirelessConnectView: View {
 
     private func saveCachedDisplayName(_ name: String, for serviceName: String?) {
         guard let serviceName, !serviceName.isEmpty else { return }
+        if let serial = WirelessEndpoint.hardwareSerial(from: serviceName),
+           ADBManager.isForgottenWirelessDevice(hardwareSerial: serial) { return }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != "No Device" else { return }
         var names = UserDefaults.standard.dictionary(forKey: Self.wirelessDisplayNameByServiceIDKey) as? [String: String] ?? [:]
@@ -1330,7 +1342,7 @@ struct WirelessConnectView: View {
     /// `deviceKey` is the dictionary key (service name or IP).
     private func discoveredDeviceRow(deviceKey: String, isSelected: Bool) -> some View {
         let dev = pairingBrowser.discoveredDevices[deviceKey]
-        let isAlreadyPaired = dev?.verifiedPaired == true
+        let isAlreadyPaired = dev?.isRecognized == true
         let isPairingThisDevice = pairingDeviceKey == deviceKey
         let cachedName = cachedDisplayName(for: dev?.serviceName)
         let displayName = cachedName ?? "Android Device"
@@ -1410,7 +1422,7 @@ struct WirelessConnectView: View {
             && deviceManager.connectionType == .wireless
             && deviceManager.lastWirelessIP == deviceIP
             && !deviceIP.isEmpty
-        let isAlreadyPaired = deviceObj?.verifiedPaired == true
+        let isAlreadyPaired = deviceObj?.isRecognized == true
         let isConnectingSelectedDevice = connectingDeviceKey == activeKey
 
         if isCurrentlyConnected {

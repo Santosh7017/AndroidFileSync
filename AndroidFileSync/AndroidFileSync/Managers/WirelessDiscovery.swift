@@ -125,7 +125,6 @@ nonisolated final class BonjourServiceResolver: @unchecked Sendable {
     private let type: String
     private let domain: String
     private let onEndpoint: @Sendable (WirelessEndpoint?) -> Void
-    private var resolveRef: DNSServiceRef?
     private var srvRef: DNSServiceRef?
     private var addressRef: DNSServiceRef?
     private struct SRVRecord {
@@ -133,16 +132,40 @@ nonisolated final class BonjourServiceResolver: @unchecked Sendable {
         let interface: UInt32
         let data: Data
         var port: UInt16 { UInt16(data[data.startIndex + 4]) << 8 | UInt16(data[data.startIndex + 5]) }
+        var hostname: String? {
+            // DNSServiceQueryRecord supplies an expanded SRV target in wire
+            // format. Reject incomplete/compressed names rather than passing
+            // an invalid target to address resolution.
+            var offset = data.startIndex + 6
+            var labels: [String] = []
+            while offset < data.endIndex {
+                let length = Int(data[offset])
+                offset += 1
+                if length == 0 { return offset == data.endIndex && !labels.isEmpty ? labels.joined(separator: ".") : nil }
+                guard length <= 63, offset + length <= data.endIndex,
+                      let label = String(data: data[offset..<(offset + length)], encoding: .utf8) else { return nil }
+                labels.append(label.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: ".", with: "\\."))
+                offset += length
+            }
+            return nil
+        }
     }
     private var srvRecords: [UInt32: SRVRecord] = [:]
     private var lastReconfirmation: [UInt16: Date] = [:]
     private var pendingReconfirmation: UInt16?
     private var hostname = ""
     private var port: UInt16 = 0
+    private var addressInterface: UInt32 = 0
     private var addresses = Set<String>()
     private var stopped = false
     private var retryWork: DispatchWorkItem?
     private var ipv6Publication: DispatchWorkItem?
+    private var lastQueryError: DNSServiceErrorType?
+
+    private func log(_ message: String) {
+        let name = name
+        Task { @MainActor in AppLogger.log("📱 [WirelessDiscovery] service=\(name), \(message)") }
+    }
 
     init(name: String, type: String, domain: String, onEndpoint: @escaping @Sendable (WirelessEndpoint?) -> Void) {
         self.name = name
@@ -160,20 +183,18 @@ nonisolated final class BonjourServiceResolver: @unchecked Sendable {
     }
 
     private func startOnQueue() {
-        guard !stopped, resolveRef == nil else { return }
-        let error = DNSServiceResolve(&resolveRef, DNSServiceFlags(kDNSServiceFlagsForceMulticast),
-            0, name, type, domain, Self.resolveReply, Unmanaged.passUnretained(self).toOpaque())
-        guard error == kDNSServiceErr_NoError, let resolveRef else { recoverOnQueue(); return }
-        guard DNSServiceSetDispatchQueue(resolveRef, queue) == kDNSServiceErr_NoError else { recoverOnQueue(); return }
-        // Retain the exact SRV bytes and interface so a failed TCP connection can
-        // ask mDNSResponder to verify its cache, rather than just reading it again.
+        guard !stopped, srvRef == nil else { return }
+        // Resolve SRV directly: DNSServiceResolve waits for both SRV and TXT,
+        // but ADB pairing needs only the advertised host, port and address.
+        // Retain the bytes/interface for reconfirming a refused connect port.
         var fullname = [CChar](repeating: 0, count: Int(kDNSServiceMaxDomainName))
-        guard DNSServiceConstructFullName(&fullname, name, type, domain) == 0 else { return }
+        guard DNSServiceConstructFullName(&fullname, name, type, domain) == 0 else { recoverOnQueue(); return }
         let queryError = DNSServiceQueryRecord(&srvRef, DNSServiceFlags(kDNSServiceFlagsForceMulticast),
             0, String(cString: fullname), UInt16(kDNSServiceType_SRV), UInt16(kDNSServiceClass_IN),
             Self.srvReply, Unmanaged.passUnretained(self).toOpaque())
         if queryError != kDNSServiceErr_NoError || srvRef == nil ||
             DNSServiceSetDispatchQueue(srvRef, queue) != kDNSServiceErr_NoError {
+            log("SRV query could not start, dnsError=\(queryError)")
             recoverOnQueue()
         }
     }
@@ -238,13 +259,14 @@ nonisolated final class BonjourServiceResolver: @unchecked Sendable {
         ipv6Publication?.cancel()
         ipv6Publication = nil
         if let addressRef { DNSServiceRefDeallocate(addressRef) }
-        if let resolveRef { DNSServiceRefDeallocate(resolveRef) }
         if let srvRef { DNSServiceRefDeallocate(srvRef) }
         addressRef = nil
-        resolveRef = nil
         srvRef = nil
         srvRecords.removeAll()
         addresses.removeAll()
+        hostname = ""
+        port = 0
+        addressInterface = 0
     }
 
     private func recoverOnQueue() {
@@ -288,42 +310,69 @@ nonisolated final class BonjourServiceResolver: @unchecked Sendable {
     private static let srvReply: DNSServiceQueryRecordReply = { reference, flags, interface, error, fullname, type, _, length, data, _, context in
         guard let context else { return }
         let resolver = Unmanaged<BonjourServiceResolver>.fromOpaque(context).takeUnretainedValue()
-        guard reference == resolver.srvRef, error == kDNSServiceErr_NoError,
+        guard reference == resolver.srvRef else { return }
+        guard error == kDNSServiceErr_NoError else {
+            if resolver.lastQueryError != error {
+                resolver.lastQueryError = error
+                resolver.log("SRV query failed, dnsError=\(error)")
+            }
+            return
+        }
+        resolver.lastQueryError = nil
+        guard
               type == UInt16(kDNSServiceType_SRV), length >= 7, let fullname, let data else { return }
         let record = SRVRecord(fullname: String(cString: fullname), interface: interface,
                                data: Data(bytes: data, count: Int(length)))
         if flags & DNSServiceFlags(kDNSServiceFlagsAdd) != 0 {
+            guard record.port > 0, record.hostname != nil else { return }
             resolver.srvRecords[interface] = record
             resolver.reconfirmOnQueue()
+            resolver.resolveAddress(for: record)
         } else if resolver.srvRecords[interface]?.data == record.data {
             resolver.srvRecords.removeValue(forKey: interface)
+            if interface == resolver.addressInterface, record.port == resolver.port,
+               record.hostname == resolver.hostname {
+                if let replacement = resolver.srvRecords.values.sorted(by: { $0.interface < $1.interface }).first {
+                    resolver.resolveAddress(for: replacement)
+                } else {
+                    if let addressRef = resolver.addressRef { DNSServiceRefDeallocate(addressRef) }
+                    resolver.addressRef = nil
+                    resolver.ipv6Publication?.cancel()
+                    resolver.ipv6Publication = nil
+                    resolver.addresses.removeAll()
+                    resolver.hostname = ""
+                    resolver.port = 0
+                    resolver.addressInterface = 0
+                    resolver.onEndpoint(nil)
+                }
+            }
         }
     }
 
-    private static let resolveReply: DNSServiceResolveReply = { reference, _, interface, error, _, host, networkPort, _, _, context in
-        guard let context else { return }
-        let resolver = Unmanaged<BonjourServiceResolver>.fromOpaque(context).takeUnretainedValue()
-        guard reference == resolver.resolveRef else { return }
-        guard error == kDNSServiceErr_NoError else { resolver.recoverOnQueue(); return }
-        guard let host else { return }
-        let port = UInt16(bigEndian: networkPort)
-        let hostname = String(cString: host).trimmingCharacters(in: CharacterSet(charactersIn: "."))
-        guard port > 0, !hostname.isEmpty else { return }
-        if hostname == resolver.hostname, port == resolver.port, resolver.addressRef != nil { return }
-        if let addressRef = resolver.addressRef { DNSServiceRefDeallocate(addressRef) }
-        resolver.ipv6Publication?.cancel()
-        resolver.ipv6Publication = nil
-        resolver.addressRef = nil
-        resolver.addresses.removeAll()
-        resolver.hostname = hostname
-        resolver.port = port
-        resolver.onEndpoint(nil)
-        let status = DNSServiceGetAddrInfo(&resolver.addressRef, DNSServiceFlags(kDNSServiceFlagsForceMulticast),
-            interface, DNSServiceProtocol(kDNSServiceProtocol_IPv4 | kDNSServiceProtocol_IPv6),
-            hostname, BonjourServiceResolver.addressReply, context)
-        guard status == kDNSServiceErr_NoError, let addressRef = resolver.addressRef else { resolver.recoverOnQueue(); return }
-        if DNSServiceSetDispatchQueue(addressRef, resolver.queue) != kDNSServiceErr_NoError {
-            resolver.recoverOnQueue()
+    private func resolveAddress(for record: SRVRecord) {
+        guard let hostname = record.hostname, record.port > 0 else { return }
+        if hostname == self.hostname, record.port == port, record.interface == addressInterface, addressRef != nil { return }
+        if let addressRef { DNSServiceRefDeallocate(addressRef) }
+        ipv6Publication?.cancel()
+        ipv6Publication = nil
+        addressRef = nil
+        addresses.removeAll()
+        self.hostname = hostname
+        port = record.port
+        addressInterface = record.interface
+        if type == "_adb-tls-pairing._tcp" {
+            log("Pairing SRV received, host=\(hostname), port=\(port), interface=\(record.interface); resolving address")
+        }
+        onEndpoint(nil)
+        let status = DNSServiceGetAddrInfo(&addressRef, DNSServiceFlags(kDNSServiceFlagsForceMulticast),
+            record.interface, DNSServiceProtocol(kDNSServiceProtocol_IPv4 | kDNSServiceProtocol_IPv6),
+            hostname, Self.addressReply, Unmanaged.passUnretained(self).toOpaque())
+        guard status == kDNSServiceErr_NoError, let addressRef else {
+            log("Address query could not start, dnsError=\(status)")
+            recoverOnQueue(); return
+        }
+        if DNSServiceSetDispatchQueue(addressRef, queue) != kDNSServiceErr_NoError {
+            recoverOnQueue()
         }
     }
 
@@ -332,7 +381,10 @@ nonisolated final class BonjourServiceResolver: @unchecked Sendable {
         let resolver = Unmanaged<BonjourServiceResolver>.fromOpaque(context).takeUnretainedValue()
         guard reference == resolver.addressRef else { return }
         if error != kDNSServiceErr_NoError {
-            if error != kDNSServiceErr_NoSuchRecord { resolver.recoverOnQueue() }
+            if error != kDNSServiceErr_NoSuchRecord {
+                resolver.log("Address query failed, dnsError=\(error)")
+                resolver.recoverOnQueue()
+            }
             return
         }
         guard let address else { return }
@@ -361,6 +413,7 @@ final class WirelessDiscovery: NSObject, NetServiceBrowserDelegate, NetServiceDe
     private var resolving = Set<String>()
     private var continuousResolvers: [String: BonjourServiceResolver] = [:]
     private var resolverIDs: [String: UUID] = [:]
+    private var requestedPairingNames = Set<String>()
     private var rejectedTargets: [String: Date] = [:]
     private let resolutionInterval: TimeInterval
     private let makeService: (NetService) -> NetService
@@ -468,12 +521,40 @@ final class WirelessDiscovery: NSObject, NetServiceBrowserDelegate, NetServiceDe
             browser.searchForServices(ofType: type, inDomain: "local.")
             browsers.append(browser)
         }
+        for name in requestedPairingNames { resolvePairingService(name: name) }
+    }
+
+    /// The QR tells us the exact instance name before the phone publishes it.
+    /// Ask for its SRV/address records immediately instead of requiring a browse
+    /// PTR response first. Keep this query open while the QR is displayed.
+    func watchPairingService(name: String) {
+        start()
+        requestedPairingNames.insert(name)
+        resolvePairingService(name: name)
+    }
+
+    private func resolvePairingService(name: String) {
+        observeService(NetService(domain: "local.", type: "_adb-tls-pairing._tcp.", name: name))
+    }
+
+    func stopWatchingPairingService(name: String) {
+        guard requestedPairingNames.remove(name) != nil else { return }
+        let key = "_adb-tls-pairing._tcp./" + name
+        resolverIDs.removeValue(forKey: key)
+        continuousResolvers.removeValue(forKey: key)?.stop()
+        services.removeValue(forKey: key)?.stop()
+        advertised.removeValue(forKey: key)
+        resolved.removeValue(forKey: key)
+        resolvedAt.removeValue(forKey: key)
+        resolutionStarted.removeValue(forKey: key)
+        resolving.remove(key)
     }
 
     func stop() {
         continuousResolvers.values.forEach { $0.stop() }
         continuousResolvers.removeAll()
         resolverIDs.removeAll()
+        requestedPairingNames.removeAll()
         browsers.forEach { $0.stop() }
         services.values.forEach { $0.stop() }
         browsers.removeAll()
@@ -571,6 +652,7 @@ final class WirelessDiscovery: NSObject, NetServiceBrowserDelegate, NetServiceDe
         resolvedAt.removeValue(forKey: key)
         resolutionStarted.removeValue(forKey: key)
         resolving.remove(key)
+        if requestedPairingNames.contains(service.name) { resolvePairingService(name: service.name) }
         onChange?()
     }
 

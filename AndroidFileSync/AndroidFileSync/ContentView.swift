@@ -613,6 +613,10 @@ struct ContentView: View {
                     selectedFiles.removeAll()
                     folderSizes = [:]
                     _folderSizesBuffer = [:]
+                    directoryCache.removeAll()
+                    directoryCacheOrder.removeAll()
+                    pathHistory.removeAll()
+                    forwardHistory.removeAll()
                     isLoading = false
                     isLoadingMetadata = false
                 }
@@ -704,6 +708,8 @@ struct ContentView: View {
                     isRefreshingRecognizedDevices: deviceManager.isRefreshingRecognizedDevices,
                     lastRecognizedRefreshDate: deviceManager.lastRecognizedRefreshDate,
                     recognizedRefreshError: deviceManager.recognizedRefreshError,
+                    connectingWirelessSerials: deviceManager.connectingWirelessSerials,
+                    recognizedConnectionErrors: deviceManager.recognizedConnectionErrors,
                     userDisconnected: deviceManager.userDisconnected,
                     unavailableDevice: deviceManager.availableDevices.first { $0.status != "device" },
                     onRetry: {
@@ -714,6 +720,12 @@ struct ContentView: View {
                     },
                     onRefreshRecognizedDevices: {
                         Task { await deviceManager.refreshRecognizedWirelessDevices() }
+                    },
+                    onConnectRecognizedDevice: { serial in
+                        Task { await deviceManager.connectRecognizedWirelessDevice(serial: serial) }
+                    },
+                    onRemoveRecognizedDevice: { serial in
+                        deviceManager.removeRecognizedWirelessDevice(serial: serial)
                     },
                     isUSBOccupied: isUSBOccupied,
                     isClaimingUSB: isClaimingUSB,
