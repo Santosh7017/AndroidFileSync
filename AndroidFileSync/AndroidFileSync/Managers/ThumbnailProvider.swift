@@ -418,3 +418,4 @@ class ThumbnailProvider: ObservableObject {
         return value.isEmpty ? nil : value
     }
 }
+

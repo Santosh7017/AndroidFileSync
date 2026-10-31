@@ -140,7 +140,7 @@ final class QRPairingService: ObservableObject {
             if pairCode == 0 && combined.lowercased().contains("successfully paired") {
                 await connectAfterPair(endpoint: endpoint)
             } else {
-                AppLogger.log("📷 [QRPairing] Pairing handshake failed for \(endpoint.target): \(combined)", level: .error)
+                AppLogger.log("📷 [QRPairing] Pairing failed for \(endpoint.target): \(combined)", level: .error)
                 if combined.lowercased().contains("unable to start pairing client") {
                     state = .failed(ADBManager.pairingConnectionFailureMessage(combined, usingQRCode: true))
                 } else if combined.lowercased().contains("wrong password or connection was dropped") {
