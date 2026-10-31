@@ -909,6 +909,10 @@ struct WirelessConnectView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
+                Text("If macOS asks, allow Local Network access.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
             }
         }
         .frame(maxWidth: .infinity)
@@ -990,7 +994,12 @@ struct WirelessConnectView: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
-                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+            if message.contains("Local Network"),
+               let settingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork") {
+                Link("Open Local Network Settings", destination: settingsURL)
+                    .font(.caption.weight(.medium))
+            }
         }
         .frame(maxWidth: .infinity)
         .padding(24)

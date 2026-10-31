@@ -3196,12 +3196,15 @@ class ADBManager {
             ? "Keep 'Pair device with QR code' open on your phone, click Try Again and scan the new QR."
             : "Re-open 'Pair device with pairing code' on your phone and enter its current address and code."
         if lower.contains("operation not permitted") || lower.contains("permission denied") {
-            return "Phone detected, but macOS blocked the pairing connection. Allow AndroidFileSync in System Settings → Privacy & Security → Local Network, then retry."
+            return "Phone detected, but macOS blocked the pairing connection. Check AndroidFileSync in System Settings → Privacy & Security → Local Network." + AppCodeSigning.localNetworkGuidance
         }
         if lower.contains("connection refused") {
             return "Phone detected, but its pairing port is closed. " + retry
         }
-        if lower.contains("host is down") || lower.contains("no route to host") || lower.contains("network is unreachable") || lower.contains("timed out") {
+        if lower.contains("no route to host") {
+            return "Phone detected, but ADB could not reach its pairing port. Check Local Network access, your Wi-Fi, VPN and router isolation." + AppCodeSigning.localNetworkGuidance
+        }
+        if lower.contains("host is down") || lower.contains("network is unreachable") || lower.contains("timed out") {
             return "Phone detected, but its pairing port cannot be reached. Use the same Wi-Fi network and check whether a VPN or router blocks connections between devices. " + retry
         }
         return "Phone detected, but ADB could not open the pairing connection. " + retry
@@ -3226,6 +3229,11 @@ class ADBManager {
         isPairingInProgress = true
         // A cancelled QR generation must not clear its replacement's guard.
         defer { if isCurrent() { isPairingInProgress = false } }
+
+        guard let address = WirelessEndpoint.address(from: target) else {
+            return (-1, "", "Invalid pairing address or port")
+        }
+        AppLogger.log("🔏 [AppIdentity] \(AppCodeSigning.diagnosticDescription)")
         let diagnostics = ADBPairingDiagnostics(environment: environment)
 
         func attempt(_ number: Int) async -> (Int32, String, String) {
@@ -3257,6 +3265,25 @@ class ADBManager {
             isPairingInProgress = true
             guard restarted else { return first }
             return await attempt(2)
+        }
+
+        // A UDP path is a diagnostic, not a veto on ADB's TCP pairing socket.
+        // Ask only after an actual ADB failure, and never replace its result with
+        // a UDP timeout or assume the System Settings toggle is disabled.
+        if let reason = diagnostics.socketFailure(target: target, code: code) {
+            AppLogger.log("📶 [Pairing] First pairing socket failure: \(reason)", level: .warning)
+        }
+        AppLogger.log("📶 [Pairing] Diagnosing the app's UDP mDNS path after the ADB failure.")
+        let access = await PairingNetworkAccess.check(host: address.host)
+        guard !Task.isCancelled, isCurrent() else { return cancelled }
+        switch access {
+        case .denied(let detail):
+            AppLogger.log("📶 [Pairing] UDP mDNS path reports Local Network denial: \(detail). Continuing the ADB TCP pairing retry.", level: .warning)
+        case .cancelled: return cancelled
+        case .allowed:
+            AppLogger.log("📶 [Pairing] App UDP mDNS query succeeded; ADB TCP access still requires its own handshake.")
+        case .unavailable(let reason):
+            AppLogger.log("📶 [Pairing] UDP mDNS check inconclusive: \(reason). Continuing the ADB TCP pairing retry.", level: .warning)
         }
 
         // The bundled CLI misreads the daemon's OKAY + FAIL framing. Decode the

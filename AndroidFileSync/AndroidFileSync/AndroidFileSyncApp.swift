@@ -75,6 +75,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         AppLogger.addSessionSeparator()
         AppLogger.log("🚀 AndroidFileSync started successfully on macOS.")
+        AppLogger.log("🔏 [AppIdentity] \(AppCodeSigning.diagnosticDescription)",
+                      level: AppCodeSigning.hasAppleIdentity ? .info : .warning)
         guard let window = NSApp.windows.first,
               let contentView = window.contentView else {
             return
