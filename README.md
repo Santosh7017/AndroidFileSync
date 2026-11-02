@@ -268,7 +268,9 @@ AndroidFileSync supports familiar Finder-like keyboard shortcuts for fast, mouse
 | Trash won't empty                   | Disconnect and reconnect your device, then try again.                                        |
 | App won't launch                    | Make sure you're on macOS 13.0 or newer, and that you ran the `xattr` command from step 3.   |
 
-If QR pairing detects the phone but reports **Unable to start pairing client** or **No route to host**, check **System Settings → Privacy & Security → Local Network** first. macOS 27 can report blocked local-network connections as “No route to host” even when Bonjour discovers the phone. Allow **AndroidFileSync** (and **adb**, if listed), restart the app, and scan a fresh QR with **Pair device with QR code** still open on your phone. AndroidFileSync checks native Local Network access before starting the pairing handshake and waits briefly for the macOS permission prompt. The error card links directly to Local Network settings. If access is already allowed, check whether a VPN, guest Wi-Fi, or router isolation blocks connections between your Mac and phone. Pairing code uses the same network connection. Diagnostics include the underlying socket error when ADB provides it.
+If QR pairing detects the phone but reports **Unable to start pairing client** or **No route to host**, check **System Settings → Privacy & Security → Local Network**. If access is enabled but macOS still blocks the connection, check the build's signing identity: unsigned and ad hoc signed apps cannot reliably retain their Local Network permission across updates. Install an Apple-signed build in **Applications**, quit other copies, then open **Pair device with QR code** and scan a fresh QR. Also check whether a VPN, guest Wi-Fi, or router isolation blocks connections between your Mac and phone. AndroidFileSync attempts the actual ADB TCP handshake first; UDP mDNS diagnostics never prevent pairing. Fresh logs include the app's signing identity, version, UDP path reason, and ADB socket error when available.
+
+
 
 ---
 
