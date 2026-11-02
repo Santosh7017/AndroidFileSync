@@ -46,15 +46,18 @@ nonisolated enum AppCodeSigning {
         var code: SecCode?
         let copied = SecCodeCopySelf(SecCSFlags(), &code)
         guard copied == errSecSuccess, let code else { return .invalid(copied) }
+        var staticCode: SecStaticCode?
+        let copiedStatic = SecCodeCopyStaticCode(code, SecCSFlags(), &staticCode)
+        guard copiedStatic == errSecSuccess, let staticCode else { return .invalid(copiedStatic) }
         var information: CFDictionary?
-        let status = SecCodeCopySigningInformation(code,
+        let status = SecCodeCopySigningInformation(staticCode,
             SecCSFlags(rawValue: kSecCSSigningInformation), &information)
         if status == errSecCSUnsigned { return .unsigned }
         guard status == errSecSuccess, let info = information as? [String: Any] else {
             return .invalid(status)
         }
         let flags = (info[kSecCodeInfoFlags as String] as? NSNumber)?.uint32Value ?? 0
-        if flags & UInt32(kSecCodeSignatureAdhoc) != 0 { return .adHoc }
+        if SecCodeSignatureFlags(rawValue: flags).contains(.adhoc) { return .adHoc }
         var requirement: SecRequirement?
         let created = SecRequirementCreateWithString("anchor apple generic" as CFString,
             SecCSFlags(), &requirement)

@@ -36,6 +36,7 @@
 				Managers/AppManager.swift,
 				Managers/ConnectionHealthMonitor.swift,
 				Managers/DeviceManager.swift,
+				Managers/DonationPromptManager.swift,
 				Managers/DownloadManager.swift,
 				Managers/FileActionManager.swift,
 				Managers/FilePreviewManager.swift,
@@ -53,8 +54,8 @@
 				Models/AppInfo.swift,
 				Models/Models.swift,
 				Resources/adb,
-				Utilities/CommandProcess.swift,
 				Utilities/AppCodeSigning.swift,
+				Utilities/CommandProcess.swift,
 				Utilities/ConflictDialog.swift,
 				Utilities/DropCoordinator.swift,
 				Utilities/FileBrowserKeyboardNavigation.swift,
@@ -353,8 +354,8 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = Info.plist;
 				HEADER_SEARCH_PATHS = /opt/homebrew/include;
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -403,8 +404,8 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = Info.plist;
 				HEADER_SEARCH_PATHS = /opt/homebrew/include;
+				INFOPLIST_FILE = Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
