@@ -142,7 +142,8 @@ class FileActionManager: ObservableObject {
     
     // Trash functionality
     @Published var trashedItems: [TrashedItem] = []
-    private let trashFolderPath = "/storage/emulated/0/.AndroidFileSync_Trash"
+    var internalStoragePath = "/storage/emulated/0"
+    private var trashFolderPath: String { internalStoragePath + "/.AndroidFileSync_Trash" }
     
     init() {
         // Load trashed items from UserDefaults

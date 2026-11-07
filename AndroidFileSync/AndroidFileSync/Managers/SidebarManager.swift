@@ -27,12 +27,17 @@ class SidebarManager: ObservableObject {
 
     /// Dynamically injected SD card item (nil when no card detected)
     @Published var sdCardItem: QuickAccessItem? = nil
+    @Published private(set) var internalStoragePath = "/storage/emulated/0"
 
     // MARK: - Computed
 
     /// All currently visible sidebar items (built-in - hidden + SD card if present + custom)
     var visibleItems: [QuickAccessItem] {
-        var builtIn = QuickAccessItem.commonFolders.filter { !hiddenBuiltInPaths.contains($0.path) }
+        var builtIn = QuickAccessItem.commonFolders.filter { !hiddenBuiltInPaths.contains($0.path) }.map { item in
+            QuickAccessItem(name: item.name, icon: item.icon,
+                path: internalStoragePath + item.path.dropFirst("/storage/emulated/0".count),
+                color: item.color, isBuiltIn: true)
+        }
         // Insert SD card right after Internal Storage if detected
         if let sd = sdCardItem {
             let insertIndex = builtIn.firstIndex(where: { $0.name == "Internal Storage" }).map { $0 + 1 } ?? 1
@@ -54,7 +59,8 @@ class SidebarManager: ObservableObject {
     /// Updates `existingPaths` and `checkedPaths` on the main actor.
     func checkExistence() async {
         let paths = visibleItems.map(\.path)
-        guard !paths.isEmpty else { return }
+        let storageSnapshot = internalStoragePath
+        guard !paths.isEmpty, let serial = ADBManager.activeDeviceSerial else { return }
 
         // Build a single compound ADB shell command to check all paths at once:
         // For each path: "[ -d '/path' ] && echo 1 || echo 0"
@@ -72,7 +78,7 @@ class SidebarManager: ObservableObject {
                     let escaped = path.replacingOccurrences(of: "'", with: "'\\''")
                     let (_, output, _) = await Shell.runAsync(
                         adbPath,
-                        args: ADBManager.deviceArgs(["shell", "[ -d '\(escaped)' ] && echo 1 || echo 0"])
+                        args: ["-s", serial, "shell", "[ -d '\(escaped)' ] && echo 1 || echo 0"]
                     )
                     let exists = output.trimmingCharacters(in: .whitespacesAndNewlines) == "1"
                     return (path, exists)
@@ -86,6 +92,9 @@ class SidebarManager: ObservableObject {
         }
 
         await MainActor.run {
+            guard ADBManager.activeDeviceSerial == serial, self.internalStoragePath == storageSnapshot else { return }
+            // Keep the storage entry navigable even when Android denies access.
+            newExisting.insert(storageSnapshot)
             self.existingPaths = newExisting
             self.checkedPaths = newChecked
         }
@@ -97,11 +106,11 @@ class SidebarManager: ObservableObject {
     /// Pass nil to remove the SD card entry (device disconnected or no card).
     func updateSDCard(path: String?) {
         guard let path else {
+            if let oldPath = sdCardItem?.path {
+                existingPaths.remove(oldPath)
+                checkedPaths.remove(oldPath)
+            }
             sdCardItem = nil
-            // Remove any stale SD card paths from tracking sets
-            let sdPaths = checkedPaths.filter { $0.hasPrefix("/storage/") && $0 != "/storage/emulated/0" }
-            existingPaths.subtract(sdPaths)
-            checkedPaths.subtract(sdPaths)
             return
         }
         sdCardItem = QuickAccessItem(
@@ -118,6 +127,13 @@ class SidebarManager: ObservableObject {
 
     // MARK: - Mutations
 
+    func updateInternalStorage(path: String) {
+        internalStoragePath = path
+        existingPaths.removeAll()
+        checkedPaths.removeAll()
+        Task { await checkExistence() }
+    }
+
     /// Add the given Android path as a custom sidebar item.
     /// Silently ignores duplicates. Then re-checks existence.
     func addItem(name: String, path: String, icon: String = "folder.fill", color: String = "blue") {
@@ -132,7 +148,7 @@ class SidebarManager: ObservableObject {
     /// Remove a sidebar item. Built-ins are hidden (restorable); custom items are deleted.
     func removeItem(_ item: QuickAccessItem) {
         if item.isBuiltIn {
-            hiddenBuiltInPaths.insert(item.path)
+            hiddenBuiltInPaths.insert("/storage/emulated/0" + item.path.dropFirst(internalStoragePath.count))
         } else {
             customItems.removeAll { $0.id == item.id }
             existingPaths.remove(item.path)

@@ -1149,7 +1149,8 @@ class ADBManager {
             throw NSError(
                 domain: "ADBError",
                 code: Int(code),
-                userInfo: [NSLocalizedDescriptionKey: error.isEmpty ? "Failed to list files" : error]
+                userInfo: [NSLocalizedDescriptionKey: AndroidStorageAccess.commandError(
+                    (code, output, error), fallback: "Failed to list files")]
             )
         }
         
@@ -1601,8 +1602,7 @@ class ADBManager {
         AppLogger.log("📱   MediaStore total count: \(totalMediaStoreCount) (images+rp+videos+files)")
         
         if lsLines.count == 0 && totalMediaStoreCount == 0 {
-            AppLogger.log("📱   ❌ DIAGNOSIS: Both ls AND MediaStore return 0")
-            AppLogger.log("📱   ❌ Likely causes: FUSE/Scoped Storage blocking ls, SELinux policy, OR Samsung 'USB debugging (Security settings)' not enabled")
+            AppLogger.log("📱   No Camera entries were returned by ls or the Camera-specific MediaStore queries. This does not mean all device storage is empty or inaccessible.")
         } else if lsLines.count > 0 && totalMediaStoreCount == 0 {
             AppLogger.log("📱   ⚠️ DIAGNOSIS: ls sees \(lsLines.count) files but MediaStore returns 0")
             AppLogger.log("📱   ⚠️ Possible causes:")
@@ -1620,13 +1620,7 @@ class ADBManager {
     // MARK: - content:// Media Provider fallback
     
     private static func resolvePhysicalPath(_ path: String) -> String {
-        var p = path
-        if p.hasPrefix("/sdcard") {
-            p = "/storage/emulated/0" + p.dropFirst("/sdcard".count)
-        } else if p.hasPrefix("sdcard") {
-            p = "/storage/emulated/0" + p.dropFirst("sdcard".count)
-        }
-        return p
+        AndroidStorageAccess.canonicalPath(path)
     }
     
     /// Fallback for DCIM/Camera where direct `ls` may be blocked by Android FUSE/Scoped Storage.
@@ -3000,7 +2994,8 @@ class ADBManager {
         let escapedPath = path.replacingOccurrences(of: "'", with: "'\\''")
         let command = "mkdir -p '\(escapedPath)'"
         
-        let (code, _, error) = await Shell.runAsync(adbPath, args: deviceArgs(["shell", command]))
+        let (code, output, stderr) = await Shell.runAsync(adbPath, args: deviceArgs(["shell", command]))
+        let error = AndroidStorageAccess.commandError((code, output, stderr), fallback: "Failed to create folder")
         
         if code != 0 {
             if error.contains("Read-only") {
@@ -3061,7 +3056,8 @@ class ADBManager {
             command = "echo '\(escapedContent)' > '\(escapedPath)'"
         }
         
-        let (code, _, error) = await Shell.runAsync(adbPath, args: deviceArgs(["shell", command]))
+        let (code, output, stderr) = await Shell.runAsync(adbPath, args: deviceArgs(["shell", command]))
+        let error = AndroidStorageAccess.commandError((code, output, stderr), fallback: "Failed to create file")
         
         if code != 0 {
             if error.contains("Read-only") {
@@ -3550,15 +3546,7 @@ class ADBManager {
     // MARK: - Media Scanner
     
     private static func normalizeMediaPath(_ path: String) -> String {
-        var p = path
-        if p.hasPrefix("/sdcard") {
-            p = "/storage/emulated/0" + p.dropFirst(7)
-        } else if p.hasPrefix("sdcard") {
-            p = "/storage/emulated/0" + p.dropFirst(6)
-        } else if p.hasPrefix("/mnt/sdcard") {
-            p = "/storage/emulated/0" + p.dropFirst(11)
-        }
-        return p
+        AndroidStorageAccess.canonicalPath(path)
     }
 
     /// Triggers the Android media scanner for a specific file path so it appears in the Gallery

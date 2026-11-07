@@ -30,6 +30,10 @@ class DeviceManager: ObservableObject {
     @Published var availableDevices: [ADBManager.ConnectedDevice] = []
     /// Path to the physical SD card if one is inserted, e.g. "/storage/1A2B-3C4D"
     @Published var sdCardPath: String? = nil
+    @Published private(set) var internalStoragePath = "/storage/emulated/0"
+    @Published private(set) var isRepairingStorage = false
+    private var storageDiagnosticSerial: String?
+    private var storageDiagnosticLog = StorageDiagnosticLog()
     /// Storage stats keyed by path (internal / SD card)
     @Published var storageStats: [String: StorageInfo] = [:]
     /// True when there is an active file transfer — prevents false USB disconnects from ADB contention
@@ -1196,18 +1200,20 @@ class DeviceManager: ObservableObject {
     /// distinct from "emulated", "self", and "sdcard" which are internal aliases.
     func detectSDCard() async {
         let adbPath = ADBManager.getADBPath()
-        guard !adbPath.isEmpty else { return }
+        guard !adbPath.isEmpty, let serial = ADBManager.activeDeviceSerial else { return }
 
-        let (_, output, _) = await Shell.runAsync(
+        let (code, output, _) = await Shell.runAsyncWithTimeout(
             adbPath,
-            args: ADBManager.deviceArgs(["shell", "ls", "/storage/"])
+            args: ["-s", serial, "shell", "ls", "-1", "/storage/"], timeoutSeconds: 5
         )
+        guard !Task.isCancelled, ADBManager.activeDeviceSerial == serial else { return }
 
         let systemVolumes: Set<String> = ["emulated", "self", "sdcard", ""]
         let sdUUID = output
             .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .first { !systemVolumes.contains($0) && !$0.isEmpty }
+            .first { code == 0 && !systemVolumes.contains($0)
+                && $0.range(of: "^[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}$", options: .regularExpression) != nil }
 
         let detectedPath: String? = sdUUID.map { "/storage/\($0)" }
 
@@ -1234,7 +1240,7 @@ class DeviceManager: ObservableObject {
 
         async let internalFetch = Shell.runAsync(
             adbPath,
-            args: ADBManager.deviceArgs(["shell", "df", "-k", "/storage/emulated/0"])
+            args: ADBManager.deviceArgs(["shell", "df", "-k", internalStoragePath])
         )
         async let sdFetch: (Int32, String, String)? = {
             guard let sdPath = await self.sdCardPath else { return nil }
@@ -1247,7 +1253,8 @@ class DeviceManager: ObservableObject {
         var newStats: [String: StorageInfo] = [:]
 
         if let info = parseDfOutput(internalOut) {
-            newStats["/storage/emulated/0"] = info
+            newStats[internalStoragePath] = info
+            newStats["/storage/emulated/0"] = info // Device information views use this key.
         }
         if let (_, sdOut, _) = sdResult, let sdPath = sdCardPath,
            let info = parseDfOutput(sdOut) {
@@ -1480,19 +1487,93 @@ class DeviceManager: ObservableObject {
             )
         }
         
-        // Convert the UnifiedFile callback to an ADBFile callback for ADBManager
+        // Keep direct file I/O on the accessible mount even when MediaStore
+        // returns canonical paths that the debugging shell cannot use.
+        let storagePath = internalStoragePath
+        func unified(_ file: ADBFile) -> UnifiedFile {
+            UnifiedFile(name: file.name, path: AndroidStorageAccess.path(file.path, through: storagePath),
+                        isDirectory: file.isDirectory, size: file.size, modificationDate: file.modificationDate)
+        }
         let adbCallback: (([ADBFile]) -> Void)? = onPageLoaded.map { callback in
             return { adbFiles in
-                callback(adbFiles.map { UnifiedFile(from: $0) })
+                callback(adbFiles.map(unified))
             }
         }
         
         let adbFiles = try await ADBManager.listFiles(path: path, onPageLoaded: adbCallback)
-        return adbFiles.map { UnifiedFile(from: $0) }
+        return adbFiles.map(unified)
     }
     
     func getRealStoragePath() async -> String {
-        return "/storage/emulated/0" // Default fallback
+        guard let serial = ADBManager.activeDeviceSerial else { return "/storage/emulated/0" }
+        do {
+            let storage = try await AndroidStorageAccess(run: storageRunner(for: serial)).resolveWhenReady()
+            guard !Task.isCancelled, isConnected, ADBManager.activeDeviceSerial == serial else {
+                return "/storage/emulated/0"
+            }
+            internalStoragePath = storage.path
+            AppLogger.log("📂 [StorageAccess] Accessible storage: \(storage.path), Android user: \(storage.userID)")
+        } catch {
+            guard !Task.isCancelled, ADBManager.activeDeviceSerial == serial else { return "/storage/emulated/0" }
+            internalStoragePath = "/storage/emulated/0"
+            AppLogger.log("📂 [StorageAccess] Storage discovery failed: \(error.localizedDescription)", level: .warning)
+        }
+        return internalStoragePath
+    }
+
+    private func storageRunner(for serial: String) -> AndroidStorageAccess.Runner {
+        if storageDiagnosticSerial != serial {
+            storageDiagnosticSerial = serial
+            storageDiagnosticLog = StorageDiagnosticLog()
+        }
+        let log = storageDiagnosticLog
+        let adbPath = ADBManager.getADBPath()
+        let port = Shell.serverPortBySerial[serial] ?? (Shell.useDefaultServer ? 5037 : Shell.appADBServerPort)
+        return { command in
+            let result = await Shell.runAsyncWithTimeout(adbPath,
+                args: ["-P", String(port), "-s", serial, "shell", command], timeoutSeconds: 5,
+                environment: Shell.serverEnvironment(port: port))
+            await log.record(command, result: result)
+            return result
+        }
+    }
+
+    func repairStorageAccess() async throws -> String {
+        guard isConnected, let serial = ADBManager.activeDeviceSerial, !isRepairingStorage else {
+            throw AndroidStorageAccess.Failure.unavailable
+        }
+        isRepairingStorage = true
+        defer { isRepairingStorage = false }
+        let storage = try await AndroidStorageAccess(run: storageRunner(for: serial)).repair()
+        guard !Task.isCancelled, isConnected, ADBManager.activeDeviceSerial == serial else {
+            throw CancellationError()
+        }
+        internalStoragePath = storage.path
+        AppLogger.log("📂 [StorageAccess] File access recovered at \(storage.path)")
+        return storage.path
+    }
+
+    /// Available even with general logging disabled, and does not include directory contents.
+    func storageDiagnosticReport() async -> String {
+        guard let serial = ADBManager.activeDeviceSerial else { return "No device connected." }
+        let run = storageRunner(for: serial)
+        let log = storageDiagnosticLog
+        let storagePath = internalStoragePath
+        for command in ["getprop ro.product.model", "getprop ro.build.display.id", "getprop ro.build.version.sdk",
+                        "getprop sys.boot_completed", "getprop sys.user.0.ce_available",
+                        "getprop persist.sys.fuse", "getprop persist.sys.sdcardfs", "getprop ro.sys.sdcardfs",
+                        "getenforce", "id", "am get-current-user",
+                        "ls -ld /storage /storage/emulated /storage/emulated/0 /sdcard /storage/self/primary",
+                        "ls -ld /mnt/runtime /mnt/runtime/write /mnt/runtime/full /mnt/runtime/read /mnt/runtime/default /mnt/user/0/primary /mnt/user/0/emulated/0",
+                        "stat -c '%a|%u|%g|%n' /storage/emulated/0 /mnt/runtime/write/emulated/0 /mnt/runtime/full/emulated/0 /mnt/runtime/read/emulated/0 /mnt/runtime/default/emulated/0",
+                        "awk '$5 ~ \"^/(storage|mnt/(runtime|user))(/|$)\" {print}' /proc/self/mountinfo",
+                        "appops get --uid com.android.shell MANAGE_EXTERNAL_STORAGE",
+                        "appops get --uid com.android.shell LEGACY_STORAGE"] {
+            guard !Task.isCancelled else { break }
+            _ = await run(command)
+        }
+        let details = await log.report()
+        return "AndroidFileSync storage diagnostics\nStorage compatibility revision: 2\n\(AppCodeSigning.diagnosticDescription)\nStorage path: \(storagePath)\n\n\(details)\n"
     }
     
     /// Queries default port 5037 to check if there is a physical USB device occupied by another server.

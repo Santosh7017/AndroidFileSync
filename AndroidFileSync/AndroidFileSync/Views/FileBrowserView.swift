@@ -338,12 +338,17 @@ struct FileBrowserView: View {
             .split(separator: "/", omittingEmptySubsequences: true)
             .map(String.init)
 
-        let internalStoragePrefix = ["storage", "emulated", "0"]
+        let internalStoragePrefix = deviceStorageRoot.split(separator: "/").map(String.init)
         if segments.starts(with: internalStoragePrefix) {
             return Array(segments.dropFirst(internalStoragePrefix.count))
         }
 
         return segments
+    }
+
+    private var deviceStorageRoot: String {
+        // Keep resolved aliases out of the user-facing breadcrumb.
+        AndroidStorageAccess.storageRoot(for: currentPath) ?? "/storage/emulated/0"
     }
     
     @ViewBuilder

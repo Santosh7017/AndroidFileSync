@@ -44,21 +44,7 @@ final class DonationPromptManager: ObservableObject {
             UserDefaults.standard.set(Date(), forKey: firstUseDateKey)
         }
         incrementSession()
-
-        #if DEBUG
-        // ⚠️ DEBUG ONLY: Force-show donation prompt after 3 seconds for testing.
-        // Remove or comment out this block once testing is done.
-        scheduledPromptTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 3_000_000_000) // 3 seconds
-            await MainActor.run {
-                guard let self else { return }
-                self.scheduledPromptTask = nil
-                self.shouldShowPrompt = true
-            }
-        }
-        #else
         schedulePromptIfEligible()
-        #endif
     }
 
     // MARK: - Actions
@@ -125,30 +111,6 @@ final class DonationPromptManager: ObservableObject {
         UserDefaults.standard.set(current + 1, forKey: sessionCountKey)
     }
 
-    // MARK: - Debug / Testing
 
-    #if DEBUG
-    /// Force-show the donation prompt immediately, bypassing all eligibility checks.
-    /// Call from Xcode console: `DonationPromptManager.shared.debugForceShow()`
-    func debugForceShow() {
-        // Reset completed state so it can show even if previously dismissed
-        UserDefaults.standard.set(false, forKey: completedKey)
-        UserDefaults.standard.removeObject(forKey: lastPromptDateKey)
-        shouldShowPrompt = true
-    }
-
-    /// Reset all donation prompt state (for fresh testing).
-    /// Call from Xcode console: `DonationPromptManager.shared.debugReset()`
-    func debugReset() {
-        UserDefaults.standard.removeObject(forKey: firstUseDateKey)
-        UserDefaults.standard.removeObject(forKey: sessionCountKey)
-        UserDefaults.standard.removeObject(forKey: lastPromptDateKey)
-        UserDefaults.standard.removeObject(forKey: completedKey)
-        shouldShowPrompt = false
-        scheduledPromptTask?.cancel()
-        scheduledPromptTask = nil
-        print("🔧 [DonationPrompt] All state reset. Restart the app for a clean test.")
-    }
-    #endif
 }
 

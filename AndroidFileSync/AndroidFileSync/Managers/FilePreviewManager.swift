@@ -597,14 +597,7 @@ class FilePreviewManager: ObservableObject {
     
     /// Normalize `/sdcard/...` → `/storage/emulated/0/...` for MediaStore queries
     nonisolated static func resolveToPhysicalPath(_ path: String) -> String {
-        if path.hasPrefix("/sdcard") {
-            return "/storage/emulated/0" + path.dropFirst("/sdcard".count)
-        } else if path.hasPrefix("sdcard") {
-            return "/storage/emulated/0" + path.dropFirst("sdcard".count)
-        } else if path.hasPrefix("/mnt/sdcard") {
-            return "/storage/emulated/0" + path.dropFirst("/mnt/sdcard".count)
-        }
-        return path
+        AndroidStorageAccess.canonicalPath(path)
     }
     
     /// Parse MediaStore _id from content query output.

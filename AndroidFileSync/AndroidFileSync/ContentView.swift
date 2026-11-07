@@ -32,6 +32,8 @@ struct ContentView: View {
     @State private var pathHistory: [String] = []
     @State private var forwardHistory: [String] = []
     @State private var isLoading = false
+    @State private var fileLoadError: String?
+    @State private var storageRepairAvailable = false
     @State private var loadTask: Task<Void, Never>? = nil
     @State private var folderSizes: [String: UInt64] = [:]
     /// Buffer for collecting folder sizes off the main render cycle.
@@ -503,6 +505,9 @@ struct ContentView: View {
     private var contentWithAlerts: some View {
         layoutContent
             .alert("Error", isPresented: $showErrorAlert) {
+                if AndroidStorageAccess.isPermissionDenied(errorMessage) {
+                    Button("Fix storage access") { repairStorageAccess() }
+                }
                 Button("OK", role: .cancel) { fileActionManager.clearError() }
             } message: {
                 Text(errorMessage)
@@ -595,13 +600,29 @@ struct ContentView: View {
             .onChange(of: deviceManager.sdCardPath) { newPath in
                 sidebarManager.updateSDCard(path: newPath)
             }
+            .onChange(of: deviceManager.internalStoragePath) { newPath in
+                sidebarManager.updateInternalStorage(path: newPath)
+                fileActionManager.internalStoragePath = newPath
+            }
             .task(id: deviceManager.isConnected ? ADBManager.activeDeviceSerial : nil) {
                 guard deviceManager.isConnected, let serial = ADBManager.activeDeviceSerial else { return }
+                loadTask?.cancel()
+                files = []
+                displayedFiles = []
+                selectedFiles.removeAll()
+                directoryCache.removeAll()
+                directoryCacheOrder.removeAll()
+                fileLoadError = nil
+                isLoading = true
                 let path = await deviceManager.getRealStoragePath()
                 guard !Task.isCancelled, deviceManager.isConnected, ADBManager.activeDeviceSerial == serial else { return }
                 currentPath = path
+                sidebarManager.updateInternalStorage(path: path)
+                fileActionManager.internalStoragePath = path
                 pathHistory.removeAll()
                 forwardHistory.removeAll()
+                // Storage discovery must also run when the internal listing fails.
+                Task { await deviceManager.detectSDCard() }
                 await loadFiles()
             }
             .onChange(of: deviceManager.isConnected) { connected in
@@ -629,6 +650,8 @@ struct ContentView: View {
                     pathHistory.removeAll()
                     forwardHistory.removeAll()
                     isLoading = false
+                    fileLoadError = nil
+                    storageRepairAvailable = false
                     isLoadingMetadata = false
                 }
             }
@@ -943,6 +966,15 @@ struct ContentView: View {
                 } else {
                     // ── File Browser ──────────────────────────────────────────
                     VStack(spacing: 0) {
+                        if let fileLoadError {
+                            StorageAccessErrorView(message: fileLoadError,
+                                canRepair: storageRepairAvailable,
+                                isRepairing: deviceManager.isRepairingStorage,
+                                isLoading: isLoading,
+                                onRepair: repairStorageAccess,
+                                onRetry: retryFileAccess,
+                                onSaveDiagnostics: saveStorageDiagnostics)
+                        } else {
                         FileBrowserView(
                             files: displayedFiles,
                             currentPath: currentPath,
@@ -998,6 +1030,7 @@ struct ContentView: View {
                             thumbnailProvider: thumbnailProvider,
                             isInteractionEnabled: !filePreviewManager.showPreviewPanel
                         )
+                        }
                     }
                 }
 
@@ -1026,7 +1059,7 @@ struct ContentView: View {
                                     try await fileActionManager.createFolder(at: currentPath, name: name)
                                     await loadFiles()
                                     await deviceManager.fetchStorageInfo()
-                                } catch { print("Failed: \(error)") }
+                                } catch { presentFileOperationError(error) }
                             }
                         }
                     } label: {
@@ -1050,7 +1083,7 @@ struct ContentView: View {
                                     try await fileActionManager.createFile(at: currentPath, name: name)
                                     await loadFiles()
                                     await deviceManager.fetchStorageInfo()
-                                } catch { print("Failed: \(error)") }
+                                } catch { presentFileOperationError(error) }
                             }
                         }
                     } label: {
@@ -1375,8 +1408,73 @@ struct ContentView: View {
     private func refreshStorageStats() {
         Task { await deviceManager.fetchStorageInfo() }
     }
+
+    private func presentFileOperationError(_ error: Error) {
+        guard !(error is CancellationError) else { return }
+        errorMessage = error.localizedDescription
+        showErrorAlert = true
+    }
+
+    private func retryFileAccess() {
+        loadTask?.cancel()
+        let serial = ADBManager.activeDeviceSerial
+        loadTask = Task {
+            isLoading = true
+            if AndroidStorageAccess.storageRoot(for: currentPath) == currentPath {
+                let path = await deviceManager.getRealStoragePath()
+                guard !Task.isCancelled, ADBManager.activeDeviceSerial == serial else { return }
+                currentPath = path
+            }
+            await loadFiles()
+        }
+    }
+
+    private func repairStorageAccess() {
+        guard !deviceManager.isRepairingStorage else { return }
+        loadTask?.cancel()
+        let serial = ADBManager.activeDeviceSerial
+        isLoading = false
+        fileLoadError = AndroidStorageAccess.Failure.permissionDenied.localizedDescription
+        storageRepairAvailable = true
+        loadTask = Task {
+            do {
+                let path = try await deviceManager.repairStorageAccess()
+                guard !Task.isCancelled, ADBManager.activeDeviceSerial == serial else { return }
+                currentPath = path
+                pathHistory.removeAll()
+                forwardHistory.removeAll()
+                directoryCache.removeAll()
+                directoryCacheOrder.removeAll()
+                sidebarManager.updateInternalStorage(path: path)
+                fileActionManager.internalStoragePath = path
+                await loadFiles()
+            } catch {
+                guard !Task.isCancelled, ADBManager.activeDeviceSerial == serial else { return }
+                isLoading = false
+                fileLoadError = error.localizedDescription
+                if case AndroidStorageAccess.Failure.firmwareRestricted = error {
+                    storageRepairAvailable = false
+                }
+            }
+        }
+    }
+
+    private func saveStorageDiagnostics() {
+        Task {
+            let report = await deviceManager.storageDiagnosticReport()
+            let panel = NSSavePanel()
+            panel.title = "Save storage diagnostics"
+            panel.nameFieldStringValue = "AndroidFileSync-storage-diagnostics.txt"
+            panel.allowedContentTypes = [.plainText]
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            do { try report.write(to: url, atomically: true, encoding: .utf8) }
+            catch { presentFileOperationError(error) }
+        }
+    }
     
     private func loadFiles() async {
+        let pathSnapshot = currentPath
+        let serialSnapshot = ADBManager.activeDeviceSerial
         AppLogger.log("📂 [loadFiles] Request to load directory: \(currentPath) (connection: \(deviceManager.connectionType.rawValue))")
         // Check if cancelled early
         guard !Task.isCancelled else {
@@ -1414,14 +1512,13 @@ struct ContentView: View {
         // Do the expensive work completely off main thread
         var newFiles: [UnifiedFile]
         var receivedProgressiveUpdates = false
-        let pathSnapshot = currentPath
         do {
-            newFiles = try await deviceManager.listFiles(path: currentPath) { pageFiles in
+            newFiles = try await deviceManager.listFiles(path: pathSnapshot) { pageFiles in
                 // This callback fires for each page of content:// pagination results.
                 // Append to UI immediately so user can start browsing while more pages load.
                 receivedProgressiveUpdates = true
                 Task { @MainActor in
-                    guard self.currentPath == pathSnapshot else { return }
+                    guard self.currentPath == pathSnapshot, ADBManager.activeDeviceSerial == serialSnapshot else { return }
                     self.files.append(contentsOf: pageFiles)
                     if self.isLoading {
                         // First page arrived — stop spinner, show subtle "loading more" indicator
@@ -1432,8 +1529,17 @@ struct ContentView: View {
             }
         } catch {
             AppLogger.log("❌ [loadFiles] listFiles threw error: \(error.localizedDescription)", level: .error)
-            // Restore loading state and keep the existing file list intact instead of clearing it
             await MainActor.run {
+                guard !Task.isCancelled, self.currentPath == pathSnapshot,
+                      ADBManager.activeDeviceSerial == serialSnapshot else { return }
+                storageRepairAvailable = AndroidStorageAccess.isPermissionDenied(error.localizedDescription)
+                fileLoadError = storageRepairAvailable
+                    ? AndroidStorageAccess.Failure.permissionDenied.localizedDescription
+                    : "Couldn't open this folder. Unlock your device and try again."
+                files = []
+                selectedFiles.removeAll()
+                directoryCache.removeValue(forKey: pathSnapshot)
+                directoryCacheOrder.removeAll { $0 == pathSnapshot }
                 isLoading = false
                 isLoadingMoreFiles = false
                 downloadManager.resumeUpdates()
@@ -1443,7 +1549,7 @@ struct ContentView: View {
         AppLogger.log("📂 [loadFiles] Finished fetching files. Count: \(newFiles.count)\(receivedProgressiveUpdates ? " (progressive mode)" : "")")
         
         // Check before updating UI
-        guard !Task.isCancelled else {
+        guard !Task.isCancelled, currentPath == pathSnapshot, ADBManager.activeDeviceSerial == serialSnapshot else {
             AppLogger.log("⚠️ [loadFiles] Task cancelled AFTER fetching \(newFiles.count) files — results DISCARDED (user navigated away?)")
             await MainActor.run {
                 isLoading = false
@@ -1458,6 +1564,8 @@ struct ContentView: View {
             // The final newFiles array has stat-enriched metadata — replace to upgrade placeholders.
             // In normal mode (ls worked), this is the first and only update.
             self.files = newFiles
+            fileLoadError = nil
+            storageRepairAvailable = false
             isLoading = false
             isLoadingMoreFiles = false
             downloadManager.resumeUpdates()  // Resume progress updates
@@ -1607,6 +1715,8 @@ struct ContentView: View {
         pathHistory.append(currentPath)
         forwardHistory.removeAll()  // new navigation branch — clear forward stack
         currentPath = path
+        fileLoadError = nil
+        storageRepairAvailable = false
         isLoading = true
         isLoadingMetadata = false
         isLoadingMoreFiles = false
@@ -1631,6 +1741,8 @@ struct ContentView: View {
         selectedFiles.removeAll()
         
         currentPath = previousPath
+        fileLoadError = nil
+        storageRepairAvailable = false
         isLoadingMetadata = false
         isLoadingMoreFiles = false
         folderSizes = [:]
@@ -1664,6 +1776,8 @@ struct ContentView: View {
         // Push current path to back history
         pathHistory.append(currentPath)
         currentPath = nextPath
+        fileLoadError = nil
+        storageRepairAvailable = false
         isLoadingMetadata = false
         isLoadingMoreFiles = false
         folderSizes = [:]
@@ -1879,8 +1993,8 @@ struct ContentView: View {
             let totalBytes = allItems.reduce(UInt64(0)) { $0 + $1.fileSize }
             
             // Storage Capacity Pre-flight Check
-            let rootPath = path.hasPrefix("/storage/emulated") ? "/storage/emulated/0" : (path.components(separatedBy: "/").dropLast(path.components(separatedBy: "/").count - 3).joined(separator: "/"))
-            let resolvedStorageRoot = rootPath.isEmpty ? "/storage/emulated/0" : rootPath
+            let resolvedStorageRoot = AndroidStorageAccess.storageRoot(for: path)
+                ?? "/" + path.split(separator: "/").prefix(2).joined(separator: "/")
             
             if let stats = await MainActor.run(body: { self.deviceManager.storageStats[resolvedStorageRoot] }) {
                 let freeBytes = UInt64(stats.totalBytes - stats.usedBytes)
